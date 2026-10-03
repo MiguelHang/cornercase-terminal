@@ -48,6 +48,9 @@ const TOAST_ICON: &str = " ✓ ";
 const TOAST_MARGIN: u16 = 1;
 const NAME_RESERVED_COLS: usize = 6;
 const BEHIND_ICON: &str = "↓";
+const GROUP_INDENT: &str = "  ";
+pub const GROUP_ICONS: [char; 12] = ['●', '◉', '◐', '◆', '■', '▲', '▼', '★', '✦', '♥', '♣', '♠'];
+pub const GROUP_COLOURS: [u8; 16] = [1, 9, 208, 214, 3, 11, 2, 10, 6, 14, 4, 12, 99, 5, 13, 205];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Border {
@@ -409,39 +412,71 @@ pub fn more_above(list: Rect) -> Rect {
     if list.y < GAP { Rect::default() } else { Rect::new(list.x, list.y - GAP, list.width, 1) }
 }
 
-pub fn project_rows(list: Rect, pitch: u16, entries: usize, scroll: usize) -> Rows {
-    Rows { list, heights: vec![pitch; entries], button: pitch, scroll }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarRow {
+    Gap,
+    Group(usize),
+    Project(usize),
 }
 
-pub fn entry_row(list: Rect, pitch: u16, entries: usize, scroll: usize, i: usize) -> Rect {
-    project_rows(list, pitch, entries, scroll).item(i)
+pub fn sidebar_rows(groups: &[Option<usize>], collapsed: &[bool]) -> Vec<SidebarRow> {
+    let in_group = |g: Option<usize>| {
+        groups.iter().enumerate().filter(move |(_, group)| **group == g).map(|(p, _)| SidebarRow::Project(p))
+    };
+    let mut rows: Vec<SidebarRow> = in_group(None).collect();
+    for (g, &folded) in collapsed.iter().enumerate() {
+        if !rows.is_empty() {
+            rows.push(SidebarRow::Gap);
+        }
+        rows.push(SidebarRow::Group(g));
+        if !folded {
+            rows.extend(in_group(Some(g)));
+        }
+    }
+    rows
 }
 
-pub fn close_button(list: Rect, pitch: u16, entries: usize, scroll: usize, i: usize) -> Rect {
-    row_close_button(entry_row(list, pitch, entries, scroll, i))
+pub fn project_rows(list: Rect, pitch: u16, rows: &[SidebarRow], scroll: usize) -> Rows {
+    let heights = rows.iter().map(|r| if *r == SidebarRow::Gap { GAP } else { pitch }).collect();
+    Rows { list, heights, button: pitch, scroll }
 }
 
-pub fn new_project_button(list: Rect, pitch: u16, entries: usize) -> Rect {
-    project_rows(list, pitch, entries, 0).button()
+pub fn entry_row(list: Rect, pitch: u16, rows: &[SidebarRow], scroll: usize, row: SidebarRow) -> Rect {
+    let Some(i) = rows.iter().position(|r| *r == row) else { return Rect::default() };
+    project_rows(list, pitch, rows, scroll).item(i)
+}
+
+pub fn close_button(list: Rect, pitch: u16, rows: &[SidebarRow], scroll: usize, p: usize) -> Rect {
+    row_close_button(entry_row(list, pitch, rows, scroll, SidebarRow::Project(p)))
+}
+
+pub fn new_project_button(list: Rect, pitch: u16, rows: &[SidebarRow]) -> Rect {
+    project_rows(list, pitch, rows, 0).button()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarHit {
     Select(usize),
     Close(usize),
+    Group(usize),
     New,
 }
 
-pub fn sidebar_hit(list: Rect, pitch: u16, entries: usize, scroll: usize, pos: Position) -> Option<SidebarHit> {
+pub fn sidebar_hit(list: Rect, pitch: u16, rows: &[SidebarRow], scroll: usize, pos: Position) -> Option<SidebarHit> {
     if !list.contains(pos) {
         return None;
     }
-    let rows = project_rows(list, pitch, entries, scroll);
-    if rows.button().contains(pos) {
+    let layout = project_rows(list, pitch, rows, scroll);
+    if layout.button().contains(pos) {
         return Some(SidebarHit::New);
     }
-    let i = rows.at(pos)?;
-    Some(if row_close_button(rows.item(i)).contains(pos) { SidebarHit::Close(i) } else { SidebarHit::Select(i) })
+    let i = layout.at(pos)?;
+    match rows[i] {
+        SidebarRow::Gap => None,
+        SidebarRow::Group(g) => Some(SidebarHit::Group(g)),
+        SidebarRow::Project(p) if row_close_button(layout.item(i)).contains(pos) => Some(SidebarHit::Close(p)),
+        SidebarRow::Project(p) => Some(SidebarHit::Select(p)),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -515,8 +550,8 @@ pub fn workspace_hit(list: Rect, pitch: u16, tabs: &[usize], scroll: usize, pos:
     })
 }
 
-pub fn menu_area(area: Rect, at: Position, items: &[&str]) -> Rect {
-    let longest = items.iter().map(|item| item.chars().count()).max().unwrap_or(0);
+pub fn menu_area(area: Rect, at: Position, items: &[impl AsRef<str>]) -> Rect {
+    let longest = items.iter().map(|item| item.as_ref().chars().count()).max().unwrap_or(0);
     let width = u16::try_from(longest).unwrap_or(u16::MAX).saturating_add(4).min(area.width);
     let height = u16::try_from(items.len()).unwrap_or(u16::MAX).saturating_add(2).min(area.height);
     let x = at.x.min(area.right().saturating_sub(width));
@@ -1116,7 +1151,7 @@ impl Search {
 }
 
 pub enum Overlay {
-    Menu { at: Position, items: Vec<&'static str> },
+    Menu { at: Position, items: Vec<String> },
     Form(Form),
     Confirm(Confirm),
     Update(Update),
@@ -1134,6 +1169,14 @@ pub struct Entry {
 pub struct ProjectEntry {
     pub name: String,
     pub workspaces: usize,
+    pub group: Option<usize>,
+}
+
+pub struct GroupEntry {
+    pub name: String,
+    pub icon: char,
+    pub colour: u8,
+    pub collapsed: bool,
 }
 
 pub struct WorkspaceEntry {
@@ -1151,6 +1194,7 @@ pub struct TabView {
 }
 
 pub struct View<'a> {
+    pub groups: Vec<GroupEntry>,
     pub projects: Vec<ProjectEntry>,
     pub active: usize,
     pub projects_scroll: usize,
@@ -1172,6 +1216,12 @@ pub struct View<'a> {
 }
 
 impl View<'_> {
+    pub fn sidebar_rows(&self) -> Vec<SidebarRow> {
+        let groups: Vec<Option<usize>> = self.projects.iter().map(|p| p.group).collect();
+        let collapsed: Vec<bool> = self.groups.iter().map(|g| g.collapsed).collect();
+        sidebar_rows(&groups, &collapsed)
+    }
+
     pub fn tab_counts(&self) -> Vec<usize> {
         self.workspaces.iter().map(|w| w.tabs.len()).collect()
     }
@@ -1365,7 +1415,7 @@ fn overlay_block(title: &str) -> Block<'_> {
     }
 }
 
-fn draw_menu(f: &mut Frame, view: &View, at: Position, items: &[&str]) {
+fn draw_menu(f: &mut Frame, view: &View, at: Position, items: &[String]) {
     let menu = menu_area(f.area(), at, items);
     f.render_widget(Clear, menu);
     f.render_widget(overlay_block(""), menu);
@@ -1771,10 +1821,13 @@ fn draw_issue_rows(f: &mut Frame, view: &View, list: Rect, items: &[IssueRow], s
 
 fn draw_sidebar(f: &mut Frame, view: &View, areas: &Areas) {
     draw_title(f, areas.title, "projects");
-    let rows = project_rows(areas.list, areas.pitch, view.projects.len(), view.projects_scroll);
-    draw_entries(f, view, &rows);
+    let sidebar = view.sidebar_rows();
+    let rows = project_rows(areas.list, areas.pitch, &sidebar, view.projects_scroll);
+    draw_entries(f, view, &rows, &sidebar);
     let (above, below) = rows.hidden();
-    let count = |range: Range<usize>| (!range.is_empty()).then_some(range.len());
+    let count = |range: Range<usize>| {
+        (!range.is_empty()).then(|| sidebar[range].iter().filter(|r| **r != SidebarRow::Gap).count())
+    };
     draw_more(f, [more_above(areas.list), rows.more_below()], count(above), count(below));
     let r = rows.button();
     draw_button(f, r, " ", "+ new project", button_style(view, r, Style::default().fg(Color::Cyan), Color::Cyan));
@@ -2094,29 +2147,59 @@ fn draw_quit_button(f: &mut Frame, view: &View, r: Rect) {
     draw_button(f, r, " ", "quit", style);
 }
 
-fn draw_entries(f: &mut Frame, view: &View, rows: &Rows) {
-    for (i, entry) in view.projects.iter().enumerate() {
+fn draw_entries(f: &mut Frame, view: &View, rows: &Rows, sidebar: &[SidebarRow]) {
+    for (i, &row) in sidebar.iter().enumerate() {
         let r = rows.item(i);
         if r.is_empty() {
             continue;
         }
-        let active = i == view.active;
-        let (marker, title_style, bg) = if active {
-            ("▌ ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD), Style::default().bg(view.surface()))
-        } else {
-            ("  ", Style::default().fg(Color::Gray), Style::default())
-        };
-        let count = format!(" ({})", entry.workspaces);
-        let reserved = NAME_RESERVED_COLS + usize::from(row_close_button(r).width - CLOSE_BUTTON_WIDTH);
-        let max = usize::from(r.width).saturating_sub(reserved + count.chars().count());
-        let line = Line::from(vec![
-            Span::styled(marker, Style::default().fg(Color::Cyan)),
-            Span::styled(truncate_right(&entry.name, max), title_style),
-            Span::styled(count, Style::default().fg(Color::DarkGray)),
-        ]);
-        draw_band(f, r, line, bg);
-        draw_row_close(f, view, r, bg);
+        match row {
+            SidebarRow::Gap => {}
+            SidebarRow::Group(g) => draw_group(f, view, g, r),
+            SidebarRow::Project(p) => draw_project(f, view, p, r),
+        }
     }
+}
+
+fn draw_group(f: &mut Frame, view: &View, g: usize, r: Rect) {
+    let group = &view.groups[g];
+    let holds_active = view.has_project && view.projects.get(view.active).is_some_and(|p| p.group == Some(g));
+    let marker = if group.collapsed && holds_active { "▌ " } else { "  " };
+    let (arrow, count) = if group.collapsed {
+        ("▸ ", format!(" ({})", view.projects.iter().filter(|p| p.group == Some(g)).count()))
+    } else {
+        ("▾ ", String::new())
+    };
+    let colour = Style::default().fg(Color::Indexed(group.colour)).add_modifier(Modifier::BOLD);
+    let max = usize::from(r.width).saturating_sub(NAME_RESERVED_COLS + 2 + count.chars().count());
+    let line = Line::from(vec![
+        Span::styled(marker, Style::default().fg(Color::Cyan)),
+        Span::styled(arrow, Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{} {}", group.icon, truncate_right(&group.name, max)), colour),
+        Span::styled(count, Style::default().fg(Color::DarkGray)),
+    ]);
+    draw_band(f, r, line, Style::default());
+}
+
+fn draw_project(f: &mut Frame, view: &View, p: usize, r: Rect) {
+    let entry = &view.projects[p];
+    let (marker, title_style, bg) = if p == view.active {
+        ("▌ ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD), Style::default().bg(view.surface()))
+    } else {
+        ("  ", Style::default().fg(Color::Gray), Style::default())
+    };
+    let indent = if entry.group.is_some() { GROUP_INDENT } else { "" };
+    let count = format!(" ({})", entry.workspaces);
+    let reserved = NAME_RESERVED_COLS + indent.len() + usize::from(row_close_button(r).width - CLOSE_BUTTON_WIDTH);
+    let max = usize::from(r.width).saturating_sub(reserved + count.chars().count());
+    let line = Line::from(vec![
+        Span::styled(marker, Style::default().fg(Color::Cyan)),
+        Span::raw(indent),
+        Span::styled(truncate_right(&entry.name, max), title_style),
+        Span::styled(count, Style::default().fg(Color::DarkGray)),
+    ]);
+    draw_band(f, r, line, bg);
+    draw_row_close(f, view, r, bg);
 }
 
 pub fn folder_name(path: &Path, home: Option<&Path>) -> String {
@@ -2167,7 +2250,11 @@ mod tests {
 
     fn view(names: &[&str]) -> View<'static> {
         View {
-            projects: names.iter().map(|n| ProjectEntry { name: (*n).to_string(), workspaces: 1 }).collect(),
+            groups: Vec::new(),
+            projects: names
+                .iter()
+                .map(|n| ProjectEntry { name: (*n).to_string(), workspaces: 1, group: None })
+                .collect(),
             active: 0,
             has_project: false,
             workspaces: Vec::new(),
@@ -2188,14 +2275,26 @@ mod tests {
         }
     }
 
+    fn plain(projects: usize) -> Vec<SidebarRow> {
+        sidebar_rows(&vec![None; projects], &[])
+    }
+
     fn render(view: &View) -> Terminal<TestBackend> {
-        let mut t = Terminal::new(TestBackend::new(W, H)).expect("test backend");
+        render_sized(view, W, H)
+    }
+
+    fn render_sized(view: &View, width: u16, height: u16) -> Terminal<TestBackend> {
+        let mut t = Terminal::new(TestBackend::new(width, height)).expect("test backend");
         t.draw(|f| draw(f, view)).expect("draw");
         t
     }
 
     fn areas() -> Areas {
         layout(AREA, Widths::default())
+    }
+
+    fn row_text(t: &Terminal<TestBackend>, r: Rect) -> String {
+        (r.x..r.right()).map(|x| t.backend().buffer()[(x, r.y)].symbol().to_string()).collect()
     }
 
     fn list() -> Rect {
@@ -2415,7 +2514,7 @@ mod tests {
         #[test]
         fn a_border_ignores_the_hover_while_an_overlay_is_open() {
             let pos = middle(Border::Workspaces);
-            let menu = Overlay::Menu { at: Position::new(80, 1), items: vec!["rename tab"] };
+            let menu = Overlay::Menu { at: Position::new(80, 1), items: vec!["rename tab".into()] };
             let v = View { hover: Some(pos), overlay: Some(menu), ..view(&["~"]) };
             assert_eq!(render(&v).backend().buffer()[pos].fg, Color::DarkGray);
         }
@@ -2430,7 +2529,7 @@ mod tests {
         #[case::gap_before_the_new_button(3, 2, None)]
         #[case::new_button_after_two_entries(3, 3, Some(SidebarHit::New))]
         fn maps_rows_to_entries(#[case] x: u16, #[case] row: u16, #[case] expected: Option<SidebarHit>) {
-            assert_eq!(sidebar_hit(list(), 1, 2, 0, Position::new(x, list().y + row)), expected);
+            assert_eq!(sidebar_hit(list(), 1, &plain(2), 0, Position::new(x, list().y + row)), expected);
         }
 
         #[rstest]
@@ -2438,19 +2537,114 @@ mod tests {
         #[case::second(1)]
         fn close_button_closes_its_entry(#[case] i: u16) {
             let pos = Position::new(close_x(), list().y + i);
-            assert_eq!(sidebar_hit(list(), 1, 2, 0, pos), Some(SidebarHit::Close(usize::from(i))));
+            assert_eq!(sidebar_hit(list(), 1, &plain(2), 0, pos), Some(SidebarHit::Close(usize::from(i))));
         }
 
         #[rstest]
         #[case::brand(areas().brand.y)]
         #[case::title(areas().title.y)]
         fn header_rows_are_ignored(#[case] y: u16) {
-            assert_eq!(sidebar_hit(list(), 1, 1, 0, Position::new(3, y)), None);
+            assert_eq!(sidebar_hit(list(), 1, &plain(1), 0, Position::new(3, y)), None);
         }
 
         #[test]
         fn pane_is_ignored() {
-            assert_eq!(sidebar_hit(list(), 1, 1, 0, Position::new(SIDEBAR_WIDTH + 5, list().y)), None);
+            assert_eq!(sidebar_hit(list(), 1, &plain(1), 0, Position::new(SIDEBAR_WIDTH + 5, list().y)), None);
+        }
+    }
+
+    mod groups {
+        use super::*;
+
+        const TALL: u16 = 22;
+
+        fn group(name: &str, icon: char, colour: u8) -> GroupEntry {
+            GroupEntry { name: name.into(), icon, colour, collapsed: false }
+        }
+
+        fn grouped(active: usize, collapsed: bool) -> View<'static> {
+            let mut v = View { active, has_project: true, ..view(&["tmp", "api", "web", "cornercase"]) };
+            v.groups = vec![group("work", '●', 4), group("oss", '★', 99)];
+            v.groups[0].collapsed = collapsed;
+            for (p, g) in [(1, 0), (2, 0), (3, 1)] {
+                v.projects[p].group = Some(g);
+            }
+            v
+        }
+
+        fn tall_list() -> Rect {
+            layout(Rect::new(0, 0, W, TALL), Widths::default()).list
+        }
+
+        #[rstest]
+        #[case::no_groups(&[None, None], &[], &[SidebarRow::Project(0), SidebarRow::Project(1)])]
+        #[case::loose_projects_first(&[Some(0), None], &[false], &[
+            SidebarRow::Project(1),
+            SidebarRow::Gap,
+            SidebarRow::Group(0),
+            SidebarRow::Project(0),
+        ])]
+        #[case::no_gap_without_loose_projects(&[Some(0)], &[false], &[SidebarRow::Group(0), SidebarRow::Project(0)])]
+        #[case::collapsed_hides_its_projects(&[Some(0), Some(1)], &[true, false], &[
+            SidebarRow::Group(0),
+            SidebarRow::Gap,
+            SidebarRow::Group(1),
+            SidebarRow::Project(1),
+        ])]
+        #[case::an_empty_group_keeps_its_header(&[None], &[false], &[
+            SidebarRow::Project(0),
+            SidebarRow::Gap,
+            SidebarRow::Group(0),
+        ])]
+        fn rows(#[case] groups: &[Option<usize>], #[case] collapsed: &[bool], #[case] expected: &[SidebarRow]) {
+            assert_eq!(sidebar_rows(groups, collapsed), expected);
+        }
+
+        #[rstest]
+        #[case::loose_project(0, Some(SidebarHit::Select(0)))]
+        #[case::gap(1, None)]
+        #[case::header(2, Some(SidebarHit::Group(0)))]
+        #[case::grouped_project(3, Some(SidebarHit::Select(1)))]
+        fn hit_testing_follows_the_rows(#[case] row: u16, #[case] expected: Option<SidebarHit>) {
+            let rows = grouped(0, false).sidebar_rows();
+            assert_eq!(sidebar_hit(list(), 1, &rows, 0, Position::new(3, list().y + row)), expected);
+        }
+
+        #[test]
+        fn the_close_button_of_a_grouped_project_closes_it() {
+            let rows = grouped(0, false).sidebar_rows();
+            let pos = close_button(list(), 1, &rows, 0, 2).as_position();
+            assert_eq!(sidebar_hit(list(), 1, &rows, 0, pos), Some(SidebarHit::Close(2)));
+        }
+
+        #[test]
+        fn renders_expanded_groups_with_the_active_project_inside() {
+            insta::assert_snapshot!(render_sized(&grouped(1, false), W, TALL).backend());
+        }
+
+        #[test]
+        fn a_collapsed_group_holding_the_active_project_marks_its_header() {
+            insta::assert_snapshot!(render_sized(&grouped(1, true), W, TALL).backend());
+        }
+
+        #[test]
+        fn a_collapsed_group_without_the_active_project_is_not_marked() {
+            insta::assert_snapshot!(render_sized(&grouped(0, true), W, TALL).backend());
+        }
+
+        #[test]
+        fn the_header_takes_the_group_colour() {
+            let rows = grouped(0, false).sidebar_rows();
+            let header = entry_row(tall_list(), 1, &rows, 0, SidebarRow::Group(1));
+            let t = render_sized(&grouped(0, false), W, TALL);
+            assert_eq!(t.backend().buffer()[(header.x + 4, header.y)].fg, Color::Indexed(99));
+        }
+
+        #[test]
+        fn the_more_counts_skip_the_gaps() {
+            let t = render(&View { projects_scroll: 2, ..grouped(0, false) });
+            let above = row_text(&t, more_above(list()));
+            assert!(above.contains("↑ 1 more"), "{above:?}");
         }
     }
 
@@ -2547,7 +2741,7 @@ mod tests {
         #[test]
         fn the_active_entry_fills_its_whole_band() {
             let t = render_small(&in_a_project(Some(Nav::Projects)));
-            let r = entry_row(small().list, COMPACT_PITCH, 2, 0, 0);
+            let r = entry_row(small().list, COMPACT_PITCH, &plain(2), 0, SidebarRow::Project(0));
             let rows: Vec<Color> = (r.top()..r.bottom()).map(|y| t.backend().buffer()[(r.x + 20, y)].bg).collect();
             assert_eq!(rows, vec![DARK_SURFACE; usize::from(COMPACT_PITCH)]);
         }
@@ -2580,12 +2774,8 @@ mod tests {
     mod sidebar_scroll {
         use super::*;
 
-        fn row_text(t: &Terminal<TestBackend>, r: Rect) -> String {
-            (r.x..r.right()).map(|x| t.backend().buffer()[(x, r.y)].symbol().to_string()).collect()
-        }
-
         fn rows(entries: usize, scroll: usize) -> Rows {
-            project_rows(list(), 1, entries, scroll)
+            project_rows(list(), 1, &plain(entries), scroll)
         }
 
         fn many(n: usize, projects_scroll: usize) -> View<'static> {
@@ -2596,12 +2786,12 @@ mod tests {
 
         #[test]
         fn scrolled_rows_map_to_later_entries() {
-            assert_eq!(sidebar_hit(list(), 1, 20, 3, Position::new(3, list().y)), Some(SidebarHit::Select(3)));
+            assert_eq!(sidebar_hit(list(), 1, &plain(20), 3, Position::new(3, list().y)), Some(SidebarHit::Select(3)));
         }
 
         #[test]
         fn the_row_above_the_new_button_is_not_an_entry_when_overflowing() {
-            assert_eq!(sidebar_hit(list(), 1, 20, 0, rows(20, 0).more_below().as_position()), None);
+            assert_eq!(sidebar_hit(list(), 1, &plain(20), 0, rows(20, 0).more_below().as_position()), None);
         }
 
         #[rstest]
@@ -2649,7 +2839,7 @@ mod tests {
         #[test]
         fn the_new_button_stays_at_the_bottom_while_scrolled() {
             let t = render(&many(20, 3));
-            assert!(row_text(&t, new_project_button(list(), 1, 20)).contains("+ new project"));
+            assert!(row_text(&t, new_project_button(list(), 1, &plain(20))).contains("+ new project"));
         }
 
         #[test]
@@ -2682,7 +2872,7 @@ mod tests {
 
         #[test]
         fn each_entry_takes_the_whole_pitch() {
-            assert_eq!(project_rows(TALL, 3, 2, 0).item(1), Rect::new(0, 7, 40, 3));
+            assert_eq!(project_rows(TALL, 3, &plain(2), 0).item(1), Rect::new(0, 7, 40, 3));
         }
 
         #[rstest]
@@ -2690,12 +2880,12 @@ mod tests {
         #[case::middle(5)]
         #[case::bottom(6)]
         fn any_row_of_an_entry_selects_it(#[case] y: u16) {
-            assert_eq!(sidebar_hit(TALL, 3, 2, 0, Position::new(10, y)), Some(SidebarHit::Select(0)));
+            assert_eq!(sidebar_hit(TALL, 3, &plain(2), 0, Position::new(10, y)), Some(SidebarHit::Select(0)));
         }
 
         #[test]
         fn the_new_button_is_as_tall_as_an_entry() {
-            assert_eq!(new_project_button(TALL, 3, 1), Rect::new(0, 8, 40, 3));
+            assert_eq!(new_project_button(TALL, 3, &plain(1)), Rect::new(0, 8, 40, 3));
         }
 
         #[test]
@@ -2706,12 +2896,12 @@ mod tests {
 
         #[test]
         fn the_wheel_moves_by_entries() {
-            assert_eq!(project_rows(TALL, 3, 10, 0).scrolled(100), 7);
+            assert_eq!(project_rows(TALL, 3, &plain(10), 0).scrolled(100), 7);
         }
 
         #[test]
         fn reveal_counts_rows_not_entries() {
-            assert_eq!(project_rows(TALL, 3, 10, 0).reveal(5), 3);
+            assert_eq!(project_rows(TALL, 3, &plain(10), 0).reveal(5), 3);
         }
 
         #[test]
@@ -2725,18 +2915,18 @@ mod tests {
 
         #[test]
         fn new_button_sticks_to_bottom_when_entries_overflow() {
-            assert_eq!(new_project_button(list(), 1, 100).y, list().bottom() - 1);
+            assert_eq!(new_project_button(list(), 1, &plain(100)).y, list().bottom() - 1);
         }
 
         #[test]
         fn new_button_wins_over_entries_when_overflowing() {
             let pos = Position::new(3, list().bottom() - 1);
-            assert_eq!(sidebar_hit(list(), 1, 100, 0, pos), Some(SidebarHit::New));
+            assert_eq!(sidebar_hit(list(), 1, &plain(100), 0, pos), Some(SidebarHit::New));
         }
 
         #[test]
         fn close_button_out_of_view_is_empty() {
-            assert!(close_button(list(), 1, 50, 0, 49).is_empty());
+            assert!(close_button(list(), 1, &plain(50), 0, 49).is_empty());
         }
 
         fn with_update(hover: Option<Position>) -> View<'static> {
@@ -3025,7 +3215,10 @@ mod tests {
 
         #[test]
         fn a_long_name_is_cut_before_the_count() {
-            let v = View { projects: vec![ProjectEntry { name: "a".repeat(40), workspaces: 12 }], ..view(&[]) };
+            let v = View {
+                projects: vec![ProjectEntry { name: "a".repeat(40), workspaces: 12, group: None }],
+                ..view(&[])
+            };
             let row: String =
                 (0..list().width).map(|x| render(&v).backend().buffer()[(x, list().y)].symbol().to_string()).collect();
             assert!(row.contains("aaa… (12)"), "{row:?}");
@@ -3164,7 +3357,7 @@ mod tests {
 
         #[test]
         fn renders_the_menu_where_it_was_opened() {
-            let v = with(Overlay::Menu { at: Position::new(4, 4), items: vec!["new worktree"] });
+            let v = with(Overlay::Menu { at: Position::new(4, 4), items: vec!["new worktree".into()] });
             insta::assert_snapshot!(render(&v).backend());
         }
 
@@ -3178,16 +3371,16 @@ mod tests {
         fn menu_item_is_highlighted_on_hover() {
             let at = Position::new(4, 4);
             let item = menu_item(menu_area(AREA, at, &["new worktree"]), 0).as_position();
-            let v = View { hover: Some(item), ..with(Overlay::Menu { at, items: vec!["new worktree"] }) };
+            let v = View { hover: Some(item), ..with(Overlay::Menu { at, items: vec!["new worktree".into()] }) };
             assert_eq!(render(&v).backend().buffer()[item].bg, Color::Cyan);
         }
 
         #[test]
         fn buttons_behind_the_menu_are_not_highlighted() {
             let at = Position::new(4, list().y);
-            let new = new_project_button(list(), 1, 1);
+            let new = new_project_button(list(), 1, &plain(1));
             let over_new = Position::new(menu_area(AREA, at, &["new worktree"]).x + 2, new.y);
-            let v = View { hover: Some(over_new), ..with(Overlay::Menu { at, items: vec!["new worktree"] }) };
+            let v = View { hover: Some(over_new), ..with(Overlay::Menu { at, items: vec!["new worktree".into()] }) };
             assert_eq!(render(&v).backend().buffer()[new.as_position()].bg, Color::Reset);
         }
 
@@ -3772,7 +3965,7 @@ mod tests {
         }
 
         fn new_pos() -> Position {
-            Position::new(3, new_project_button(list(), 1, 1).y)
+            Position::new(3, new_project_button(list(), 1, &plain(1)).y)
         }
 
         #[test]

@@ -9,12 +9,14 @@ use crate::protocol;
 use crate::split::Node;
 use crate::ui::Widths;
 
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 pub const SETTLE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct State {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<GroupState>,
     pub projects: Vec<ProjectState>,
     pub active: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -33,11 +35,22 @@ pub struct IssuesState {
     pub people: People,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupState {
+    pub name: String,
+    pub icon: char,
+    pub colour: u8,
+    #[serde(default)]
+    pub collapsed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectState {
     pub path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<usize>,
     pub workspaces: Vec<WorkspaceState>,
     #[serde(default)]
     pub active: usize,
@@ -114,10 +127,10 @@ impl From<V2State> for State {
             .map(|w| {
                 let cwds = w.terminals.into_iter().map(|t| t.cwd).collect();
                 let workspace = WorkspaceState::plain(w.path.clone(), cwds, w.active);
-                ProjectState { path: w.path, name: w.name, workspaces: vec![workspace], active: 0 }
+                ProjectState { path: w.path, name: w.name, group: None, workspaces: vec![workspace], active: 0 }
             })
             .collect();
-        Self { version: VERSION, projects, active: old.active, widths: None, issues: None }
+        Self { version: VERSION, groups: Vec::new(), projects, active: old.active, widths: None, issues: None }
     }
 }
 
@@ -164,7 +177,7 @@ pub fn path() -> PathBuf {
 pub fn load(path: &Path) -> Option<State> {
     let text = std::fs::read_to_string(path).ok()?;
     match serde_json::from_str::<Versioned>(&text).ok()?.version {
-        VERSION => serde_json::from_str(&text).ok(),
+        3 | VERSION => serde_json::from_str(&text).ok().map(|state| State { version: VERSION, ..state }),
         2 => serde_json::from_str::<V2State>(&text).ok().map(State::from),
         1 => serde_json::from_str::<V1State>(&text).ok().map(|v1| State::from(V2State::from(v1))),
         _ => None,
@@ -218,12 +231,13 @@ mod tests {
 
     fn project(dir: &str) -> ProjectState {
         let workspace = WorkspaceState::plain(PathBuf::from(dir), vec![Some(PathBuf::from(dir))], 0);
-        ProjectState { path: PathBuf::from(dir), name: None, workspaces: vec![workspace], active: 0 }
+        ProjectState { path: PathBuf::from(dir), name: None, group: None, workspaces: vec![workspace], active: 0 }
     }
 
     fn state(dirs: &[&str]) -> State {
         State {
             version: VERSION,
+            groups: Vec::new(),
             projects: dirs.iter().map(|d| project(d)).collect(),
             active: 0,
             widths: None,
@@ -279,6 +293,33 @@ mod tests {
             save(&path, &saved).expect("save");
 
             assert_eq!(load(&path), Some(saved));
+        }
+
+        #[test]
+        fn round_trips_groups() {
+            let tmp = TempDir::new();
+            let path = tmp.path().join("session.json");
+            let mut saved = state(&["/a", "/b"]);
+            saved.groups = vec![
+                GroupState { name: "work".into(), icon: '●', colour: 4, collapsed: false },
+                GroupState { name: "oss".into(), icon: '★', colour: 99, collapsed: true },
+            ];
+            saved.projects[1].group = Some(1);
+
+            save(&path, &saved).expect("save");
+
+            assert_eq!(load(&path), Some(saved));
+        }
+
+        #[test]
+        fn version_3_files_load_with_every_project_ungrouped() {
+            let tmp = TempDir::new();
+            let path = tmp.path().join("session.json");
+            let v3 = r#"{"version":3,"projects":[{"path":"/a","workspaces":[{"path":"/a","tabs":[{"panes":[{"cwd":"/a"}]}]}]},
+                {"path":"/b","workspaces":[{"path":"/b","tabs":[{"panes":[{"cwd":"/b"}]}]}]}],"active":1}"#;
+            std::fs::write(&path, v3).expect("write");
+
+            assert_eq!(load(&path), Some(State { active: 1, ..state(&["/a", "/b"]) }));
         }
 
         #[test]

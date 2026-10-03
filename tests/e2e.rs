@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use cornercase::protocol::{NESTED_ENV, SOCKET_ENV};
 use cornercase::split::{self, Dir};
-use cornercase::ui::{self, WorkspaceRow};
+use cornercase::ui::{self, SidebarRow, WorkspaceRow};
 use parking_lot::Mutex;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::layout::{Position, Rect};
@@ -210,8 +210,15 @@ impl Harness {
         self.send(format!("\x1b[<2;{x};{y}M\x1b[<2;{x};{y}m").as_bytes());
     }
 
+    fn open_new_menu(&mut self, entries: usize, item: usize) {
+        let at = ui::new_project_button(list(), 1, &plain(entries)).as_position();
+        self.click(at);
+        self.wait_for("the new menu opens", |s| s.contains("open project") && s.contains("new group"));
+        self.click(ui::menu_item(ui::menu_area(AREA, at, &NEW_MENU), item).as_position());
+    }
+
     fn open_picker(&mut self, entries: usize) {
-        self.click(ui::new_project_button(list(), 1, entries).as_position());
+        self.open_new_menu(entries, 0);
         self.wait_for("the folder picker opens", |s| s.contains("new project") && s.contains("cancel"));
     }
 
@@ -255,6 +262,12 @@ fn workspace_row(tabs: &[usize], row: WorkspaceRow) -> Position {
 
 fn areas() -> ui::Areas {
     ui::layout(AREA, ui::Widths::default())
+}
+
+const NEW_MENU: [&str; 2] = ["open project", "new group"];
+
+fn plain(projects: usize) -> Vec<SidebarRow> {
+    ui::sidebar_rows(&vec![None; projects], &[])
 }
 
 fn list() -> Rect {
@@ -374,7 +387,7 @@ fn close_button_removes_a_project() {
     app.open_project(1, &dir);
     app.wait_for("project 2 appears", |s| s.contains(&entry(&name)));
 
-    app.click(ui::close_button(list(), 1, 2, 0, 0).as_position());
+    app.click(ui::close_button(list(), 1, &plain(2), 0, 0).as_position());
 
     app.wait_for("only the second one is left", |s| s.contains(&entry(&name)) && !s.contains(&first_entry()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -391,7 +404,7 @@ fn opening_an_open_folder_switches_to_it() {
     app.open_project(2, &temp());
 
     app.wait_for("project 1 is active again", |s| s.contains(&format!("▌{}", first_entry())) && !s.contains("cancel"));
-    let third = app.row(ui::new_project_button(list(), 1, 2).y);
+    let third = app.row(ui::new_project_button(list(), 1, &plain(2)).y);
     assert!(third.contains("new project"), "a third entry opened: {third:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -856,6 +869,27 @@ fn right_click_renames_a_project() {
     app.send(b"echo cd-\"\"done\r");
     app.wait_for("the shell moved", |s| s.contains("cd-done"));
     assert!(app.text().contains(&entry("my-api")), "the name changed after cd:\n{}", app.text());
+}
+
+#[test]
+fn a_project_moves_into_a_new_group() {
+    let mut app = Harness::start();
+    let at = Position::new(list().x + 3, list().y);
+
+    app.open_new_menu(1, 1);
+    app.wait_for("the group form opens", |s| s.contains("new group") && s.contains("right-click a project"));
+    app.send(b"work\r");
+    app.wait_for("the group shows", |s| s.contains(&format!("  ▾ {} work", ui::GROUP_ICONS[0])));
+    app.right_click(at);
+    app.wait_for("the menu opens", |s| s.contains("move to group"));
+    app.click(ui::menu_item(ui::menu_area(AREA, at, &["rename project", "move to group"]), 1).as_position());
+    let group = format!("{} work", ui::GROUP_ICONS[0]);
+    app.wait_for("the groups are listed", |s| s.contains(&format!(" {group} ")) && !s.contains("move to group"));
+    app.click(ui::menu_item(ui::menu_area(AREA, at, &[group.as_str()]), 0).as_position());
+
+    app.wait_for("the project is inside", |s| s.contains(&format!("▌  {}", first_entry())));
+    app.session
+        .wait_for_saved("the group is saved", |saved| saved.contains("\"groups\"") && saved.contains("\"group\": 0"));
 }
 
 #[test]
