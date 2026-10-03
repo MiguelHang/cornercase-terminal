@@ -2990,7 +2990,7 @@ impl App {
 
     fn branches_listed(&mut self, workspace: u64, branches: Vec<String>, default: Option<String>) {
         let Some(target) = self.changes_target().filter(|t| t.workspace == workspace) else { return };
-        if self.overlay.is_some() {
+        if self.overlay.is_some() || !self.changes.open || self.changes.mode == changes::Mode::Uncommitted {
             return;
         }
         let current = self.changes.label(workspace).or(target.base);
@@ -6556,9 +6556,31 @@ mod tests {
         }
 
         #[test]
+        fn branches_that_arrive_after_the_panel_closes_are_dropped() {
+            let repo = repo_with_edit();
+            let (mut app, rx) = app_in(repo.path(), no_config());
+            app.changes.open = true;
+            app.changes.set_mode(changes::Mode::Commits);
+            let target = app.changes_target().expect("target");
+            app.open_branches(&target);
+            app.changes.open = false;
+            loop {
+                let ev = rx.recv_timeout(Duration::from_secs(5)).expect("the branches arrive");
+                let branches = matches!(ev, AppEvent::Branches { .. });
+                app.handle_event(ev, AREA).expect("handle event");
+                if branches {
+                    break;
+                }
+            }
+            assert!(app.overlay.is_none());
+        }
+
+        #[test]
         fn picking_the_default_branch_forgets_the_choice() {
             let repo = repo_with_edit();
             let (mut app, rx) = app_in(repo.path(), no_config());
+            app.changes.open = true;
+            app.changes.set_mode(changes::Mode::All);
             app.projects[0].workspaces[0].base = Some("old".into());
             let target = app.changes_target().expect("target");
             app.open_branches(&target);
