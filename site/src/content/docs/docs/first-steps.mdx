@@ -30,7 +30,7 @@ The screen has three columns and a pane:
 | Area | What it holds |
 | --- | --- |
 | Top left | The logo and the **search bar**: click it to jump to any project, workspace or tab. |
-| **projects** | Every project you opened, with its number of workspaces. `+ new project` at the end of the list; `settings` and `quit` at the bottom, with an [update](../installation/#update) button next to `settings` when a new version is out. |
+| **projects** | Every project you opened, with its number of workspaces, optionally in [groups](../guides/projects-workspaces-tabs/#groups). `+ new project` at the end of the list; `settings` and `quit` at the bottom, with an [update](../installation/#update) button next to `settings` when a new version is out. |
 | **workspaces** | The workspaces of the active project, each with its tabs. `+ tab` adds a tab to a workspace, `+ new workspace` starts a new one, `issues` opens the issue browser. |
 | The pane | The active tab: one shell, or several in splits. |
 
@@ -40,7 +40,7 @@ The active project and tab are marked with a cyan bar `▌` and a highlighted ba
 
 <Steps>
 
-1. Click **`+ new project`**. A folder picker opens in the folder above your current project.
+1. Click **`+ new project`**, then **open project**. A folder picker opens in the folder above your current project.
 
 2. Type to filter the folders. Folders that are git repositories show their branch on the right.
 
@@ -110,7 +110,7 @@ cornercase copies through your terminal with the OSC 52 escape sequence, so it a
 
 Hover a project, workspace or tab: a `×` appears at the end of its row. Clicking it closes it and ends the programs inside. Closing a workspace that has its own worktree asks first, because it also deletes the worktree's folder (never the branch).
 
-To rename something, right-click its row.
+To rename something, right-click its row. Right-clicking a project also moves it into a [group](../guides/projects-workspaces-tabs/#groups).
 
 ## Leave and come back
 

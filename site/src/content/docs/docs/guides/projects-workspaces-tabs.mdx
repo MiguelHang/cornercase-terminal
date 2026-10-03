@@ -1,6 +1,6 @@
 ---
 title: Projects, workspaces and tabs
-description: How cornercase organises your work, and how to open, rename, close and arrange projects, workspaces and tabs.
+description: How cornercase organises your work, and how to open, group, rename, close and arrange projects, workspaces and tabs.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -23,7 +23,7 @@ A project is called after its folder (`~` for your home folder) unless you renam
 
 ### Open a project
 
-Click **`+ new project`** at the end of the list. A folder picker opens in the folder that contains the active project, or in your home folder.
+Click **`+ new project`** at the end of the list, then **open project**. A folder picker opens in the folder that contains the active project, or in your home folder.
 
 <Screen
   name="picker"
@@ -42,6 +42,40 @@ Click **`+ new project`** at the end of the list. A folder picker opens in the f
 | Cancel | Click **cancel** or press `Esc`. |
 
 Folders that are git repositories show their current branch on the right. Opening a folder that is already a project switches to it instead of opening it twice.
+
+## Groups
+
+When the projects column gets long, put projects in **groups**: work, personal, open source. A group is a header with an icon, a name and a colour, and its projects are listed below it, indented. Projects without a group stay at the top of the list, as before.
+
+<Screen
+  name="groups"
+  crop={[0, 5, 24, 12]}
+  alt="The projects column with dotfiles loose at the top, an expanded work group holding shop and api with shop active, and a collapsed oss group showing (2)"
+  caption="dotfiles has no group, work is open and oss is collapsed."
+/>
+
+| To | Do |
+| --- | --- |
+| Create a group | Click **`+ new project`**, then **new group**, and type its name. Its icon and colour open next. |
+| Put a project in a group | Right-click the project, choose **move to group**, then the group. **no group** takes it out again. |
+| Collapse or expand a group | Click its header. A collapsed group shows how many projects it holds, and gets the cyan `▌` when the active project is inside. |
+| Rename a group | Right-click its header, then **rename group**. |
+| Change its icon or colour | Right-click its header, then **icon and colour**. |
+| Delete a group | Right-click its header, then **delete group**. Its projects stay open and lose their group. |
+
+Groups are listed in the order you created them, and there is a single level: a group can't hold another group.
+
+### Icon and colour
+
+The dialog has twelve icons and sixteen colours. Every click applies at once, and the header at the bottom of the dialog shows the result; close it with **done**, `Enter` or `Esc`.
+
+<Screen
+  name="group-style"
+  crop={[23, 10, 64, 10]}
+  alt="The icon and colour dialog of the oss group: twelve icons in two rows with the star selected, sixteen colour swatches in two rows with purple selected, and a preview of the header"
+/>
+
+The icons are plain symbols that every font has at one cell wide, so they line up in any terminal. The colours are the terminal's palette colours, so they follow your theme.
 
 ## Workspaces
 
@@ -74,15 +108,15 @@ The shell is the one in your `SHELL` environment variable when the server starte
 
 ## Rename
 
-Right-click a project, workspace or tab to open its menu, then choose **rename**:
+Right-click a project, group, workspace or tab to open its menu, then choose **rename**:
 
 <Screen
   name="rename-menu"
   crop={[0, 6, 48, 8]}
-  alt="Right-clicking the api project opens a small menu with a single item: rename project"
+  alt="Right-clicking the api project opens a small menu with a single item: rename project. When there are groups it also offers move to group"
 />
 
-Type the new name and press `Enter`. Leave the name empty to go back to the automatic one: the folder name for a project, the branch for a workspace, the program for a tab.
+Type the new name and press `Enter`. Leave the name empty to go back to the automatic one: the folder name for a project, the branch for a workspace, the program for a tab. A group always has a name, so an empty one keeps the current name.
 
 <Screen
   name="rename-form"
@@ -100,7 +134,7 @@ Hover a row and a `×` appears at its right end. Clicking it closes that item an
 | A workspace | All its tabs are closed, then the workspace goes away. A workspace with its own worktree asks first, because it also deletes the worktree folder; see [Removing a worktree](../worktrees/#remove-a-worktree). |
 | A project | Everything in it is closed, then the project goes away. |
 
-Rows disappear once their programs have exited, not before. Closing the last tab keeps its workspace (the pane says *no tab open*), closing the last workspace keeps its project, and closing the last project leaves cornercase open and empty, ready for `+ new project`.
+Rows disappear once their programs have exited, not before. Closing the last tab keeps its workspace (the pane says *no tab open*), closing the last workspace keeps its project, and closing the last project leaves cornercase open and empty, ready for `+ new project`. Closing every project of a group keeps the group.
 
 When a program ends by itself, for example when you type `exit`, its pane closes; when the last pane of a tab closes, so does the tab.
 
@@ -113,5 +147,5 @@ When a program ends by itself, for example when you type `exit`, its pane closes
 Column widths are saved with your session. On a small terminal the columns shrink to leave room for the panes, and below 90 columns cornercase switches to a [compact layout](../small-terminals/).
 
 <Aside type="tip">
-Lost in a big session? Click the search bar above the projects column and type: it finds projects, workspaces, branches and tabs. See [Search](../search/).
+Lost in a big session? Click the search bar above the projects column and type: it finds groups, projects, workspaces, branches and tabs. See [Search](../search/).
 </Aside>

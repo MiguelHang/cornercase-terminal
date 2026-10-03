@@ -1,11 +1,11 @@
 ---
 title: Search
-description: Jump to any project, workspace, branch or tab by typing a few letters.
+description: Jump to any group, project, workspace, branch or tab by typing a few letters.
 ---
 
 import Screen from '../../../../components/Screen.astro';
 
-When your session grows, the quickest way to get somewhere is to search for it. One search covers every project, workspace and tab you have open.
+When your session grows, the quickest way to get somewhere is to search for it. One search covers every group, project, workspace and tab you have open.
 
 <Screen
   name="search"
@@ -16,8 +16,8 @@ When your session grows, the quickest way to get somewhere is to search for it. 
 ## Use it
 
 1. Click the search bar under the logo, the one that reads `⌕ search projects, workspaces, tabs`. In the [compact layout](../small-terminals/), click `⌕` at the right of the top bar.
-2. Type. The results replace the two columns while you type, each with its place on the right: the project for a workspace, `project › workspace` for a tab.
-3. Click a result, or move with `↑` `↓` and press `Enter`. cornercase switches to that project, workspace or tab.
+2. Type. The results replace the two columns while you type, each with its place on the right: the group for a project in one, the project for a workspace, `project › workspace` for a tab.
+3. Click a result, or move with `↑` `↓` and press `Enter`. cornercase switches to that project, workspace or tab. A group expands and its first project becomes active.
 
 `Esc`, clicking outside the results, or `Enter` with an empty query close the search. The query isn't kept: the next search starts empty. You can paste into the search bar too.
 
@@ -25,10 +25,11 @@ When your session grows, the quickest way to get somewhere is to search for it. 
 
 | Result | Matched by |
 | --- | --- |
+| A group | Its name. It shows with its icon. |
 | A project | Its name. |
 | A workspace | Its name and, when it has a name of its own, its branch too. |
 | A tab | Its name, and its workspace's name and branch. |
 
 So typing a branch name finds the workspace on that branch and all the tabs inside it.
 
-Matching ignores case. Results are ranked by how well they match: exact names first, then names that start with your text, then names that contain it. Among equally good matches, projects come before workspaces and workspaces before tabs, in the order they appear in the sidebar. The part of each name that matches is highlighted.
+Matching ignores case. Results are ranked by how well they match: exact names first, then names that start with your text, then names that contain it. Among equally good matches, groups come first, then projects, workspaces and tabs, in the order they appear in the sidebar. The part of each name that matches is highlighted.
