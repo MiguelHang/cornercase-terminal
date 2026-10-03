@@ -1,0 +1,218 @@
+---
+title: Settings and config.json
+description: Every setting in the settings modal and every key of config.json, with types, defaults and examples.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Screen from '../../../../components/Screen.astro';
+
+cornercase is configured from the **settings** modal, opened with the `settings` button at the bottom of the projects column. Every change is saved at once to `config.json`, so there is nothing to apply or restart. You can also edit the file by hand; this page lists every key.
+
+## The settings modal
+
+The modal has four tabs. Click a row, or select it and press `Enter`, to change it; the line at the bottom explains what the selected row does and confirms every change.
+
+### Worktrees
+
+<Screen
+  name="settings-worktrees"
+  crop={[2, 1, 106, 6]}
+  alt="The Worktrees tab: worktrees folder ~/.cornercase/worktrees, new worktrees go in folder/repo/branch"
+/>
+
+| Row | What it sets |
+| --- | --- |
+| **worktrees folder** | Where new [worktrees](../../guides/worktrees/) are checked out: `<folder>/<repository>/<branch>`. Must be an absolute path or start with `~/`. |
+
+### Agents
+
+<Screen
+  name="settings-agents"
+  crop={[2, 1, 106, 28]}
+  alt="The Agents tab: default agent claude, send the prompt unticked, trust prompts accepted, and how each agent starts: claude in plan mode, codex and gemini in their default mode, plus another agent"
+/>
+
+| Row | What it sets |
+| --- | --- |
+| **default agent** | The agent that takes an issue when you don't pick one: a specific agent, or `auto`, which uses the agent running in your current tab and otherwise asks. |
+| **send the prompt** | Off: the prompt is typed on one line and you press `Enter`. On: it is pasted as written and sent for you. |
+| **trust prompts** | On: cornercase answers "do you trust this folder?" questions when it starts an agent. |
+| **How each agent starts** | One row per agent: the default agent, the agents with start modes (`claude`, `codex` and `gemini` out of the box) and any you set up. Click one to choose its mode and extra arguments. |
+| **+ another agent…** | Adds one of the other [known agents](../agents/) to the list so you can set it up. |
+
+Choosing how an agent starts opens a list of its modes, each with the arguments it adds, plus **extra arguments…** for anything else you want on its command line:
+
+<Screen
+  name="settings-claude-modes"
+  crop={[2, 1, 106, 12]}
+  alt="How should claude start? default, accept edits, auto, plan, skip permissions (dangerous), extra arguments"
+/>
+
+Modes whose name says *dangerous* are shown in red. Extra arguments are split like a shell would: use quotes for arguments with spaces.
+
+### Issues
+
+<Screen
+  name="settings-issues"
+  crop={[2, 1, 106, 13]}
+  alt="The Issues tab: Shortcut API token and Linear API key not connected, and the sources shown: All, GitHub, Shortcut and Linear, with move arrows on the hovered row"
+/>
+
+| Row | What it sets |
+| --- | --- |
+| **Shortcut API token**, **Linear API key** | Paste a token and press `Enter`; cornercase checks it, then saves it to `secrets.json`. Hover a saved one and click `×`, or press `Delete`, to remove it. When the token comes from an environment variable, the row says so and can't be changed here. |
+| **Sources shown** | Which tabs the [issue browser](../../guides/issues-and-agents/) shows. Click to show or hide one (at least one stays); hover a row and use its `↑` `↓` buttons, or press `Shift+↑` `Shift+↓`, to change the order. |
+
+### TUI
+
+<Screen
+  name="settings-tui"
+  crop={[2, 1, 106, 5]}
+  alt="The TUI tab: inactive panes dimmed, in a split tab"
+/>
+
+| Row | What it sets |
+| --- | --- |
+| **inactive panes** | Dim the panes you aren't typing in, in a split tab. |
+
+### Keys in the settings modal
+
+| Key | Does |
+| --- | --- |
+| `Enter`, `Space` | Change the selected row. |
+| `↑` `↓` | Select a row. The mouse wheel does the same. |
+| `Tab`, `→` / `Shift+Tab`, `←` | Next / previous tab. |
+| `Shift+↑` `Shift+↓` | Move the selected source up or down. |
+| `Delete`, `Backspace` | Remove the selected saved token. |
+| `Esc` | Close the modal, or leave a list or a text field. |
+
+In a list, type to filter it and press `Enter` to pick. In a text field, `Enter` saves and `Esc` cancels.
+
+## config.json
+
+| | Path |
+| --- | --- |
+| Usually | `~/.config/cornercase/config.json` |
+| With `XDG_CONFIG_HOME` set | `$XDG_CONFIG_HOME/cornercase/config.json` |
+| With `CORNERCASE_SOCKET` set | `config.json` next to the socket |
+
+Every key is optional: a missing key takes its default. Here is a complete file, as the settings modal writes it after choosing Claude Code in plan mode as the default agent:
+
+```json title="config.json"
+{
+  "worktrees_dir": "~/.cornercase/worktrees",
+  "issue_tabs": ["all", "github", "shortcut", "linear"],
+  "agent": "claude",
+  "agent_args": {
+    "claude": ["--permission-mode", "plan"]
+  },
+  "agent_modes": {},
+  "agent_commands": {},
+  "prompt": "{url}",
+  "submit": false,
+  "auto_accept_trust_prompt": true,
+  "trust_prompt_pattern": "trust the files|trust this (folder|directory|workspace|repository)|do you trust|yes, proceed",
+  "gh": "gh",
+  "dim_inactive_panes": true
+}
+```
+
+### Keys
+
+| Key | Type | Default |
+| --- | --- | --- |
+| [`worktrees_dir`](#worktrees_dir) | string | `"~/.cornercase/worktrees"` |
+| [`issue_tabs`](#issue_tabs) | array of strings | `["all", "github", "shortcut", "linear"]` |
+| [`agent`](#agent) | string | `"auto"` |
+| [`agent_args`](#agent_args) | object | `{}` |
+| [`agent_modes`](#agent_modes) | object | `{}` |
+| [`agent_commands`](#agent_commands) | object | `{}` |
+| [`prompt`](#prompt) | string | `"{url}"` |
+| [`submit`](#submit) | boolean | `false` |
+| [`auto_accept_trust_prompt`](#auto_accept_trust_prompt) | boolean | `true` |
+| [`trust_prompt_pattern`](#trust_prompt_pattern) | string | see below |
+| [`gh`](#gh) | string | `"gh"` |
+| [`dim_inactive_panes`](#dim_inactive_panes) | boolean | `true` |
+
+#### `worktrees_dir`
+
+The folder for new worktrees, checked out in `<worktrees_dir>/<repository>/<branch>`. An absolute path, or one starting with `~/`.
+
+#### `issue_tabs`
+
+The tabs of the issue browser, in order. Accepts `all`, `github`, `shortcut` and `linear`, in any case; unknown names and repeats are ignored, and a list with no valid name shows all four.
+
+#### `agent`
+
+The default agent: an agent kind such as `"claude"` or `"codex"`, or `"auto"` for the agent running in your current tab, and otherwise ask.
+
+#### `agent_args`
+
+The arguments each agent kind starts with, including those of its mode. For example `{"claude": ["--permission-mode", "plan"]}` starts `claude --permission-mode plan`.
+
+#### `agent_modes`
+
+Extra or replaced start modes for an agent kind: `{"kind": {"mode name": ["args"]}}`. A mode with the same name as a built-in one replaces it; an empty list hides it.
+
+#### `agent_commands`
+
+The program to run for an agent kind, a name on your `PATH` or a path: `{"cursor": "/opt/bin/cursor-agent"}`. A kind that cornercase doesn't know adds a new agent.
+
+#### `prompt`
+
+The [prompt template](../prompt/) handed to an agent started on an issue. Placeholders such as `{url}`, `{title}` and `{branch}` are filled in.
+
+#### `submit`
+
+`true` sends the prompt for you; `false` leaves it typed at the agent's prompt for you to send.
+
+#### `auto_accept_trust_prompt`
+
+Whether cornercase answers the agent's "do you trust this folder?" question when it starts one.
+
+#### `trust_prompt_pattern`
+
+The regular expression, matched without regard to case against the agent's screen, that recognises a trust question. The default is:
+
+```text
+trust the files|trust this (folder|directory|workspace|repository)|do you trust|yes, proceed
+```
+
+#### `gh`
+
+The GitHub CLI to run for GitHub issues: a name looked up in your `PATH`, or a path, which may start with `~/`.
+
+#### `dim_inactive_panes`
+
+Whether panes you aren't typing in are dimmed, in tabs split into several panes.
+
+[Agents](../agents/) explains `agent`, `agent_args`, `agent_modes`, `agent_commands` and the trust prompt in depth.
+
+### A customised example
+
+```json title="config.json"
+{
+  "worktrees_dir": "~/work/trees",
+  "issue_tabs": ["github", "linear"],
+  "agent": "codex",
+  "agent_args": {
+    "codex": ["--sandbox", "workspace-write"],
+    "mine": ["--fast"]
+  },
+  "agent_modes": {
+    "claude": { "auto": [] }
+  },
+  "agent_commands": {
+    "mine": "/opt/bin/my-agent"
+  },
+  "prompt": "Work on {url} ({title}). You are on branch {branch}; start with a failing test.",
+  "submit": true,
+  "dim_inactive_panes": false
+}
+```
+
+This keeps worktrees in `~/work/trees`, shows only the GitHub and Linear tabs, starts Codex in its *workspace write* sandbox by default, hides Claude Code's *auto* mode, adds a custom agent called `mine`, sends a fuller prompt for you, and keeps every pane equally bright.
+
+<Aside type="caution" title="Editing the file by hand">
+The server reads `config.json` once, when it starts, and the settings modal writes its own copy back whenever you change something there. Edit the file while no server is running, or run `cornercase kill-server` after editing so the next `cornercase` reads it. If the file isn't valid JSON, cornercase falls back to the defaults.
+</Aside>

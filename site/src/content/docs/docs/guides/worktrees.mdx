@@ -1,0 +1,112 @@
+---
+title: Git worktrees
+description: Give each workspace its own checkout and branch, carry your ignored files along with .worktreeinclude, and remove worktrees safely.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import Screen from '../../../../components/Screen.astro';
+
+A [git worktree](https://git-scm.com/docs/git-worktree) is a second checkout of the same repository, on another branch, in another folder. cornercase turns each one into a workspace, so every line of work has its own files, its own shells and its own agent, and none of them steps on the others: a build, a half-written change or an agent's edits stay in their own folder.
+
+## When worktrees are available
+
+Worktrees are offered when the **project folder is the root of a git repository**, that is, it contains a `.git` folder. A project that is a subfolder of a repository, or a folder without git, gets plain workspaces instead.
+
+## Create a worktree workspace
+
+<Steps>
+
+1. Click **`+ new workspace`** in the workspaces column.
+
+2. Type the branch name. The dialog shows where the checkout will go.
+
+   <Screen
+     name="new-workspace"
+     crop={[23, 10, 64, 10]}
+     alt="The new workspace dialog with name feat/login, the hint in ~/.cornercase/worktrees/shop/feat-login and the box with its own worktree ticked"
+   />
+
+3. Keep **with its own worktree** ticked (click it or press `Tab` to toggle) and click **create**.
+
+</Steps>
+
+cornercase then, in the background:
+
+- checks out the branch if it already exists, or creates it from the project's current `HEAD` if it doesn't;
+- runs `git worktree add` into `<worktrees folder>/<repository>/<branch>`;
+- copies the files listed in [`.worktreeinclude`](#bring-your-ignored-files-along);
+- opens the new workspace with a shell in the checkout.
+
+If something goes wrong, the reason appears in red in the dialog and no workspace is added: for example when the checkout folder already exists, when git doesn't accept the branch name, or when the branch is already checked out in another worktree.
+
+### Where checkouts go
+
+By default, checkouts live in `~/.cornercase/worktrees`, grouped by repository. The folder name is the branch made safe for a path: lowercase letters and digits are kept, anything else becomes a dash, and repeated or trailing dashes are dropped.
+
+| Repository | Branch | Checkout |
+| --- | --- | --- |
+| `~/code/shop` | `feat/login` | `~/.cornercase/worktrees/shop/feat-login` |
+| `~/code/shop` | `fix//The  Bug!` | `~/.cornercase/worktrees/shop/fix-the-bug` |
+| `~/code/api` | `issue-482-returns-page` | `~/.cornercase/worktrees/api/issue-482-returns-page` |
+
+To keep them somewhere else, change **settings → Worktrees → worktrees folder**. Use an absolute path or one starting with `~/`. The change applies to new worktrees; existing ones stay where they are.
+
+<Screen
+  name="settings-worktrees"
+  crop={[2, 1, 106, 6]}
+  alt="The Worktrees tab of the settings: worktrees folder ~/.cornercase/worktrees, new worktrees go in folder/repo/branch"
+/>
+
+## Worktrees you made elsewhere
+
+Every linked worktree of the repository shows up as a workspace, including the ones you create yourself with `git worktree add` or that another tool creates. cornercase looks for them about once a second, so they appear shortly after they exist. A worktree workspace with no tabs disappears when its folder is removed.
+
+## Bring your ignored files along
+
+A fresh checkout only contains what git tracks. Files that git ignores, such as `.env` files with local secrets, are missing. List the ones you want in every new worktree in a `.worktreeinclude` file at the root of the repository, using `.gitignore` patterns:
+
+```text title=".worktreeinclude"
+.env
+.envs/.env.local
+```
+
+A file is copied into a new worktree only when it **matches `.worktreeinclude` and is ignored by git**. Tracked files are already in the checkout, and untracked files that git doesn't ignore are left out on purpose. The matching is done by git itself, so it follows the same rules as `.gitignore`.
+
+For example, with this `.gitignore`:
+
+```text title=".gitignore"
+.env
+.envs/
+secret.txt
+```
+
+| File | Copied? | Why |
+| --- | --- | --- |
+| `.env` | Yes | Listed and ignored. |
+| `.envs/.env.local` | Yes | Listed and ignored. |
+| `secret.txt` | No | Ignored, but not listed. |
+| `notes.md` (untracked) | No | Listed or not, git doesn't ignore it. |
+
+Files keep their place in the tree. If a file can't be copied, the worktree is still created and the reason is written to the server log.
+
+## Remove a worktree
+
+Hover the workspace and click its `×`. Because removing the workspace also deletes its checkout, cornercase asks first:
+
+<Screen
+  name="remove-workspace"
+  crop={[23, 10, 64, 10]}
+  alt="The remove workspace dialog: Remove the workspace feat/login and delete its worktree folder ~/.cornercase/worktrees/shop/feat-login? The branch is kept."
+/>
+
+**remove** runs `git worktree remove` on the checkout. When it succeeds, the workspace's programs are ended and the workspace disappears.
+
+If the checkout has modified or untracked files, git refuses. cornercase shows git's message and the button becomes **remove anyway**, which runs `git worktree remove --force` and throws those changes away. Click **cancel** to keep the worktree and save your work first.
+
+<Aside type="note" title="Branches are never deleted">
+Removing a worktree only deletes its folder. The branch and its commits stay in the repository; delete the branch yourself with `git branch -d` when you no longer need it.
+</Aside>
+
+## Worktrees from issues
+
+Starting an issue from the [issue browser](../issues-and-agents/) in a repository creates a worktree too, on a branch named after the issue, such as `issue-482-returns-page-crashes-on-empty-address`. Everything on this page applies to it.

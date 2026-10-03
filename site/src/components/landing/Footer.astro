@@ -1,0 +1,208 @@
+---
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const repo = 'https://github.com/usecornercase/cornercase-terminal';
+const columns: [string, [string, string][]][] = [
+  [
+    'Product',
+    [
+      ['Features', '#features'],
+      ['Issues to agents', '#flow'],
+      ['Sessions', '#sessions'],
+      ['Install', '#install'],
+    ],
+  ],
+  [
+    'Docs',
+    [
+      ['Introduction', `${base}/docs/`],
+      ['First steps', `${base}/docs/first-steps/`],
+      ['Configuration', `${base}/docs/reference/configuration/`],
+      ['Troubleshooting', `${base}/docs/help/troubleshooting/`],
+    ],
+  ],
+  [
+    'Project',
+    [
+      ['GitHub', repo],
+      ['Issues', `${repo}/issues`],
+      ['Contributing', `${repo}/blob/main/CONTRIBUTING.md`],
+      ['Security', `${repo}/security/advisories/new`],
+    ],
+  ],
+];
+---
+
+<footer class="footer">
+  <div class="wrap">
+    <div class="cta reveal">
+      <h2>Give every case<br />its own <span>corner</span>.</h2>
+      <div class="actions">
+        <a class="btn btn-primary" href="#install">Install cornercase</a>
+        <a class="btn btn-ghost" href={repo}>Star on GitHub</a>
+      </div>
+    </div>
+    <div class="grid">
+      <div class="brand">
+        <a class="logo" href={`${base}/`} aria-label="cornercase, home">
+          <svg viewBox="0 0 4 4" aria-hidden="true" shape-rendering="crispEdges"><path d="M1 0h3v1H1zM0 1h1v3H0z"></path></svg>
+          cornercase
+        </a>
+        <p>A terminal multiplexer for projects, git worktrees and coding agents, driven by the mouse.</p>
+      </div>
+      {
+        columns.map(([title, links]) => (
+          <nav aria-label={title}>
+            <h3>{title}</h3>
+            <ul>
+              {links.map(([label, href]) => (
+                <li>
+                  <a href={href}>{label}</a>
+                </li>
+              ))}
+            </ul>
+          </nav>
+        ))
+      }
+    </div>
+    <div class="legal">
+      <span>© 2026 The cornercase authors · <a href={`${repo}/blob/main/LICENSE-MIT`}>MIT</a> or <a href={`${repo}/blob/main/LICENSE-APACHE`}>Apache-2.0</a></span>
+      <span>Built with Rust, ratatui and libghostty-vt</span>
+    </div>
+  </div>
+</footer>
+
+<style>
+  .footer {
+    position: relative;
+    padding: clamp(80px, 10vw, 140px) 0 40px;
+    border-top: 1px solid var(--line);
+    background:
+      radial-gradient(800px 360px at 50% 0%, rgb(135 95 255 / 0.16), transparent 70%),
+      var(--bg);
+    overflow: hidden;
+  }
+
+  .cta {
+    text-align: center;
+  }
+
+  .cta h2 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-weight: 780;
+    font-size: clamp(42px, 7vw, 96px);
+    line-height: 0.95;
+    letter-spacing: -0.045em;
+  }
+
+  .cta h2 span {
+    color: transparent;
+    background: linear-gradient(100deg, var(--purple-2) 10%, #d8cbff 55%, var(--cyan) 110%);
+    -webkit-background-clip: text;
+    background-clip: text;
+  }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 12px;
+    margin-top: 34px;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.6fr) repeat(3, minmax(0, 1fr));
+    gap: 32px;
+    margin-top: clamp(80px, 9vw, 130px);
+    padding-top: 40px;
+    border-top: 1px solid var(--line);
+  }
+
+  .logo {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: 16px;
+    text-decoration: none;
+  }
+
+  .logo svg {
+    width: 18px;
+    height: 18px;
+    fill: var(--purple);
+  }
+
+  .brand p {
+    max-width: 320px;
+    margin: 14px 0 0;
+    color: var(--text-3);
+    font-size: 14.5px;
+  }
+
+  h3 {
+    margin: 0 0 14px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-3);
+  }
+
+  ul {
+    display: grid;
+    gap: 9px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  ul a,
+  .legal a {
+    color: var(--text-2);
+    text-decoration: none;
+    font-size: 14.5px;
+  }
+
+  ul a:hover,
+  .legal a:hover {
+    color: var(--text);
+  }
+
+  .legal {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 56px;
+    padding-top: 22px;
+    border-top: 1px solid var(--line);
+    font-size: 13px;
+    color: var(--text-3);
+  }
+
+  .legal a {
+    font-size: 13px;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  @media (max-width: 860px) {
+    .grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .brand {
+      grid-column: 1 / -1;
+    }
+  }
+
+  @media (max-width: 520px) {
+    .grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+</style>

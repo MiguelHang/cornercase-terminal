@@ -1,0 +1,46 @@
+---
+title: Small terminals
+description: Below 90 columns, cornercase folds its columns into a menu bar so the pane gets the whole width.
+---
+
+import Screen from '../../../../components/Screen.astro';
+
+The two columns take about 58 columns of your terminal. When the terminal is narrower than **90 columns** (a split in your window manager, a laptop with large fonts, a phone over SSH), cornercase switches to a **compact layout**: the columns fold away and the active tab gets the whole width.
+
+<Screen
+  name="compact-bar"
+  alt="cornercase at 64 columns: a bar at the top with a menu button, the breadcrumb shop › main › nvim and a search button, and nvim filling the rest"
+  caption="At 64 columns: a bar on top, the active tab below."
+/>
+
+## The bar
+
+| Part | What it does |
+| --- | --- |
+| `≡` | Opens and closes the menu. |
+| `project › workspace › tab` | Where you are. Clicking it opens the menu too. |
+| `⌕` | Opens the [search](../search/). |
+
+## The menu
+
+The menu covers the screen and shows one column at a time. It opens on the workspaces and tabs of the active project:
+
+<Screen
+  name="compact-menu-workspaces"
+  alt="The compact menu showing the workspaces of shop: main with its nvim and bash tabs, a hint that more rows are below, + new workspace and issues"
+/>
+
+Click a tab to switch to it and close the menu. **`‹ projects`** goes back to the list of projects, which also holds `settings` and `quit`:
+
+<Screen
+  name="compact-menu-projects"
+  alt="The compact menu showing the projects: shop, api, infra and notes, + new project, settings and quit"
+/>
+
+Click a project to see its workspaces. Everything you can do in the wide layout is here: the `+` buttons, `×` on hover, right-click to rename, the wheel to scroll. Each row is three lines tall, so it's easy to hit.
+
+Click the bar again or press `Esc` to close the menu.
+
+## Switching back
+
+The layout follows the size of your terminal as you resize it. At 90 columns or more the columns come back, with the widths you gave them. If several terminals are attached, the [smallest one](../sessions/#several-terminals-at-once) decides.

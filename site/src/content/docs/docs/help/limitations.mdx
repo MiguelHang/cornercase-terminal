@@ -1,0 +1,26 @@
+---
+title: Known limitations
+description: What cornercase doesn't do yet, and the trade-offs it makes on purpose.
+---
+
+cornercase is young. These are the gaps you may run into today.
+
+## Not there yet
+
+| Limitation | What it means for you |
+| --- | --- |
+| **No scrollback navigation** | Each pane keeps a scrollback history, but you can't scroll back through it from cornercase yet. Pipe long output through `less`, or use your program's own scrolling. |
+| **Shells don't survive the server** | After `cornercase kill-server` or a reboot, the layout comes back but every pane starts a new shell: running programs and their output are gone. |
+| **Terminal colours are read once** | The server asks your terminal for its colours when it starts. If you switch theme, restart it with `cornercase kill-server` to see the new colours. |
+| **No key releases** | Programs inside cornercase only see key presses, never releases, even with the kitty keyboard protocol. |
+| **One size for all clients** | When several terminals are attached, all of them use the smallest one's size. |
+| **100 issues per source** | The issue browser lists up to 100 issues from each tracker. Use the filters to narrow the list down. |
+| **Agent readiness is a guess** | cornercase decides when a shell or an agent is ready by watching its output settle. A very slow agent may get its prompt late, or not at all; see [The launch](../../guides/issues-and-agents/#the-launch). |
+
+## On purpose
+
+| Choice | Why |
+| --- | --- |
+| **Linux and macOS only** | cornercase relies on Unix pseudo-terminals, Unix sockets and each system's process information. |
+| **No keyboard shortcuts** | Every key belongs to the program in the active pane. See the [FAQ](../faq/#why-is-everything-a-mouse-click). |
+| **No nesting** | Running `cornercase` inside one of its own panes is refused, because the inner one would fight the outer one for the mouse and the screen. |

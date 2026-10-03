@@ -1,0 +1,187 @@
+---
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const repo = 'https://github.com/usecornercase/cornercase-terminal';
+---
+
+<header class="nav">
+  <div class="wrap inner">
+    <a class="brand" href={`${base}/`} aria-label="cornercase, home">
+      <svg viewBox="0 0 4 4" aria-hidden="true" shape-rendering="crispEdges"><path d="M1 0h3v1H1zM0 1h1v3H0z"></path></svg>
+      <span>cornercase</span>
+    </a>
+    <nav class="links" aria-label="Sections">
+      <a href="#features">Features</a>
+      <a href="#flow">Issues to agents</a>
+      <a href="#sessions">Sessions</a>
+      <a href={`${base}/docs/`}>Docs</a>
+    </nav>
+    <div class="actions">
+      <a class="gh" href={repo} aria-label="cornercase on GitHub">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+        <span class="stars" data-stars>GitHub</span>
+      </a>
+      <a class="btn btn-primary install" href="#install">Install</a>
+    </div>
+  </div>
+</header>
+
+<script>
+  const el = document.querySelector<HTMLElement>('[data-stars]');
+  const key = 'cornercase-stars';
+  const show = (n: number) => {
+    if (!el || !Number.isFinite(n) || n < 25) return;
+    el.textContent = n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k` : String(n);
+    el.parentElement?.setAttribute('aria-label', `cornercase on GitHub, ${n} stars`);
+  };
+  let cached: string | null = null;
+  try {
+    cached = sessionStorage.getItem(key);
+  } catch {}
+  if (cached) show(Number(cached));
+  else {
+    fetch('https://api.github.com/repos/usecornercase/cornercase-terminal')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { stargazers_count?: number } | null) => {
+        if (typeof data?.stargazers_count !== 'number') return;
+        show(data.stargazers_count);
+        try {
+          sessionStorage.setItem(key, String(data.stargazers_count));
+        } catch {}
+      })
+      .catch(() => {});
+  }
+  const nav = document.querySelector('.nav');
+  const onScroll = () => nav?.classList.toggle('scrolled', window.scrollY > 8);
+  onScroll();
+  window.addEventListener('scroll', onScroll, { passive: true });
+</script>
+
+<style>
+  .nav {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    border-bottom: 1px solid transparent;
+    transition:
+      background-color 0.25s ease,
+      border-color 0.25s ease;
+  }
+
+  .nav.scrolled {
+    background: rgb(7 6 11 / 0.78);
+    border-bottom-color: var(--line);
+    backdrop-filter: blur(14px) saturate(140%);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+  }
+
+  .inner {
+    display: flex;
+    align-items: center;
+    gap: 28px;
+    height: 66px;
+  }
+
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 11px;
+    text-decoration: none;
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: 17px;
+    letter-spacing: -0.02em;
+  }
+
+  .brand svg {
+    flex: none;
+    width: 20px;
+    height: 20px;
+    fill: var(--purple);
+  }
+
+  .links {
+    display: flex;
+    gap: 4px;
+    margin-left: auto;
+  }
+
+  .links a {
+    padding: 7px 12px;
+    border-radius: 8px;
+    color: var(--text-2);
+    font-size: 14.5px;
+    font-weight: 500;
+    text-decoration: none;
+    transition:
+      color 0.15s ease,
+      background-color 0.15s ease;
+  }
+
+  .links a:hover {
+    color: var(--text);
+    background: rgb(255 255 255 / 0.05);
+  }
+
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .gh {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 36px;
+    padding: 0 12px;
+    border-radius: 9px;
+    border: 1px solid var(--line-2);
+    color: var(--text-2);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    text-decoration: none;
+    transition:
+      border-color 0.15s ease,
+      color 0.15s ease;
+  }
+
+  .gh:hover {
+    color: var(--text);
+    border-color: rgb(255 255 255 / 0.3);
+  }
+
+  .gh svg {
+    width: 17px;
+    height: 17px;
+  }
+
+  .actions .install {
+    --h: 36px;
+    padding: 0 15px;
+    font-size: 14px;
+    border-radius: 9px;
+  }
+
+  @media (max-width: 860px) {
+    .links a:not(:last-child) {
+      display: none;
+    }
+
+    .nav {
+      background: rgb(7 6 11 / 0.82);
+      border-bottom-color: var(--line);
+      backdrop-filter: blur(14px) saturate(140%);
+      -webkit-backdrop-filter: blur(14px) saturate(140%);
+    }
+  }
+
+  @media (max-width: 480px) {
+    .inner {
+      gap: 12px;
+    }
+
+    .actions .install {
+      display: none;
+    }
+  }
+</style>

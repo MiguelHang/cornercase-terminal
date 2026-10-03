@@ -170,6 +170,7 @@ impl Emulator {
                 if cell.graphemes_len()? > 0 {
                     cell.graphemes_utf8(&mut text)?;
                 }
+                text.retain(|c| !c.is_control());
                 let symbol = if text.is_empty() { " ".to_string() } else { text.clone() };
                 let style = if cell.has_styling()? { to_style(cell.style()?) } else { Style::default() };
                 let style = if cell.is_selected()? { selected(style) } else { style };
@@ -293,6 +294,19 @@ mod tests {
         #[test]
         fn has_the_cursor() {
             assert_eq!(snapshot_of(b"hello\r\nworld").cursor, Some(Position::new(5, 1)));
+        }
+
+        #[test]
+        fn never_holds_control_characters() {
+            let snap = snapshot_of(b"x\x7fy");
+            let controls: Vec<&str> = snap
+                .rows
+                .iter()
+                .flatten()
+                .map(|c| c.symbol.as_str())
+                .filter(|s| s.contains(char::is_control))
+                .collect();
+            assert_eq!(controls, Vec::<&str>::new());
         }
 
         #[test]

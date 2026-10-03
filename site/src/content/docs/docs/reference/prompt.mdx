@@ -1,0 +1,60 @@
+---
+title: Prompt template
+description: Customise what cornercase hands to an agent when it starts on an issue, with placeholders for the issue's link, key, title, branch and more.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+When cornercase starts an agent on an issue, it gives the agent a prompt built from the `prompt` template in [`config.json`](../configuration/). The default is just the issue's link:
+
+```json
+"prompt": "{url}"
+```
+
+Agents that can read links, or that have the GitHub CLI at hand, take it from there. To give more context or instructions, write your own template. There is no row for it in the settings modal: edit `config.json`, then restart the server with `cornercase kill-server`.
+
+## Placeholders
+
+| Placeholder | Becomes | Example |
+| --- | --- | --- |
+| `{url}` | The issue's web address. | `https://github.com/acme/shop/issues/482` |
+| `{number}` | The issue's number. | `482` |
+| `{key}` | The issue's key, as the browser shows it. | `#482`, `sc-48`, `ENG-123` |
+| `{ref}` | Same as `{key}`. | `#482` |
+| `{title}` | The issue's title. | `Returns page crashes on empty address` |
+| `{branch}` | The branch cornercase uses for the issue. | `issue-482-returns-page-crashes-on-empty-address` |
+| `{source}` | Where the issue comes from. | `github`, `shortcut` or `linear` |
+| `{author}` | Who opened the issue. | `ana` |
+| `{labels}` | Its labels, separated by commas. | `bug, returns` |
+
+Anything else in braces is left as it is, so `{foo}` stays `{foo}` and you can still write braces in your text.
+
+## How the prompt is delivered
+
+| **send the prompt** (`submit`) | The agent supports bracketed paste | What happens |
+| --- | --- | --- |
+| off (default) | either | The prompt is put on **one line**, every run of spaces and line breaks becoming a single space, and typed at the agent's prompt. You read it and press `Enter`. |
+| on | yes | The prompt is pasted **as written**, line breaks included, and `Enter` is pressed for you. |
+| on | no | The prompt is put on one line, typed, and `Enter` is pressed for you. |
+
+Most agents with a full-screen interface support bracketed paste.
+
+## Examples
+
+A short instruction around the link:
+
+```json
+"prompt": "Fix {url}. Start with a failing test, then make it pass."
+```
+
+Everything the agent needs without opening the link:
+
+```json
+"prompt": "{key}: {title}\n{url}\n\nYou are on branch {branch}. Read the issue, propose a plan, and wait for my go before editing."
+```
+
+With `submit` off, that arrives on one line, ready for you to adjust before sending; with `submit` on, it arrives as written and starts right away.
+
+<Aside type="tip">
+Keep the template agent-neutral: the same prompt goes to whichever agent takes the issue, whether it is Claude Code, Codex, Gemini CLI or another one.
+</Aside>

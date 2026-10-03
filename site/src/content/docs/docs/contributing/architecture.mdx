@@ -1,0 +1,104 @@
+---
+title: Architecture
+description: How cornercase is built — the client and the server, the event loop, rendering, terminal emulation and the module map.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+cornercase is a single Rust binary that plays two roles: a **server** that owns every terminal and all the state, and a thin **client** that only shows frames and forwards input. This page explains how the pieces fit, for contributors. The reasons behind each decision are kept in [`CLAUDE.md`](https://github.com/usecornercase/cornercase-terminal/blob/main/CLAUDE.md) in the repository.
+
+## The big picture
+
+```text
+ terminal ─ cornercase ─┐                     ┌───── cornercase server ─────────────┐
+ terminal ─ cornercase ─┼── Unix socket ────▶ │  App ──▶ View ──▶ frame per client  │
+ terminal ─ cornercase ─┘  events ▶  ◀ frames │   ▲                                 │
+                                              │  PTYs + libghostty-vt emulators     │
+                                              └───┬─────────────────────────────────┘
+                                                  ▼
+                                    your shells, editors and agents
+```
+
+- `src/main.rs` picks the role from the first argument: none for the client, `server`, or `kill-server`.
+- The **client** (`client.rs`) starts the server if needed, queries the outer terminal's colours, sets up raw mode, mouse capture, bracketed paste and the kitty keyboard flags, sends a `Hello`, then has two jobs: write every frame it receives to stdout, and send every crossterm event it reads to the server.
+- The **server** (`server.rs`) owns the `App`, every PTY and every emulator. It renders a ratatui frame for each client and sends the bytes.
+
+## The server loop
+
+The accept thread, one reader thread per client, the signal thread and a forwarder for PTY output all send `ServerEvent`s down one `mpsc` channel. Each turn of the loop:
+
+1. drives pending agent launches and, at most once a second, looks for new git worktrees;
+2. draws one frame per client;
+3. lets the session `Saver` decide whether to write the session to disk;
+4. waits for an event or a 500 ms tick, then drains everything queued, feeding input and PTY output to the `App`.
+
+Each client has its own writer thread, so a slow client never blocks the loop. All clients share one size, the smallest, and see the same `App`, which is why hover, menus and scroll positions are mirrored.
+
+## Protocol
+
+`protocol.rs` frames messages with a little-endian length prefix and encodes them with `postcard`; messages over 64 MiB are refused.
+
+- `Hello` carries a protocol version and a build id (the executable's modification time). A server rejects a client from another build with `ServerMessage::Rejected`.
+- `ClientMessage::KillServer` and `ServerMessage::Rejected` must stay the first variants of their enums, so that any two builds can still tell each other to stop. `protocol::tests::compatibility` guards this.
+- One server per socket is enforced with `flock` on `server.lock`. The server calls `setsid` and ignores `SIGHUP`.
+
+## Rendering
+
+`ui::draw` takes a plain `View`, built by `App`, and knows nothing about PTYs. That makes every screen testable with ratatui's `TestBackend` and `insta` snapshots.
+
+Geometry functions such as `ui::layout`, `entry_row`, `workspace_row`, `form_buttons` and `picker_item` are shared by drawing and hit testing, so a click lands exactly on what was drawn, and tests take their click positions from the same functions.
+
+Colours are palette indices (cyan, dark gray, the brand purple `99`, the surfaces `236` and `254`), so the user's terminal theme applies. Below 90 columns, `ui::compact_layout` reuses the same areas with a top bar and three-row bands.
+
+## Terminal emulation
+
+Panes are emulated with [libghostty-vt](https://github.com/ghostty-org/ghostty), Ghostty's terminal core, wrapped in `emulator.rs`:
+
+- It answers the terminal queries programs wait for (DSR, DA, DECRQM, kitty keyboard queries…) and reflows text on resize.
+- Its types are `!Send`, so every emulator lives on the server's main thread; each PTY's reader thread only forwards bytes. Replies go out from `on_pty_write`, in order with the output that asked for them.
+- Cells keep palette indices. The colours queried from the outer terminal (OSC 10, 11 and 4, with DA1 as an end marker) become every emulator's defaults.
+- `take_copied` hands over OSC 52 clipboard writes from programs; reads and primary-selection writes are dropped.
+
+Keys are encoded in `keys.rs`: Ghostty's encoder for special keys, and for every key once a program enables the kitty protocol; a legacy encoder for the rest. Mouse events are encoded in `mouse.rs`, in the mode and encoding the program asked for, relative to its pane.
+
+`process.rs` finds the cwd, name and arguments of a PTY's foreground process: `/proc` on Linux, `proc_pidinfo`, `proc_name` and `sysctl(KERN_PROCARGS2)` on macOS (the only `unsafe` code). Tab names, agent detection and agent launches depend on it.
+
+## State and side effects
+
+- **Ids, not indices.** Every project, workspace, tab and pane gets an id from one counter. Menus, dialogs and background jobs refer to ids, so nothing breaks when the lists change underneath them.
+- **Closing is asynchronous.** Closing kills processes; the item is removed when the `Exited` events arrive.
+- **Pure state machines.** `issues::browser::Browser`, `settings::Settings` and `launch::Launch` contain no I/O: they take input and return actions or steps, which `App` carries out on threads. Answers carry their query and issue key, so stale ones are dropped.
+- **Saving settles.** `state::Saver` writes `session.json` only after the state has been stable for 2 seconds, and `state.rs` migrates older session versions.
+
+## Module map
+
+| Module | Responsibility |
+| --- | --- |
+| `main.rs` | Client, `server` or `kill-server`, from the arguments (the only place using `anyhow`). |
+| `client.rs` | Terminal setup and teardown, colour query, starting the server, forwarding events, writing frames. |
+| `server.rs` | The daemon: owns `App` and every terminal, accepts clients, draws a frame per client. |
+| `protocol.rs` | Messages, framing, socket and lock paths, build id. |
+| `app.rs` | Application state; turns events into actions; builds the `View`. |
+| `ui.rs` | Layout, hit testing and drawing from a plain `View`. |
+| `project.rs` | Project › workspace › tab › panes, labels, removal. |
+| `split.rs` | A tab's split tree: rects, dividers, splitting, removing, ratios. |
+| `term.rs` | A shell in a PTY, its emulator, and the reader thread. |
+| `emulator.rs` | The libghostty-vt wrapper; plain snapshots for the UI. |
+| `keys.rs`, `mouse.rs` | Key and mouse encoding for programs. |
+| `host_theme.rs` | Asking the outer terminal for its colours. |
+| `process.rs` | A process's cwd, name and arguments, per platform. |
+| `git.rs` | Branch from `.git/HEAD`, repository roots, linked worktrees, without running git. |
+| `worktree.rs` | `git worktree add` and `remove`, checkout paths, `.worktreeinclude`. |
+| `issues/` | The issue model and clients for GitHub (`gh`), Shortcut (REST) and Linear (GraphQL), the browser state and the on-disk cache. |
+| `agents.rs` | Known agents, modes and arguments, choosing and detecting an agent, the trust prompt. |
+| `launch.rs` | Starting an agent in a new tab, as a pure state machine. |
+| `markdown.rs`, `highlight.rs` | Markdown to wrapped lines; syntax highlighting of code blocks with palette colours. |
+| `search.rs`, `picker.rs` | Global search; the folder picker. |
+| `settings.rs`, `config.rs`, `secrets.rs` | The settings modal; `config.json`; `secrets.json`. |
+| `state.rs` | The saved session, its migrations, and the `Saver`. |
+| `clipboard.rs` | OSC 52. |
+| `error.rs` | The library's error type. |
+
+<Aside type="note">
+Design rules that keep the code honest, such as "mouse buttons only" and "the server owns the shells", are explained in [CONTRIBUTING.md](https://github.com/usecornercase/cornercase-terminal/blob/main/CONTRIBUTING.md). Read the section of `CLAUDE.md` for the area you change before you change it.
+</Aside>

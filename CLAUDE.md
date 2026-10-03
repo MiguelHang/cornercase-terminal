@@ -20,6 +20,7 @@ npx -y jscpd@4.3.0                          # copy-paste detector, reads .jscpd.
 - **After rebuilding, run `cargo run -- kill-server`**: the client refuses to attach to a server from another build.
 - Snapshots (`insta`): a changed render writes `src/snapshots/*.snap.new` and fails. Check it, then accept with `INSTA_UPDATE=always cargo test`. Delete snapshots of renamed or removed tests by hand.
 - **Before calling a task done, run fmt, clippy, tests, `cargo-machete` and jscpd, and fix what fails.** If one cannot pass, say so.
+- **A change that adds, removes or changes a feature updates the website in the same change** (see Website below).
 - `jscpd` fails above 1 % duplication (50-token clones) in `src/` and `tests/`. It is a ratchet: extract the shared code, do not raise the threshold. `cargo-machete` is a text search; a false positive goes in `[package.metadata.cargo-machete] ignored`.
 - **CI** (`.github/workflows/ci.yml`) runs the same checks: clippy + tests on Linux and macOS (one job per OS so clippy and tests share the Ghostty build; `target/` cached by `Swatinem/rust-cache`, saved from `main` only), and fmt + machete + jscpd on Linux. Dependabot groups action and crate updates monthly; `libghostty-vt` is pinned with `=` (pre-1.0 API), so bumping it needs a manual check.
 
@@ -169,6 +170,16 @@ T send-keys -t t -l $'\e[<0;6;5M'         # mouse press at col 6, row 5 (1-based
 T capture-pane -p -t t
 T kill-server
 ```
+
+## Website (`site/`)
+
+Astro + Starlight, deployed to GitHub Pages by `.github/workflows/pages.yml` (Pages source: GitHub Actions). `cd site && npm ci && npm run dev`; `npm run check` and `npm run build` must pass.
+
+- **Keep it in sync with the app.** When a feature, setting, `config.json` key, message, path or click changes, update in the same change: the docs pages that describe it (`src/content/docs/docs/`, search them for the old wording), the landing page if it shows it, the simulation if the UI changed, and the screens it makes stale.
+- The landing page (`src/pages/index.astro`, `src/components/landing/`) is custom; the documentation is Starlight content in `src/content/docs/docs/`. Internal doc links are relative with a trailing slash, because the site lives under a base path.
+- The terminal on the landing page is a simulation in TypeScript (`src/lib/demo/`) that mirrors `ui.rs`: same layout, labels and colours, with fake shells, agents and issues. When `ui.rs` changes, update the simulation too. The same code renders the feature pictures to SVG at build time (`scenes.ts`).
+- Docs screenshots are real: `src/screens/*.ansi` are `tmux capture-pane -e -p -N` dumps of the app, run with a fake `HOME` and its own `XDG_RUNTIME_DIR` (a separate server that still shows the default paths), rendered to SVG at build time by `src/lib/term/`. Box-drawing, block and a few symbol characters are drawn as shapes, not font glyphs, so lines join. Re-capture them when the UI changes.
+- Base URL and origin come from `actions/configure-pages` (`SITE_BASE`, `SITE_ORIGIN`): the site lives under `/cornercase-terminal/` on github.io and moves to `/` once the repo has a custom domain, with no code change.
 
 ## Known limitations
 

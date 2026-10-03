@@ -1,0 +1,101 @@
+---
+title: Sessions and the server
+description: How cornercase keeps your shells running in a background server, how to detach and reattach, and what is saved between restarts.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+cornercase is two programs in one binary. A **server** runs in the background and owns every shell, emulator and agent. The `cornercase` command you type is a **client**: it shows what the server draws and sends it your keys and clicks. Because the shells belong to the server, closing the window doesn't close them.
+
+```text
+ your terminal ── cornercase (client) ─┐
+                                       │  Unix socket
+ another terminal ── cornercase ───────┤
+                                       ▼
+                         cornercase server ── shells, editors, agents
+```
+
+## Start, detach, reattach
+
+- **The first `cornercase`** starts the server for you and attaches to it. The server opens the folder you started from as your first project, unless it restores a saved session (see below).
+- **Detach** by clicking `quit` at the bottom of the projects column, or by closing the terminal window. Only the client goes away; everything in your panes keeps running.
+- **Reattach** by running `cornercase` again, from any terminal and any folder. You find everything as you left it, including programs that kept printing while you were away.
+
+This also works over SSH: run `cornercase` on the remote machine, close the connection when you leave, and reattach when you log in again.
+
+## Several terminals at once
+
+Run `cornercase` in as many terminals as you like. They all attach to the same server and mirror each other: the same projects, the same active tab, even the same open menu. What you type in one shows up in all of them.
+
+All clients share one screen size, the smallest of them, so the session fits everywhere. Detach the small one and the others grow back.
+
+## What is saved
+
+The server saves your session to `~/.local/state/cornercase/session.json` (or `$XDG_STATE_HOME/cornercase/session.json`):
+
+- your projects, workspaces and tabs, in order, with their custom names;
+- every pane's folder, and how each tab is split, including the divider positions;
+- which project, workspace, tab and pane are active;
+- the width of the two columns;
+- which panes send right-clicks to their program;
+- the issue browser's last tab and filters.
+
+It saves once your layout has stayed the same for two seconds, so the burst of shells closing when you log out of your computer doesn't overwrite a good session with an empty one.
+
+## What is restored
+
+Processes can't be saved. When a **new** server starts, after `cornercase kill-server` or a reboot, its first client restores the saved layout: the same projects, workspaces, tabs and splits, each pane with a **fresh shell in its saved folder**. Folders that no longer exist are skipped; a pane whose folder is gone starts in its workspace's folder.
+
+A server that is already running never restores: reattaching just shows what is there.
+
+## Stop the server
+
+```sh
+cornercase kill-server
+```
+
+This ends every shell and program in every pane, and closes all attached clients. If no server is running, it says `no cornercase server is running`. The server also stops when it receives `SIGTERM` or `SIGINT`; it ignores `SIGHUP`, so a closed terminal or SSH connection doesn't take it down.
+
+## Updating cornercase
+
+A client only attaches to a server built from the same binary. After you rebuild or update cornercase, the old server is still running, and the new client stops with:
+
+```text
+the running cornercase server comes from another build. Run `cornercase kill-server` (it closes all its terminals) and start cornercase again
+```
+
+Save your work in the panes, run `cornercase kill-server`, then `cornercase`. Your layout comes back from the saved session.
+
+## A separate server
+
+`CORNERCASE_SOCKET` points cornercase at another socket, which means another, completely independent server:
+
+```sh
+CORNERCASE_SOCKET=/tmp/cc-demo/server.sock cornercase
+```
+
+That server keeps its own settings, saved tokens, session and issue cache in the socket's folder, so it never touches your usual ones. It's handy for trying things out, for a demo, or for keeping two unrelated sets of projects apart. Stop it with the same variable:
+
+```sh
+CORNERCASE_SOCKET=/tmp/cc-demo/server.sock cornercase kill-server
+```
+
+<Aside type="caution" title="Keep socket paths short">
+Unix sockets have a path limit of about 100 bytes (108 on Linux, 104 on macOS). Pick a short path for `CORNERCASE_SOCKET`.
+</Aside>
+
+## No cornercase inside cornercase
+
+Every shell that cornercase starts has `CORNERCASE=1` in its environment. Running `cornercase` from inside one of its own panes refuses with:
+
+```text
+cornercase is already running in this terminal; nesting it is not supported
+```
+
+To attach a second view, use another terminal window.
+
+## The environment of your shells
+
+The server is started by the first client, from that terminal, and keeps that client's environment. Every shell it opens inherits it, plus `TERM=xterm-256color` and `CORNERCASE=1`. The shell itself is your `$SHELL`, or `/bin/sh` if it isn't set.
+
+So if you change an environment variable in your login files, open a new tab to get a shell that reads them again, and restart the server for variables cornercase itself reads, such as `SHORTCUT_API_TOKEN`. The full list is in [Files and environment](../../reference/files-and-environment/).

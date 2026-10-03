@@ -25,3 +25,4 @@
 - [ ] Changed snapshots were reviewed, not just accepted
 - [ ] No new keyboard shortcuts, or they were discussed in an issue first
 - [ ] `CLAUDE.md` is updated if this changes a design decision or adds a module
+- [ ] The website (`site/`) is updated if this adds, changes or removes a feature

@@ -1,0 +1,111 @@
+---
+title: Troubleshooting
+description: Fixes for the problems you are most likely to meet when building, starting and using cornercase.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="Start with the log">
+Most things cornercase can't do are written to `server.log`, next to the socket: usually `$XDG_RUNTIME_DIR/cornercase/server.log`. See [Files and environment](../../reference/files-and-environment/).
+</Aside>
+
+## Building
+
+### The build fails in Ghostty or Zig
+
+Ghostty's terminal core only builds with **Zig 0.15.2**. Check:
+
+```sh
+zig version
+```
+
+If it prints anything else, download 0.15.2 from [ziglang.org/download](https://ziglang.org/download/) and put it first on your `PATH`. Package managers often ship a newer Zig.
+
+On macOS, also make sure the Xcode Command Line Tools are installed: `xcode-select --install`.
+
+### The first build is slow or fails to download
+
+The first build downloads Ghostty's sources and compiles them, which takes a couple of minutes and needs network access. If you already have a Ghostty checkout, set `GHOSTTY_SOURCE_DIR` to its path to skip the download.
+
+## Starting
+
+### "the running cornercase server comes from another build"
+
+You installed a new version while the old server is still running, and a client never attaches to a server from another build. Save your work in the panes, then:
+
+```sh
+cornercase kill-server
+cornercase
+```
+
+Your layout comes back; the shells are new. The same goes for "the running cornercase server is incompatible with this build".
+
+### "cornercase is already running in this terminal; nesting it is not supported"
+
+You ran `cornercase` from a pane of cornercase itself, where `CORNERCASE=1` is set. Open it from another terminal window instead.
+
+### "failed to start the cornercase server"
+
+The server didn't come up within five seconds. The message names its log file; open it to see why. If you use `CORNERCASE_SOCKET`, check that the folder can be created and that the path is short: Unix socket paths are limited to about 100 bytes.
+
+### My session didn't come back
+
+Sessions are restored only by a **new** server, and projects or workspaces whose folders no longer exist are skipped. The session is saved two seconds after your layout last changed, so a change made right before a crash or a power cut may be missing.
+
+## Using cornercase
+
+### Copying doesn't reach my clipboard
+
+cornercase copies with the OSC 52 escape sequence, which your terminal has to allow:
+
+- **iTerm2**: enable *Applications in terminal may access clipboard* in the settings.
+- **tmux** (when cornercase runs inside it): `set -g set-clipboard on`.
+
+Over SSH, it's your local terminal that needs to allow it.
+
+### Dragging doesn't select text
+
+The program in the pane is using the mouse, so the drag goes to it. Many such programs have their own way to select and copy, or a setting to turn their mouse support off.
+
+### Right-click doesn't open the pane menu
+
+That pane sends right-clicks to its program while the program uses the mouse. Quit the program or turn its mouse support off, then right-click and choose **use this menu on right-click**.
+
+### `Shift+Enter` or `Ctrl+Enter` arrive without the modifier
+
+cornercase asks your terminal to report these keys unambiguously, using the kitty keyboard protocol's first level. Terminals that don't support it can't tell `Shift+Enter` from `Enter`. Use a terminal that supports the protocol.
+
+### Colours look wrong after changing my terminal theme
+
+The server reads your terminal's colours once, from the first client that attaches to it. Restart it with `cornercase kill-server` to pick up a new theme.
+
+## Issues and agents
+
+### The GitHub tab is empty or shows an error
+
+- *this project is not in a git repository*: open the repository's folder as the project.
+- An error mentioning `gh`: install the [GitHub CLI](https://cli.github.com) and run `gh auth login`. If `gh` isn't on the server's `PATH`, set its path with the `gh` key in [`config.json`](../../reference/configuration/).
+
+### Shortcut or Linear rejects my token
+
+Create a new one (Shortcut: **Settings → Your account → API Tokens**; Linear: **Settings → Security & access → Personal API keys**) and paste it in the tracker's tab of the issue browser. If `SHORTCUT_API_TOKEN` or `LINEAR_API_KEY` is set, it is used instead of what you paste: fix or unset the variable, then restart the server.
+
+### The agent doesn't start
+
+cornercase types the agent's command in a new shell. If the shell is still in the foreground three seconds later, it gives up and writes `the agent did not start` to the log. Usually the command isn't found:
+
+- try typing the command yourself in a new tab;
+- make sure it is on the `PATH` of the shell inside cornercase;
+- or tell cornercase where it is with [`agent_commands`](../../reference/agents/#your-own-agents).
+
+### The trust question isn't answered
+
+Check that **settings → Agents → trust prompts** is on. If your agent words the question differently, extend `trust_prompt_pattern` in [`config.json`](../../reference/agents/#trust-prompts) so it matches.
+
+### The prompt isn't sent
+
+By default the prompt is typed and left for you to press `Enter`. Turn on **settings → Agents → send the prompt** to have it sent for you.
+
+## Still stuck?
+
+[Open an issue](https://github.com/usecornercase/cornercase-terminal/issues) with what you did, what you expected and what happened, plus the relevant lines from `server.log`. Security problems go through [private vulnerability reporting](https://github.com/usecornercase/cornercase-terminal/security/advisories/new) instead.

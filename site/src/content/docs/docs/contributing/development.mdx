@@ -1,0 +1,125 @@
+---
+title: Development
+description: Build cornercase from a checkout, run it next to your real session, run the checks and tests, and work on this website.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+Contributions are welcome: bug reports, ideas and pull requests. For anything bigger than a small fix, [open an issue](https://github.com/usecornercase/cornercase-terminal/issues) first so you can agree on the approach. The full guidelines are in [CONTRIBUTING.md](https://github.com/usecornercase/cornercase-terminal/blob/main/CONTRIBUTING.md), and every design decision is explained in [CLAUDE.md](https://github.com/usecornercase/cornercase-terminal/blob/main/CLAUDE.md).
+
+## Set up
+
+You need the same tools as for [installing](../../installation/): Linux or macOS, [rustup](https://rustup.rs), [Zig 0.15.2](https://ziglang.org/download/) on your `PATH`, and `git`.
+
+- The Rust toolchain is pinned in `rust-toolchain.toml`, version and components (`clippy`, `rustfmt`). rustup installs it on the first build, and CI uses exactly the same one.
+- The first build of each profile clones Ghostty and builds its terminal core with Zig: about 100 seconds and 530 MB in `target/`. `GHOSTTY_SOURCE_DIR` can point at a local Ghostty checkout instead.
+- `.cargo/config.toml` builds Ghostty with `LIBGHOSTTY_VT_SYS_OPTIMIZE=ReleaseFast`, because a debug build of it is too slow to use.
+
+## Run your build
+
+```sh
+cargo run                  # build and attach, starting a server if needed
+cargo run -- kill-server   # stop that server
+```
+
+A client never attaches to a server from another build, so **run `cargo run -- kill-server` after every rebuild**.
+
+To leave your everyday session alone, give your development build its own socket. Its settings, session and issue cache then live next to that socket too:
+
+```sh
+CORNERCASE_SOCKET=/tmp/cc-dev/server.sock cargo run
+CORNERCASE_SOCKET=/tmp/cc-dev/server.sock cargo run -- kill-server
+```
+
+### Check it in a real terminal
+
+To drive the app from a script, or from a terminal that already runs cornercase, start it in a separate tmux server and send it keys and mouse events:
+
+```sh
+T() { tmux -L cctest "$@"; }
+T new-session -d -s t -x 100 -y 20 ./target/debug/cornercase
+T send-keys -t t 'echo hi' Enter
+T send-keys -t t -l $'\e[<0;6;5M'          # mouse press at column 6, row 5 (1-based)
+T capture-pane -p -t t
+T kill-server
+```
+
+## Checks
+
+CI runs all of these on Linux and macOS; run them before opening a pull request:
+
+```sh
+cargo fmt
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --locked
+cargo-machete              # unused dependencies: cargo install cargo-machete
+npx -y jscpd@4.3.0         # copy-paste detector
+```
+
+- **Clippy** runs with `all` denied and `pedantic` warned, configured in `Cargo.toml`. Silence a lint only locally, with `#[expect(clippy::…, reason = "…")]`.
+- **jscpd** fails above 1 % duplication (clones of 50 tokens or more) in `src/` and `tests/`. It's a ratchet: extract the shared code rather than raising the threshold.
+- **cargo-machete** is a text search; a false positive goes in `[package.metadata.cargo-machete] ignored`.
+
+## Tests
+
+- **Unit tests** sit next to the code, in a `mod` named after the unit of work, with names that read as sentences, like `close_button_closes_its_entry`. Tables of cases use `rstest` with named `#[case::…]`.
+- **UI tests** render a `View` into ratatui's `TestBackend`: `insta` snapshots for layouts, cell styles for things like hover colours.
+- **Terminal and app tests** spawn real `/bin/sh` PTYs, never your own shell, and wait with `test_util::wait_until`, never with sleeps.
+- **End-to-end tests** in `tests/e2e.rs` run the real binary in a PTY, parse its output with `vt100`, and send raw bytes and SGR mouse sequences. Each test gets its own server through a `Session`, which runs `kill-server` when dropped. Wait for output that proves the previous step finished before sending the next one.
+- Nothing calls the real `gh`, Shortcut or Linear: tests use `fake_gh`, `FakeHttp` and a fake agent script. A test added as a safety net must fail without the code it protects.
+
+### Snapshots
+
+When a change alters what's drawn, `cargo test` writes `src/snapshots/*.snap.new` and fails. Look at the new render; if it's right, accept it:
+
+```sh
+INSTA_UPDATE=always cargo test
+```
+
+Delete the snapshots of tests you renamed or removed by hand.
+
+## Code style
+
+- Everything in English: identifiers, test names, messages and interface text.
+- **No comments**, doc comments included. If a decision needs explaining, it goes in `CLAUDE.md`.
+- Errors use `crate::error::Error` (`thiserror`) in the library; `anyhow` only in `src/main.rs`.
+- No `unwrap()` outside tests; in tests prefer `expect("what")`.
+- Mutexes are `parking_lot::Mutex`.
+- Imports in three groups: `std`, external crates, then `super` and `crate`.
+- `rustfmt.toml` sets `max_width = 120`.
+
+<Aside type="caution" title="Two rules that are easy to break">
+**Mouse buttons only**: the app has no keyboard shortcuts of its own, and `e2e::ctrl_b_reaches_the_shell` guards it. Please don't add one without discussing it in an issue. **The server owns the shells**: the client only writes frames, so behaviour belongs in `App`, not in `client.rs`.
+</Aside>
+
+## Pull requests
+
+Keep each pull request to one change. Describe what changed and why, how you tested it, and add a screenshot or a recording for anything visible. Update `CLAUDE.md` when you change a design decision or add a module. Contributions are dual licensed under MIT and Apache-2.0, like the rest of the project.
+
+## This website
+
+The website and these docs live in `site/`, built with [Astro](https://astro.build) and [Starlight](https://starlight.astro.build), and published to GitHub Pages by GitHub Actions.
+
+<Steps>
+
+1. Install the dependencies and start the development server:
+
+   ```sh
+   cd site
+   npm ci
+   npm run dev
+   ```
+
+2. Open `http://localhost:4321/cornercase-terminal/`.
+
+3. Before you push, make sure the production build passes:
+
+   ```sh
+   npm run build
+   ```
+
+</Steps>
+
+- The docs are Markdown and MDX files in `site/src/content/docs/docs/`. Links between pages are relative and end with a slash, because the site is served under a base path.
+- The terminal screens in the docs are real: `site/src/screens/*.ansi` are `tmux capture-pane -e -p -N` dumps of cornercase, turned into SVG when the site is built (`-N` keeps trailing cells that only have a background colour). To add one, run cornercase in tmux with a demo `HOME` and its own `XDG_RUNTIME_DIR`, so it gets a separate server and no personal paths show, capture it into that folder, and use it with `<Screen name="…" alt="…" />`. Re-capture the screens when the interface changes.
+- The live terminal on the home page is a simulation written in TypeScript that mirrors `ui.rs`; a change to the interface should be mirrored there too.
