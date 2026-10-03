@@ -42,6 +42,8 @@ const ISSUES_LABEL: &str = "issues";
 const BRAND_COLOR: Color = Color::Indexed(99);
 const DARK_SURFACE: Color = Color::Indexed(236);
 const LIGHT_SURFACE: Color = Color::Indexed(254);
+const DARK_HOVER: Color = Color::Indexed(235);
+const LIGHT_HOVER: Color = Color::Indexed(255);
 const CLOSE_BUTTON_WIDTH: u16 = 3;
 const COMPACT_CLOSE_WIDTH: u16 = 5;
 const TOAST_ICON: &str = " ✓ ";
@@ -1301,6 +1303,20 @@ impl View<'_> {
         if self.light { LIGHT_SURFACE } else { DARK_SURFACE }
     }
 
+    fn row_background(&self, r: Rect, active: bool) -> Style {
+        if active {
+            Style::default().bg(self.surface())
+        } else if self.row_hovered(r) {
+            Style::default().bg(if self.light { LIGHT_HOVER } else { DARK_HOVER })
+        } else {
+            Style::default()
+        }
+    }
+
+    fn row_hovered(&self, r: Rect) -> bool {
+        self.resizing.is_none() && self.tab.as_ref().is_none_or(|t| t.dragging.is_none()) && sidebar_hovered(self, r)
+    }
+
     fn search(&self) -> Option<&Search> {
         match &self.overlay {
             Some(Overlay::Search(search)) => Some(search),
@@ -2197,16 +2213,18 @@ fn draw_workspaces(f: &mut Frame, view: &View, areas: &Areas) {
                     let pad = room.saturating_sub(name.chars().count() + tag.chars().count());
                     line.extend([Span::raw(" ".repeat(pad)), Span::styled(tag, Style::default().fg(Color::Yellow))]);
                 }
-                draw_band(f, r, Line::from(line), Style::default());
-                draw_row_close(f, view, r, Style::default());
+                let bg = view.row_background(r, false);
+                draw_band(f, r, Line::from(line), bg);
+                draw_row_close(f, view, r, bg);
             }
             WorkspaceRow::Tab(w, t) => {
                 let active = w == view.active_workspace && view.active_tab == Some(t);
-                let (marker, style, bg) = if active {
-                    ("▌ ", Style::default().fg(Color::White), Style::default().bg(view.surface()))
+                let (marker, style) = if active {
+                    ("▌ ", Style::default().fg(Color::White))
                 } else {
-                    ("  ", Style::default().fg(Color::Gray), Style::default())
+                    ("  ", Style::default().fg(Color::Gray))
                 };
+                let bg = view.row_background(r, active);
                 let max = usize::from(r.width).saturating_sub(4 + close_width + 1);
                 let name = truncate_right(&view.workspaces[w].tabs[t], max);
                 let line = Line::from(vec![Span::raw("  "), Span::styled(marker, accent), Span::styled(name, style)]);
@@ -2297,16 +2315,17 @@ fn draw_group(f: &mut Frame, view: &View, g: usize, r: Rect, holds_active: bool)
         group_header(group, max),
         Span::styled(count, Style::default().fg(Color::DarkGray)),
     ]);
-    draw_band(f, r, line, Style::default());
+    draw_band(f, r, line, view.row_background(r, false));
 }
 
 fn draw_project(f: &mut Frame, view: &View, p: usize, r: Rect) {
     let entry = &view.projects[p];
-    let (marker, title_style, bg) = if p == view.active {
-        ("▌ ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD), Style::default().bg(view.surface()))
+    let (marker, title_style) = if p == view.active {
+        ("▌ ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
     } else {
-        ("  ", Style::default().fg(Color::Gray), Style::default())
+        ("  ", Style::default().fg(Color::Gray))
     };
+    let bg = view.row_background(r, p == view.active);
     let indent = if entry.group.is_some() { GROUP_INDENT } else { "" };
     let count = format!(" ({})", entry.workspaces);
     let reserved = NAME_RESERVED_COLS + indent.len() + usize::from(row_close_button(r).width - CLOSE_BUTTON_WIDTH);
@@ -4226,6 +4245,132 @@ mod tests {
         fn new_button_is_filled_on_hover() {
             let v = View { hover: Some(new_pos()), ..view(&["~"]) };
             assert_eq!(render(&v).backend().buffer()[new_pos()].bg, Color::Cyan);
+        }
+    }
+
+    mod row_hover {
+        use super::*;
+
+        #[derive(Debug, Clone, Copy)]
+        enum Row {
+            Project(usize),
+            Group,
+            Workspace,
+            Tab(usize),
+        }
+
+        impl Row {
+            fn nav(self) -> Nav {
+                match self {
+                    Row::Project(_) | Row::Group => Nav::Projects,
+                    Row::Workspace | Row::Tab(_) => Nav::Workspaces,
+                }
+            }
+
+            fn active(self) -> bool {
+                matches!(self, Row::Project(0) | Row::Tab(0))
+            }
+        }
+
+        const COMPACT: Rect = Rect { x: 0, y: 0, width: 80, height: 30 };
+
+        fn sample(light: bool) -> View<'static> {
+            let mut v = View {
+                has_project: true,
+                workspaces: vec![WorkspaceEntry {
+                    name: "login".into(),
+                    tabs: vec!["claude".into(), "nvim".into()],
+                    behind: 3,
+                }],
+                active_tab: Some(0),
+                light,
+                ..view(&["cornercase", "shop"])
+            };
+            v.groups = vec![GroupEntry { name: "work".into(), icon: '●', colour: 4, collapsed: false }];
+            v.projects[1].group = Some(0);
+            v
+        }
+
+        fn rect(v: &View, size: Rect, row: Row) -> Rect {
+            let a = layout(size, v.widths).shown(v.nav);
+            let sidebar = |r| entry_row(a.list, a.pitch, &v.sidebar_rows(), v.projects_scroll, r);
+            let workspaces = |r| workspace_row(a.workspaces_list, a.pitch, &v.tab_counts(), v.workspaces_scroll, r);
+            match row {
+                Row::Project(p) => sidebar(SidebarRow::Project(p)),
+                Row::Group => sidebar(SidebarRow::Group(0)),
+                Row::Workspace => workspaces(WorkspaceRow::Workspace(0)),
+                Row::Tab(t) => workspaces(WorkspaceRow::Tab(0, t)),
+            }
+        }
+
+        fn backgrounds(v: &View, size: Rect, r: Rect) -> Vec<Color> {
+            let t = render_sized(v, size.width, size.height);
+            let mut colours: Vec<Color> = r.positions().map(|p| t.backend().buffer()[p].bg).collect::<Vec<_>>();
+            colours.dedup();
+            colours
+        }
+
+        fn hovering(mut v: View<'static>, size: Rect, row: Row) -> (View<'static>, Rect) {
+            let r = rect(&v, size, row);
+            v.hover = Some(Position::new(r.x + 4, middle(r).y));
+            (v, r)
+        }
+
+        #[rstest]
+        fn a_hovered_row_is_filled_edge_to_edge(
+            #[values(Row::Project(0), Row::Project(1), Row::Group, Row::Workspace, Row::Tab(0), Row::Tab(1))] row: Row,
+            #[values(false, true)] light: bool,
+            #[values(false, true)] compact: bool,
+        ) {
+            let (size, nav) = if compact { (COMPACT, Some(row.nav())) } else { (AREA, None) };
+            let (v, r) = hovering(View { nav, ..sample(light) }, size, row);
+            let expected = match (row.active(), light) {
+                (true, false) => DARK_SURFACE,
+                (true, true) => LIGHT_SURFACE,
+                (false, false) => DARK_HOVER,
+                (false, true) => LIGHT_HOVER,
+            };
+            assert_eq!(backgrounds(&v, size, r), vec![expected]);
+        }
+
+        #[test]
+        fn the_close_button_and_the_behind_tag_sit_on_the_hover_background() {
+            let (v, r) = hovering(sample(false), AREA, Row::Workspace);
+            let t = render(&v);
+            let cells: Vec<(String, Color)> = [r.right() - 2, r.right() - 5]
+                .into_iter()
+                .map(|x| t.backend().buffer()[(x, r.y)].clone())
+                .map(|c| (c.symbol().to_string(), c.bg))
+                .collect();
+            assert_eq!(cells, vec![("×".into(), DARK_HOVER), ("3".into(), DARK_HOVER)]);
+        }
+
+        #[test]
+        fn other_rows_stay_plain() {
+            let (v, _) = hovering(sample(false), AREA, Row::Tab(1));
+            assert_eq!(backgrounds(&v, AREA, rect(&v, AREA, Row::Project(1))), vec![Color::Reset]);
+        }
+
+        #[test]
+        fn no_row_is_lit_while_an_overlay_is_open() {
+            let (mut v, r) = hovering(sample(false), AREA, Row::Project(1));
+            v.overlay = Some(Overlay::Menu { at: Position::new(80, 1), items: vec!["rename tab".into()] });
+            assert_eq!(backgrounds(&v, AREA, r), vec![Color::Reset]);
+        }
+
+        #[test]
+        fn no_row_is_lit_while_dragging_a_border() {
+            let (v, r) = hovering(sample(false), AREA, Row::Tab(1));
+            let v = View { resizing: Some(Border::Workspaces), ..v };
+            assert_eq!(backgrounds(&v, AREA, r), vec![Color::Reset]);
+        }
+
+        #[test]
+        fn no_row_is_lit_while_dragging_a_divider() {
+            let (v, r) = hovering(sample(false), AREA, Row::Tab(1));
+            let tab = TabView { dragging: Some(Vec::new()), ..single(screen(b"")) };
+            let v = View { tab: Some(tab), ..v };
+            assert_eq!(backgrounds(&v, AREA, r), vec![Color::Reset]);
         }
     }
 }
