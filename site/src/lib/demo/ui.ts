@@ -64,12 +64,14 @@ export class Painter {
   readonly regions: Region[] = [];
   cursor: Cursor | null = null;
   private surface: number;
+  private hoverSurface: number;
 
   constructor(
     readonly app: App,
     readonly g: Grid,
   ) {
     this.surface = app.light ? 254 : 236;
+    this.hoverSurface = app.light ? 255 : 235;
   }
 
   hovered(r: Rect): boolean {
@@ -104,6 +106,11 @@ export class Painter {
     const m = middle(r);
     const x = this.span(m.x, m.y, indent, {}, m.w);
     this.span(x, m.y, ` ${label} `, style, Math.max(0, right(m) - x));
+  }
+
+  rowBackground(r: Rect, active: boolean): Style {
+    if (active) return { bg: this.surface };
+    return !this.app.dragging && this.sidebarHovered(r) ? { bg: this.hoverSurface } : {};
   }
 
   buttonStyle(r: Rect, idle: Style, hoverBg: number): Style {
@@ -351,14 +358,14 @@ export class Painter {
         const count = group.collapsed ? ` (${inside})` : '';
         const max = r.w - 8 - count.length;
         const line = [seg(i === marked ? '▌ ' : '  ', CYAN), seg(group.collapsed ? '▸ ' : '▾ ', DARK), this.groupHeader(group, max), seg(count, DARK)];
-        this.band(r, line, {});
+        this.band(r, line, this.rowBackground(r, false));
         this.region({ r, click: () => app.toggleGroup(spec.g), right: (x, y) => app.openGroupMenu({ x, y }, spec.g), cursor: 'pointer' });
         return;
       }
       const pi = spec.p;
       const p = app.projects[pi];
       const active = pi === app.active;
-      const bg: Style = active ? { bg: this.surface } : {};
+      const bg = this.rowBackground(r, active);
       const indent = p.group !== undefined ? '  ' : '';
       const reserved = 6 + indent.length + (closeButton(r).w - 3);
       const count = ` (${p.workspaces.length})`;
@@ -419,14 +426,15 @@ export class Painter {
         const name = truncateRight(workspaceLabel(w), room - (shown ? shown.length + 1 : 0));
         const segs = [seg(`  ${name}`, style)];
         if (shown) segs.push(seg(' '.repeat(Math.max(0, room - name.length - shown.length))), seg(shown, { fg: 3 }));
-        this.band(r, segs, {});
+        const bg = this.rowBackground(r, false);
+        this.band(r, segs, bg);
         this.region({ r, click: () => app.selectWorkspace(spec.w), right: (x, y) => app.openMenu({ x, y }, { kind: 'workspace', project: p.id, workspace: w.id }), cursor: 'pointer' });
-        this.closeX(r, {}, () => app.closeWorkspace(spec.w));
+        this.closeX(r, bg, () => app.closeWorkspace(spec.w));
       } else if (spec.kind === 'tab') {
         const w = p.workspaces[spec.w];
         const t = w.tabs[spec.t];
         const active = spec.w === p.active && spec.t === w.active;
-        const bg: Style = active ? { bg: this.surface } : {};
+        const bg = this.rowBackground(r, active);
         const name = truncateRight(tabLabel(t), r.w - 4 - closeWidth - 1);
         this.band(r, [seg('  '), seg(active ? '▌ ' : '  ', CYAN), seg(name, active ? { fg: 15 } : { fg: 7 })], bg);
         this.region({ r, click: () => app.selectTab(spec.w, spec.t), right: (x, y) => app.openMenu({ x, y }, { kind: 'tab', project: p.id, workspace: w.id, tab: t.id }), cursor: 'pointer' });
