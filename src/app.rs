@@ -9,6 +9,8 @@ use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 
 use crate::agents;
+use crate::changes::diff::File as ChangedFile;
+use crate::changes::{self, BranchPicker, Checkout, Tints};
 use crate::clipboard;
 use crate::config::{self, Config};
 use crate::error::Result;
@@ -28,8 +30,9 @@ use crate::search::{self, Candidate, Goto, Kind, Search};
 use crate::secrets;
 use crate::settings::{self, Page, Settings, Status};
 use crate::split::{self, Dir};
-use crate::state::{self, IssuesState, PaneState, ProjectState, State, TabState, WorkspaceState};
+use crate::state::{self, ChangesState, IssuesState, PaneState, ProjectState, State, TabState, WorkspaceState};
 use crate::term::{SpawnOptions, Term};
+use crate::ui::changes::{self as panel, Action as HunkAction, Hit as PanelHit};
 use crate::ui::{self, FormHit, PickerHit, SidebarHit, SidebarRow, WorkspaceHit, WorkspaceRow};
 use crate::update::{self, Install, Release, Updates};
 use crate::upstream;
@@ -40,13 +43,47 @@ pub enum AppEvent {
     Input(Event),
     Output(u64, Vec<u8>),
     Exited(u64),
-    WorktreeCreated { project: u64, result: Result<PathBuf>, start: Option<Start> },
-    WorktreeRemoved { project: u64, workspace: u64, result: Result<()> },
-    IssuesLoaded { project: u64, source: Source, query: Query, result: Result<Listed> },
-    IssueRead { source: Source, key: String, result: Result<Detail> },
-    TokenChecked { source: Source, token: Secret, result: Result<Account> },
-    PeopleLoaded { project: u64, source: Source, result: Result<Vec<Person>> },
-    Behind { project: u64, behind: Vec<(u64, u32)> },
+    WorktreeCreated {
+        project: u64,
+        result: Result<PathBuf>,
+        start: Option<Start>,
+    },
+    WorktreeRemoved {
+        project: u64,
+        workspace: u64,
+        result: Result<()>,
+    },
+    IssuesLoaded {
+        project: u64,
+        source: Source,
+        query: Query,
+        result: Result<Listed>,
+    },
+    IssueRead {
+        source: Source,
+        key: String,
+        result: Result<Detail>,
+    },
+    TokenChecked {
+        source: Source,
+        token: Secret,
+        result: Result<Account>,
+    },
+    PeopleLoaded {
+        project: u64,
+        source: Source,
+        result: Result<Vec<Person>>,
+    },
+    Behind {
+        project: u64,
+        behind: Vec<(u64, u32)>,
+    },
+    Changes {
+        workspace: u64,
+        generation: u64,
+        request: Box<changes::git::Request>,
+        result: Result<changes::git::Loaded>,
+    },
     UpdateChecked(Result<Option<Release>>),
     Updated(Result<()>),
 }
@@ -136,6 +173,11 @@ const RETRY_UPDATE_SUBMIT: &str = "try again";
 const RESTART_SUBMIT: &str = "restart now";
 const COPY_COMMAND_SUBMIT: &str = "copy command";
 const RESTART_LABEL: &str = "↻ restart";
+const COMPARE_SUBMIT: &str = "compare";
+const CHANGES_LABEL: &str = "changes";
+const SENT_TO_AGENT: &str = "sent to the agent";
+const NO_AGENT: &str = "no agent here, so the reference is copied";
+const EDIT_SCRIPT: &str = "exec ${VISUAL:-${EDITOR:-vi}} \"+$1\" \"$2\"";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum UpdateStep {
@@ -159,6 +201,7 @@ enum Overlay {
     Issues(Box<Browser>),
     Search(Search),
     Update(UpdateStep),
+    Branches(BranchPicker),
 }
 
 impl Overlay {
@@ -253,6 +296,7 @@ pub struct App {
     updates: Updates,
     update_scroll: usize,
     restart: bool,
+    changes: changes::Panel,
 }
 
 struct Apis {
@@ -328,6 +372,7 @@ impl App {
             updates: Updates::from_env(),
             update_scroll: 0,
             restart: false,
+            changes: changes::Panel::default(),
         }
     }
 
@@ -347,7 +392,17 @@ impl App {
     }
 
     fn layout(&self, area: Rect) -> ui::Areas {
-        ui::layout(area, self.widths)
+        ui::layout_with(area, self.widths, self.changes_shown())
+    }
+
+    fn changes_target(&self) -> Option<Checkout> {
+        let workspace = self.project()?.workspace()?;
+        git::branch(&workspace.path)?;
+        Some(Checkout { workspace: workspace.id, dir: workspace.path.clone(), base: workspace.base.clone() })
+    }
+
+    fn changes_shown(&self) -> bool {
+        self.changes.open && self.changes_target().is_some()
     }
 
     fn pane_size(&self, area: Rect) -> (u16, u16) {
@@ -379,6 +434,7 @@ impl App {
     pub fn refresh(&mut self, now: Instant) {
         self.drive_launches(now);
         self.check_updates(now);
+        self.refresh_changes(now);
         if self.synced.is_some_and(|at| now.duration_since(at) < SYNC_EVERY) {
             return;
         }
@@ -417,6 +473,20 @@ impl App {
                 let _ = tx.send(AppEvent::Behind { project: id, behind });
             });
         }
+    }
+
+    fn refresh_changes(&mut self, now: Instant) {
+        let Some(target) = self.changes_target() else { return };
+        if self.changes.workspace != Some(target.workspace) {
+            self.changes.workspace = Some(target.workspace);
+            self.changes.scroll = 0;
+        }
+        let Some((generation, request)) = self.changes.request(&target, now) else { return };
+        let (tx, workspace) = (self.tx.clone(), target.workspace);
+        std::thread::spawn(move || {
+            let result = changes::git::load(&request);
+            let _ = tx.send(AppEvent::Changes { workspace, generation, request: Box::new(request), result });
+        });
     }
 
     fn behind_counted(&mut self, project: u64, behind: &[(u64, u32)]) {
@@ -509,7 +579,7 @@ impl App {
     fn spawn(&mut self, area: Rect, cwd: PathBuf) -> Result<Term> {
         let (rows, cols) = self.pane_size(area);
         let id = self.take_id();
-        let opts = SpawnOptions { id, shell: &self.shell, rows, cols, cwd: Some(cwd), theme: &self.theme };
+        let opts = SpawnOptions { id, shell: &self.shell, args: &[], rows, cols, cwd: Some(cwd), theme: &self.theme };
         Term::spawn(opts, self.tx.clone())
     }
 
@@ -667,6 +737,7 @@ impl App {
                         path: w.path.clone(),
                         name: w.name.clone(),
                         worktree: w.worktree,
+                        base: w.base.clone(),
                         tabs: w
                             .tabs
                             .iter()
@@ -699,11 +770,25 @@ impl App {
             people: self.issue_people.clone(),
         });
         let groups = self.groups.iter().map(|g| g.entry.clone()).collect();
-        State { version: state::VERSION, groups, projects, active: self.active, widths: Some(self.widths), issues }
+        let changes = (self.changes.open || self.changes.mode != changes::Mode::default())
+            .then_some(ChangesState { open: self.changes.open, mode: self.changes.mode });
+        State {
+            version: state::VERSION,
+            groups,
+            projects,
+            active: self.active,
+            widths: Some(self.widths),
+            issues,
+            changes,
+        }
     }
 
     pub fn restore(&mut self, saved: &State, area: Rect) -> Result<()> {
         self.widths = saved.widths.unwrap_or_default();
+        if let Some(changes) = saved.changes {
+            self.changes.open = changes.open;
+            self.changes.mode = changes.mode;
+        }
         if let Some(issues) = &saved.issues {
             self.issue_tab = issues.tab.as_deref().and_then(IssueTab::from_id);
             self.issue_closed = issues.closed;
@@ -743,6 +828,7 @@ impl App {
             return Ok(None);
         }
         let mut workspace = Workspace::new(self.take_id(), path.clone(), saved.name.clone(), saved.worktree);
+        workspace.base.clone_from(&saved.base);
         for saved_tab in saved.tabs.iter().filter(|t| !t.panes.is_empty()) {
             let mut panes = Vec::new();
             for pane in &saved_tab.panes {
@@ -794,6 +880,9 @@ impl App {
             AppEvent::TokenChecked { source, token, result } => self.token_checked(source, &token, result, area)?,
             AppEvent::PeopleLoaded { project, source, result } => self.people_loaded(project, source, result),
             AppEvent::Behind { project, behind } => self.behind_counted(project, &behind),
+            AppEvent::Changes { workspace, generation, request, result } => {
+                self.changes.loaded(workspace, generation, &request, result);
+            }
             AppEvent::UpdateChecked(result) => self.update_checked(result),
             AppEvent::Updated(result) => self.updated(result),
             AppEvent::Output(id, bytes) => {
@@ -817,6 +906,7 @@ impl App {
             Some(Overlay::Menu { .. }) if key.code == KeyCode::Esc => self.overlay = None,
             None if self.nav.is_some() && key.code == KeyCode::Esc => self.nav = None,
             Some(Overlay::Picker(_)) => return self.picker_key(key, area),
+            Some(Overlay::Branches(_)) => self.branches_key(key, area),
             Some(Overlay::Issues(_)) => return self.issues_key(key, area),
             Some(Overlay::Settings(_)) => self.settings_key(key, area),
             Some(Overlay::Search(_)) => self.search_key(key, area),
@@ -855,6 +945,9 @@ impl App {
         if self.overlay.is_some() {
             return self.overlay_mouse(ev, pos, area);
         }
+        if self.changes_shown() && areas.changes.contains(pos) {
+            return self.changes_mouse(ev, pos, areas.changes, area);
+        }
         if let Some(delta) = wheel(ev.kind)
             && self.scroll_column(&areas, pos, delta)
         {
@@ -872,6 +965,12 @@ impl App {
         if areas.search_button.contains(pos) {
             if left {
                 self.overlay = Some(Overlay::Search(Search::default()));
+            }
+            return Ok(());
+        }
+        if areas.compact() && self.changes_target().is_some() && areas.changes_button.contains(pos) {
+            if left {
+                self.toggle_changes();
             }
             return Ok(());
         }
@@ -895,6 +994,14 @@ impl App {
                 self.click_projects(areas.list, areas.pitch, pos);
             } else if right {
                 self.open_project_menu(areas.list, areas.pitch, pos);
+            }
+            return Ok(());
+        }
+        if let Some(label) = self.changes_label().filter(|_| !areas.compact())
+            && ui::changes_button(areas.issues, &label).contains(pos)
+        {
+            if left {
+                self.toggle_changes();
             }
             return Ok(());
         }
@@ -938,6 +1045,9 @@ impl App {
     }
 
     fn toggle_nav(&mut self) {
+        if self.nav.is_none() {
+            self.changes.open = false;
+        }
         self.nav = match self.nav {
             Some(_) => None,
             None if self.project().is_some() => Some(ui::Nav::Workspaces),
@@ -1099,7 +1209,11 @@ impl App {
 
     fn drag_border(&mut self, border: ui::Border, ev: MouseEvent, area: Rect) {
         if ev.kind == MouseEventKind::Drag(MouseButton::Left) {
-            self.widths = self.widths.dragged(border, ev.column, area.width);
+            let total = match border {
+                ui::Border::Changes => area.width,
+                _ => self.widths.main_width(area.width, self.changes_shown()),
+            };
+            self.widths = self.widths.dragged(border, ev.column, total);
             self.border_click = None;
         } else {
             self.resizing = None;
@@ -1874,6 +1988,10 @@ impl App {
             self.search_mouse(ev, pos, area);
             return Ok(());
         }
+        if matches!(self.overlay, Some(Overlay::Branches(_))) {
+            self.branches_mouse(ev, pos, area);
+            return Ok(());
+        }
         if matches!(self.overlay, Some(Overlay::Issues(_))) {
             return self.issues_mouse(ev, pos, area);
         }
@@ -2453,6 +2571,10 @@ impl App {
             text.chars().filter(|c| !c.is_control()).for_each(|c| search.push(c));
             return;
         }
+        if let Some(Overlay::Branches(picker)) = &mut self.overlay {
+            text.chars().filter(|c| !c.is_control()).for_each(|c| picker.push(c));
+            return;
+        }
         if let Some(Overlay::Issues(b)) = &mut self.overlay {
             b.paste(text);
             return;
@@ -2535,6 +2657,8 @@ impl App {
             toast: self.toast.map(|(message, _)| message),
             nav: self.nav,
             update: self.update_label(),
+            changes: if self.changes_shown() { self.panel_view() } else { None },
+            changes_button: self.changes_label().map(|label| ui::ChangesButton { label, open: self.changes.open }),
         };
         ui::draw(f, &view);
     }
@@ -2602,6 +2726,7 @@ impl App {
             Overlay::Issues(b) => b.view(area, issues::now()),
             Overlay::Search(search) => self.search_view(search),
             Overlay::Update(step) => self.update_view(step, area),
+            Overlay::Branches(picker) => Self::branches_view(picker),
         })
     }
 
@@ -2639,6 +2764,270 @@ impl App {
             hint,
             error: picker.error().map(str::to_string),
             submit: PICKER_SUBMIT,
+            empty: "no folders here",
+        })
+    }
+
+    fn changes_label(&self) -> Option<String> {
+        let target = self.changes_target()?;
+        let files =
+            self.changes.model(target.workspace, target.base.as_deref()).and_then(|m| m.diff()).map(|d| d.files.len());
+        Some(match files {
+            Some(n) if n > 0 => format!("{CHANGES_LABEL} {n}"),
+            _ => CHANGES_LABEL.to_string(),
+        })
+    }
+
+    fn toggle_changes(&mut self) {
+        self.changes.open = !self.changes.open;
+        self.nav = None;
+    }
+
+    fn changed_diff(&self, target: &Checkout) -> Option<std::sync::Arc<changes::diff::Diff>> {
+        self.changes.model(target.workspace, target.base.as_deref()).and_then(|m| m.diff()).cloned()
+    }
+
+    fn panel_view(&self) -> Option<panel::View> {
+        let target = self.changes_target()?;
+        let ws = target.workspace;
+        let model = self.changes.model(ws, target.base.as_deref());
+        let body = match model.map(|m| &m.result) {
+            None => panel::Body::Loading,
+            Some(Ok(diff)) => panel::Body::Ready(std::sync::Arc::clone(diff)),
+            Some(Err(e)) => panel::Body::Failed(e.clone()),
+        };
+        let (mut folded, mut viewed, mut gaps) = (Vec::new(), Vec::new(), HashMap::new());
+        if let panel::Body::Ready(diff) = &body {
+            for (i, file) in diff.files.iter().enumerate() {
+                folded.push(self.changes.folded(ws, diff, file));
+                viewed.push(self.changes.viewed(ws, file));
+                for h in 1..file.hunks.len() {
+                    if let Some(lines) = self.changes.gap(ws, file, h) {
+                        gaps.insert((i, h), std::sync::Arc::clone(lines));
+                    }
+                }
+            }
+        }
+        Some(panel::View {
+            mode: self.changes.mode,
+            base: self.changes.label(ws).or(target.base),
+            body,
+            folded,
+            viewed,
+            gaps,
+            scroll: self.changes.scroll,
+            live: model.is_some_and(|m| m.live(Instant::now())),
+            light: self.theme.is_light() == Some(true),
+            tints: Tints::of(&self.theme),
+        })
+    }
+
+    fn changes_mouse(&mut self, ev: MouseEvent, pos: Position, panel_area: Rect, area: Rect) -> Result<()> {
+        let (Some(target), Some(view)) = (self.changes_target(), self.panel_view()) else { return Ok(()) };
+        if let Some(delta) = wheel(ev.kind) {
+            let max = panel::max_scroll(panel_area, &view);
+            self.changes.scroll = self.changes.scroll.min(max).saturating_add_signed(delta).min(max);
+            return Ok(());
+        }
+        if ev.kind != MouseEventKind::Down(MouseButton::Left) {
+            return Ok(());
+        }
+        let diff = self.changed_diff(&target);
+        let file = |i: usize| diff.as_ref().and_then(|d| d.files.get(i).cloned());
+        match panel::hit(panel_area, &view, pos) {
+            Some(PanelHit::Mode(mode)) => self.changes.set_mode(mode),
+            Some(PanelHit::Close) => self.changes.open = false,
+            Some(PanelHit::Base) => self.open_branches(&target),
+            Some(PanelHit::FoldAll) => {
+                if let Some(diff) = &diff {
+                    self.changes.fold_all(target.workspace, diff);
+                }
+            }
+            Some(PanelHit::File(i)) => {
+                if let (Some(diff), Some(f)) = (&diff, file(i)) {
+                    self.changes.toggle_fold(target.workspace, diff, &f);
+                }
+            }
+            Some(PanelHit::Viewed(i)) => {
+                if let Some(f) = file(i) {
+                    self.changes.toggle_viewed(target.workspace, &f);
+                }
+            }
+            Some(PanelHit::Gap(i, h)) => {
+                if let Some(f) = file(i)
+                    && let Some(new_side) = changes::git::new_side(&target.dir, self.changes.mode, &f.path)
+                {
+                    let lines = changes::gap_lines(&f, h, &new_side);
+                    self.changes.set_gap(target.workspace, &f, h, lines);
+                }
+            }
+            Some(PanelHit::Action(i, h, action)) => {
+                if let Some(f) = file(i) {
+                    return self.hunk_action(&target, &f, h, action, area);
+                }
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
+    fn hunk_action(
+        &mut self,
+        target: &Checkout,
+        file: &ChangedFile,
+        h: usize,
+        action: HunkAction,
+        area: Rect,
+    ) -> Result<()> {
+        let Some(hunk) = file.hunks.get(h) else { return Ok(()) };
+        let (first, last) = hunk.changed();
+        match action {
+            HunkAction::Copy => copy(&mut self.host_writes, &mut self.toast, &hunk.patch()),
+            HunkAction::Open => return self.open_in_editor(target, &file.path, first, area),
+            HunkAction::Ask => {
+                let lines = if first == last { first.to_string() } else { format!("{first}-{last}") };
+                self.ask_agent(target.workspace, &format!("{}:{lines} ", file.path));
+            }
+        }
+        Ok(())
+    }
+
+    fn workspace_position(&self, id: u64) -> Option<(usize, usize)> {
+        self.projects
+            .iter()
+            .enumerate()
+            .find_map(|(p, project)| project.workspaces.iter().position(|w| w.id == id).map(|w| (p, w)))
+    }
+
+    fn open_in_editor(&mut self, target: &Checkout, path: &str, line: u32, area: Rect) -> Result<()> {
+        let Some((p, w)) = self.workspace_position(target.workspace) else { return Ok(()) };
+        let (rows, cols) = self.pane_size(area);
+        let id = self.take_id();
+        let file = target.dir.join(path).display().to_string();
+        let args = ["-c".to_string(), EDIT_SCRIPT.to_string(), "sh".to_string(), line.max(1).to_string(), file];
+        let opts = SpawnOptions {
+            id,
+            shell: "/bin/sh",
+            args: &args,
+            rows,
+            cols,
+            cwd: Some(target.dir.clone()),
+            theme: &self.theme,
+        };
+        let term = Term::spawn(opts, self.tx.clone())?;
+        let tab = Tab::new(self.take_id(), None, term);
+        let workspace = &mut self.projects[p].workspaces[w];
+        workspace.tabs.push(tab);
+        workspace.active = workspace.tabs.len() - 1;
+        self.projects[p].active = w;
+        Ok(())
+    }
+
+    fn ask_agent(&mut self, workspace: u64, text: &str) {
+        let Some((p, w)) = self.workspace_position(workspace) else { return };
+        let ws = &self.projects[p].workspaces[w];
+        let tabs = std::iter::once(ws.active).chain(0..ws.tabs.len()).filter(|&t| t < ws.tabs.len());
+        let found = tabs.into_iter().find_map(|t| {
+            let tab = &ws.tabs[t];
+            let panes = std::iter::once(tab.active).chain(0..tab.panes.len()).filter(|&i| i < tab.panes.len());
+            panes
+                .into_iter()
+                .find(|&i| agents::detect(&self.config, &tab.panes[i].foreground_args()).is_some())
+                .map(|i| (t, tab.panes[i].id))
+        });
+        let Some((t, id)) = found else {
+            self.host_writes.push(clipboard::osc52(text.trim_end()));
+            self.toast = Some((NO_AGENT, Instant::now()));
+            return;
+        };
+        let ws = &mut self.projects[p].workspaces[w];
+        ws.active = t;
+        let tab = &mut ws.tabs[t];
+        tab.focus(id);
+        if let Some(term) = tab.panes.iter_mut().find(|term| term.id == id) {
+            let bytes =
+                if term.emulator.bracketed_paste() { format!("\x1b[200~{text}\x1b[201~") } else { text.to_string() };
+            term.write(bytes.as_bytes());
+        }
+        self.toast = Some((SENT_TO_AGENT, Instant::now()));
+    }
+
+    fn open_branches(&mut self, target: &Checkout) {
+        let branches = changes::git::branches(&target.dir);
+        let default = changes::git::default_base(&target.dir);
+        let current = self.changes.label(target.workspace).or_else(|| target.base.clone());
+        self.overlay = Some(Overlay::Branches(BranchPicker::new(target.workspace, branches, default, current)));
+    }
+
+    fn branch_rows(area: Rect) -> usize {
+        usize::from(ui::picker_list(ui::picker_area(area)).height)
+    }
+
+    fn branches_key(&mut self, key: KeyEvent, area: Rect) {
+        let rows = Self::branch_rows(area);
+        let Some(Overlay::Branches(picker)) = &mut self.overlay else { return };
+        match key.code {
+            KeyCode::Esc => self.overlay = None,
+            KeyCode::Enter => self.choose_base(None),
+            KeyCode::Backspace => picker.pop(),
+            KeyCode::Up => picker.move_selection(-1, rows),
+            KeyCode::Down => picker.move_selection(1, rows),
+            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => picker.push(c),
+            _ => {}
+        }
+    }
+
+    fn branches_mouse(&mut self, ev: MouseEvent, pos: Position, area: Rect) {
+        let rows = Self::branch_rows(area);
+        let Some(Overlay::Branches(picker)) = &mut self.overlay else { return };
+        match ev.kind {
+            MouseEventKind::ScrollUp => picker.scroll_by(-WHEEL_ROWS, rows),
+            MouseEventKind::ScrollDown => picker.scroll_by(WHEEL_ROWS, rows),
+            MouseEventKind::Down(MouseButton::Left) => {
+                match ui::picker_hit(area, COMPARE_SUBMIT, picker.items().len(), picker.scroll(), pos) {
+                    Some(PickerHit::Item(i)) => self.choose_base(Some(i)),
+                    Some(PickerHit::Submit) => self.choose_base(None),
+                    Some(PickerHit::Cancel) => self.overlay = None,
+                    None => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn choose_base(&mut self, index: Option<usize>) {
+        let Some(Overlay::Branches(picker)) = self.overlay.take() else { return };
+        let Some(branch) = picker.chosen(index) else {
+            self.overlay = Some(Overlay::Branches(picker));
+            return;
+        };
+        let base = (picker.default() != Some(branch.as_str())).then_some(branch);
+        if let Some((p, w)) = self.workspace_position(picker.workspace) {
+            self.projects[p].workspaces[w].base = base;
+        }
+        self.changes.scroll = 0;
+    }
+
+    fn branches_view(picker: &BranchPicker) -> ui::Overlay {
+        let items = picker.items();
+        let hint = picker
+            .selected()
+            .and_then(|i| items.get(i))
+            .map_or_else(|| "type to filter the branches".into(), |b| format!("enter compares with {b}"));
+        ui::Overlay::Picker(ui::Picker {
+            title: "compare with",
+            path: String::new(),
+            filter: picker.filter().to_string(),
+            items: items
+                .iter()
+                .map(|b| ui::Entry { name: (*b).to_string(), branch: picker.tag(b).map(str::to_string) })
+                .collect(),
+            selected: picker.selected(),
+            scroll: picker.scroll(),
+            hint,
+            error: None,
+            submit: COMPARE_SUBMIT,
+            empty: "no branches",
         })
     }
 }
@@ -3780,7 +4169,14 @@ mod tests {
                 active: 0,
                 layout: None,
             });
-            WorkspaceState { path: path.to_path_buf(), name: None, worktree: false, tabs: tabs.collect(), active: 0 }
+            WorkspaceState {
+                path: path.to_path_buf(),
+                name: None,
+                worktree: false,
+                tabs: tabs.collect(),
+                active: 0,
+                base: None,
+            }
         }
 
         fn project(path: &Path, workspaces: Vec<WorkspaceState>) -> ProjectState {
@@ -3788,7 +4184,15 @@ mod tests {
         }
 
         fn saved(projects: Vec<ProjectState>, active: usize) -> State {
-            State { version: state::VERSION, groups: Vec::new(), projects, active, widths: None, issues: None }
+            State {
+                version: state::VERSION,
+                groups: Vec::new(),
+                projects,
+                active,
+                widths: None,
+                issues: None,
+                changes: None,
+            }
         }
 
         #[test]
@@ -5080,6 +5484,7 @@ mod tests {
                 worktree: false,
                 tabs: vec![tab],
                 active: 0,
+                base: None,
             };
             let project = ProjectState {
                 path: dir.path().to_path_buf(),
@@ -5095,6 +5500,7 @@ mod tests {
                 active: 0,
                 widths: None,
                 issues: None,
+                changes: None,
             };
 
             app.restore(&saved, AREA).expect("restore");
@@ -5131,7 +5537,10 @@ mod tests {
 
             drag(&mut app, from, 39);
 
-            assert_eq!(app.widths, ui::Widths { projects: 40, workspaces: ui::WORKSPACES_WIDTH });
+            assert_eq!(
+                app.widths,
+                ui::Widths { projects: 40, workspaces: ui::WORKSPACES_WIDTH, ..ui::Widths::default() }
+            );
         }
 
         #[test]
@@ -5227,14 +5636,17 @@ mod tests {
 
             drag(&mut app, from, 39);
 
-            assert_eq!(app.state().widths, Some(ui::Widths { projects: 40, workspaces: ui::WORKSPACES_WIDTH }));
+            assert_eq!(
+                app.state().widths,
+                Some(ui::Widths { projects: 40, workspaces: ui::WORKSPACES_WIDTH, ..ui::Widths::default() })
+            );
         }
 
         #[test]
         fn restore_brings_back_the_widths() {
             let dir = TempDir::new();
             let (mut app, _rx) = empty_app();
-            let widths = ui::Widths { projects: 40, workspaces: 20 };
+            let widths = ui::Widths { projects: 40, workspaces: 20, ..ui::Widths::default() };
             let project =
                 ProjectState { path: dir.path().to_path_buf(), name: None, group: None, workspaces: vec![], active: 0 };
             let saved = State {
@@ -5244,6 +5656,7 @@ mod tests {
                 active: 0,
                 widths: Some(widths),
                 issues: None,
+                changes: None,
             };
 
             app.restore(&saved, AREA).expect("restore");
@@ -5995,6 +6408,194 @@ mod tests {
             app.refresh(Instant::now());
 
             assert_eq!(app.updates.checked, None);
+        }
+    }
+
+    mod changes_panel {
+        use super::*;
+        use crate::test_util::{git, write_executable};
+
+        fn repo_with_edit() -> TempDir {
+            let repo = git_repo(&[("a.txt", "one\ntwo\n")]);
+            std::fs::write(repo.path().join("a.txt"), "one\nTWO\n").expect("edit");
+            repo
+        }
+
+        fn loaded(app: &mut App, rx: &Receiver<AppEvent>) {
+            pump_until(app, rx, "the changes load", |a| {
+                let Some(target) = a.changes_target() else { return false };
+                a.changes.model(target.workspace, target.base.as_deref()).is_some()
+            });
+        }
+
+        fn refresh_until_loaded(app: &mut App, rx: &Receiver<AppEvent>) {
+            app.refresh(Instant::now());
+            loaded(app, rx);
+        }
+
+        fn button(app: &App) -> Position {
+            let label = app.changes_label().expect("a changes button");
+            ui::changes_button(areas().issues, &label).as_position()
+        }
+
+        fn panel_area(app: &App) -> Rect {
+            app.layout(AREA).changes
+        }
+
+        #[test]
+        fn a_git_workspace_shows_the_button_with_its_count() {
+            let repo = repo_with_edit();
+            let (mut app, rx) = app_in(repo.path(), no_config());
+            refresh_until_loaded(&mut app, &rx);
+            assert_eq!(app.changes_label().as_deref(), Some("changes 1"));
+        }
+
+        #[test]
+        fn a_folder_outside_git_has_no_button() {
+            let (app, _rx, _dirs) = app_with(1);
+            assert_eq!(app.changes_label(), None);
+        }
+
+        #[test]
+        fn the_button_opens_the_panel_and_narrows_the_pane() {
+            let repo = repo_with_edit();
+            let (mut app, rx) = app_in(repo.path(), no_config());
+            refresh_until_loaded(&mut app, &rx);
+            let before = app.layout(AREA).pane.width;
+            let pos = button(&app);
+            click(&mut app, pos);
+            let shown = app.layout(AREA);
+            assert_eq!((app.changes.open, shown.pane.width < before, shown.changes.is_empty()), (true, true, false));
+        }
+
+        #[test]
+        fn the_panel_shows_the_changed_file() {
+            let repo = repo_with_edit();
+            let (mut app, rx) = app_in(repo.path(), no_config());
+            app.changes.open = true;
+            refresh_until_loaded(&mut app, &rx);
+            let Some(panel::View { body: panel::Body::Ready(diff), .. }) = app.panel_view() else {
+                panic!("the panel has a diff")
+            };
+            assert_eq!((diff.files[0].path.as_str(), diff.added(), diff.removed()), ("a.txt", 1, 1));
+        }
+
+        #[test]
+        fn clicking_a_tab_changes_what_is_compared() {
+            let repo = repo_with_edit();
+            let (mut app, rx) = app_in(repo.path(), no_config());
+            app.changes.open = true;
+            let (_, commits) = panel::tabs(panel_area(&app))[1];
+            click(&mut app, commits.as_position());
+            refresh_until_loaded(&mut app, &rx);
+            let view = app.panel_view().expect("panel");
+            assert_eq!((view.mode, view.base.as_deref()), (changes::Mode::Commits, Some("main")));
+        }
+
+        #[test]
+        fn the_picked_base_is_kept_for_the_workspace() {
+            let repo = repo_with_edit();
+            git(repo.path(), &["branch", "release"]);
+            let (mut app, rx) = app_in(repo.path(), no_config());
+            app.changes.open = true;
+            app.changes.set_mode(changes::Mode::All);
+            refresh_until_loaded(&mut app, &rx);
+            let view = app.panel_view().expect("panel");
+            let pos = panel::base(panel_area(&app), &view).as_position();
+            click(&mut app, pos);
+            submit_text(&mut app, "rel");
+            let saved = app.state().projects[0].workspaces[0].base.clone();
+            assert_eq!((app.overlay.is_none(), saved.as_deref()), (true, Some("release")));
+        }
+
+        #[test]
+        fn picking_the_default_branch_forgets_the_choice() {
+            let repo = repo_with_edit();
+            let (mut app, _rx) = app_in(repo.path(), no_config());
+            app.projects[0].workspaces[0].base = Some("old".into());
+            let target = app.changes_target().expect("target");
+            app.open_branches(&target);
+            submit_text(&mut app, "main");
+            assert_eq!(app.projects[0].workspaces[0].base, None);
+        }
+
+        #[test]
+        fn the_panel_is_saved_and_restored() {
+            let repo = repo_with_edit();
+            let (mut app, _rx) = app_in(repo.path(), no_config());
+            app.changes.open = true;
+            app.changes.set_mode(changes::Mode::Commits);
+            let saved = app.state();
+            let (mut restored, _rx) = empty_app();
+            restored.restore(&saved, AREA).expect("restore");
+            assert_eq!((restored.changes.open, restored.changes.mode), (true, changes::Mode::Commits));
+        }
+
+        #[test]
+        fn copy_puts_the_hunk_on_the_clipboard() {
+            let repo = repo_with_edit();
+            let (mut app, rx) = app_in(repo.path(), no_config());
+            app.changes.open = true;
+            refresh_until_loaded(&mut app, &rx);
+            let target = app.changes_target().expect("target");
+            let file = app.changed_diff(&target).expect("diff").files[0].clone();
+            app.hunk_action(&target, &file, 0, HunkAction::Copy, AREA).expect("copy");
+            let patch = file.hunks[0].patch();
+            assert_eq!(
+                (app.take_host_writes(), app.toast.map(|t| t.0)),
+                (vec![clipboard::osc52(&patch)], Some(COPIED))
+            );
+        }
+
+        #[test]
+        fn ask_agent_types_the_lines_into_the_agent() {
+            let repo = repo_with_edit();
+            let config = TempDir::new();
+            let agent = config.path().join("agent");
+            write_executable(&agent, "#!/bin/sh\nIFS= read -r line\nprintf '%s' \"$line\" > got\n");
+            let config_path = config.path().join("config.json");
+            let settings = Config {
+                agent_commands: [("fake".to_string(), agent.display().to_string())].into(),
+                ..Config::default()
+            };
+            config::save(&config_path, &settings).expect("save config");
+            let (mut app, rx) = app_in(repo.path(), config_path);
+            app.term_mut().expect("pane").write(format!("exec {}\n", agent.display()).as_bytes());
+            wait_until("the agent runs", || {
+                agents::detect(&app.config, &app.term().expect("pane").foreground_args()).is_some()
+            });
+            refresh_until_loaded(&mut app, &rx);
+            let target = app.changes_target().expect("target");
+            let file = app.changed_diff(&target).expect("diff").files[0].clone();
+            app.hunk_action(&target, &file, 0, HunkAction::Ask, AREA).expect("ask");
+            app.term_mut().expect("pane").write(b"\r");
+            let got = repo.path().join("got");
+            wait_until("the agent reads the reference", || std::fs::read_to_string(&got).is_ok_and(|t| !t.is_empty()));
+            assert_eq!(std::fs::read_to_string(&got).expect("got"), "a.txt:2 ");
+        }
+
+        #[test]
+        fn without_an_agent_the_reference_is_copied() {
+            let repo = repo_with_edit();
+            let (mut app, rx) = app_in(repo.path(), no_config());
+            refresh_until_loaded(&mut app, &rx);
+            let target = app.changes_target().expect("target");
+            let file = app.changed_diff(&target).expect("diff").files[0].clone();
+            app.hunk_action(&target, &file, 0, HunkAction::Ask, AREA).expect("ask");
+            assert_eq!(app.take_host_writes(), vec![clipboard::osc52("a.txt:2")]);
+        }
+
+        #[test]
+        fn open_starts_the_editor_in_a_new_tab() {
+            let repo = repo_with_edit();
+            let (mut app, rx) = app_in(repo.path(), no_config());
+            refresh_until_loaded(&mut app, &rx);
+            let target = app.changes_target().expect("target");
+            let file = app.changed_diff(&target).expect("diff").files[0].clone();
+            let tabs = app.projects[0].workspaces[0].tabs.len();
+            app.hunk_action(&target, &file, 0, HunkAction::Open, AREA).expect("open");
+            let workspace = &app.projects[0].workspaces[0];
+            assert_eq!((workspace.tabs.len(), workspace.active), (tabs + 1, tabs));
         }
     }
 }

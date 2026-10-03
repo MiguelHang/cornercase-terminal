@@ -4,6 +4,8 @@ export const SIDEBAR_WIDTH = 32;
 export const WORKSPACES_WIDTH = 26;
 export const MIN_COLUMN_WIDTH = 16;
 export const COMPACT_WIDTH = 90;
+export const CHANGES_WIDTH = 64;
+const MIN_CHANGES_WIDTH = 36;
 const PANE_PADDING = 1;
 const MIN_PANE_WIDTH = 20;
 const COMPACT_PITCH = 3;
@@ -52,7 +54,18 @@ export function activeRow(rows: SidebarRow[], active: number, group: number | nu
 export interface Widths {
   projects: number;
   workspaces: number;
+  changes?: number | null;
 }
+
+export type Border = 'projects' | 'workspaces' | 'changes';
+
+export function changesWidth(w: Widths, total: number): number {
+  const max = Math.max(0, total - (PANE_PADDING + MIN_PANE_WIDTH + 2 * MIN_COLUMN_WIDTH));
+  const half = Math.floor(Math.max(0, total - w.projects - w.workspaces - PANE_PADDING) / 2);
+  return Math.min(max, Math.max(MIN_CHANGES_WIDTH, w.changes ?? Math.min(half, CHANGES_WIDTH)));
+}
+
+export const mainWidth = (w: Widths, total: number, changes: boolean): number => (changes ? total - changesWidth(w, total) : total);
 
 export const EMPTY: Rect = rect(0, 0, 0, 0);
 export const isEmpty = (r: Rect) => r.w === 0 || r.h === 0;
@@ -71,10 +84,14 @@ export function fit(w: Widths, total: number): Widths {
   const room = Math.max(0, total - (PANE_PADDING + MIN_PANE_WIDTH));
   const workspaces = Math.max(MIN_COLUMN_WIDTH, Math.min(w.workspaces, room - w.projects));
   const projects = Math.max(MIN_COLUMN_WIDTH, Math.min(w.projects, room - workspaces));
-  return { projects, workspaces };
+  return { ...w, projects, workspaces };
 }
 
-export function dragged(w: Widths, border: 'projects' | 'workspaces', x: number, total: number): Widths {
+export function dragged(w: Widths, border: Border, x: number, total: number): Widths {
+  if (border === 'changes') {
+    const max = Math.max(0, total - (PANE_PADDING + MIN_PANE_WIDTH + 2 * MIN_COLUMN_WIDTH));
+    return { ...w, changes: Math.max(Math.min(MIN_CHANGES_WIDTH, max), Math.min(max, total - x)) };
+  }
   const fitted = fit(w, total);
   const room = Math.max(0, total - (PANE_PADDING + MIN_PANE_WIDTH));
   const edge = x + 1;
@@ -109,6 +126,9 @@ export interface Areas {
   pane: Rect;
   projectsBorder: Rect;
   workspacesBorder: Rect;
+  changes: Rect;
+  changesBorder: Rect;
+  changesButton: Rect;
 }
 
 function column(r: Rect, lead: number): [Rect, Rect, Rect, Rect, Rect] {
@@ -122,13 +142,19 @@ function column(r: Rect, lead: number): [Rect, Rect, Rect, Rect, Rect] {
   return [title, list, separator, a, b];
 }
 
-export function layout(cols: number, rows: number, widths: Widths, nav: Nav): Areas {
-  const areas = cols < COMPACT_WIDTH ? compact(cols, rows) : wide(cols, rows, widths);
+export function layout(cols: number, rows: number, widths: Widths, nav: Nav, changes = false): Areas {
+  const areas = cols < COMPACT_WIDTH ? compact(cols, rows, changes) : changes ? withChanges(cols, rows, widths) : wide(cols, rows, widths);
   if (!areas.compact) return areas;
   const projects = nav === 'projects' ? areas : { ...areas, sidebar: EMPTY, title: EMPTY, list: EMPTY, separator: EMPTY, settings: EMPTY, quit: EMPTY };
   return nav === 'workspaces'
     ? projects
     : { ...projects, workspaces: EMPTY, workspacesTitle: EMPTY, workspacesList: EMPTY, workspacesSeparator: EMPTY, issues: EMPTY, back: EMPTY };
+}
+
+function withChanges(cols: number, rows: number, widths: Widths): Areas {
+  const w = changesWidth(widths, cols);
+  const x = cols - w;
+  return { ...wide(x, rows, widths), changes: rect(x + 1, 0, w - 1, rows), changesBorder: rect(x, 0, Math.min(1, w), rows) };
 }
 
 function wide(cols: number, rows: number, widths: Widths): Areas {
@@ -163,10 +189,13 @@ function wide(cols: number, rows: number, widths: Widths): Areas {
     pane,
     projectsBorder: rect(projects - 1, HEADER_HEIGHT, 1, sidebar.h),
     workspacesBorder: rect(projects + workspaces - 1, 0, 1, rows),
+    changes: EMPTY,
+    changesBorder: EMPTY,
+    changesButton: EMPTY,
   };
 }
 
-function compact(cols: number, rows: number): Areas {
+function compact(cols: number, rows: number, changes: boolean): Areas {
   const pitch = COMPACT_PITCH;
   const bar = rect(0, 0, cols, pitch);
   const below = rect(0, pitch, cols, Math.max(0, rows - pitch));
@@ -201,6 +230,9 @@ function compact(cols: number, rows: number): Areas {
     pane: below,
     projectsBorder: EMPTY,
     workspacesBorder: EMPTY,
+    changes: changes ? below : EMPTY,
+    changesBorder: EMPTY,
+    changesButton: rect(Math.max(0, cols - searchWidth - COMPACT_BUTTON_WIDTH), 0, Math.min(COMPACT_BUTTON_WIDTH, Math.max(0, cols - searchWidth)), pitch),
   };
 }
 

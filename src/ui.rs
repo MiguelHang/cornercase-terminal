@@ -9,6 +9,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use serde::{Deserialize, Serialize};
 
+pub mod changes;
+
 use crate::emulator::Snapshot;
 use crate::split::{Dir, Node};
 
@@ -39,6 +41,7 @@ const BACK_LABEL: &str = "‹ projects";
 const CRUMB_SEPARATOR: &str = " › ";
 const CANCEL_LABEL: &str = "cancel";
 const ISSUES_LABEL: &str = "issues";
+const CHANGES_ICON: &str = "±";
 const BRAND_COLOR: Color = Color::Indexed(99);
 const DARK_SURFACE: Color = Color::Indexed(236);
 const LIGHT_SURFACE: Color = Color::Indexed(254);
@@ -62,17 +65,20 @@ const COLOUR_CELL: u16 = 4;
 pub enum Border {
     Projects,
     Workspaces,
+    Changes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Widths {
     pub projects: u16,
     pub workspaces: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes: Option<u16>,
 }
 
 impl Default for Widths {
     fn default() -> Self {
-        Self { projects: SIDEBAR_WIDTH, workspaces: WORKSPACES_WIDTH }
+        Self { projects: SIDEBAR_WIDTH, workspaces: WORKSPACES_WIDTH, changes: None }
     }
 }
 
@@ -86,7 +92,17 @@ impl Widths {
         let room = columns_room(total);
         let workspaces = self.workspaces.min(room.saturating_sub(self.projects)).max(MIN_COLUMN_WIDTH);
         let projects = self.projects.min(room.saturating_sub(workspaces)).max(MIN_COLUMN_WIDTH);
-        Self { projects, workspaces }
+        Self { projects, workspaces, ..self }
+    }
+
+    pub fn changes_width(self, total: u16) -> u16 {
+        let max = total.saturating_sub(PANE_PADDING + MIN_PANE_WIDTH + 2 * MIN_COLUMN_WIDTH);
+        let half = total.saturating_sub(self.projects + self.workspaces + PANE_PADDING) / 2;
+        self.changes.unwrap_or_else(|| half.min(changes::DEFAULT_WIDTH)).max(changes::MIN_WIDTH).min(max)
+    }
+
+    pub fn main_width(self, total: u16, changes: bool) -> u16 {
+        if changes { total.saturating_sub(self.changes_width(total)) } else { total }
     }
 
     #[must_use]
@@ -103,6 +119,10 @@ impl Widths {
                 let max = room.saturating_sub(fitted.projects).max(MIN_COLUMN_WIDTH);
                 Self { workspaces: right.saturating_sub(fitted.projects).clamp(MIN_COLUMN_WIDTH, max), ..self }
             }
+            Border::Changes => {
+                let max = total.saturating_sub(PANE_PADDING + MIN_PANE_WIDTH + 2 * MIN_COLUMN_WIDTH);
+                Self { changes: Some(total.saturating_sub(x).clamp(changes::MIN_WIDTH.min(max), max)), ..self }
+            }
         }
     }
 
@@ -111,6 +131,7 @@ impl Widths {
         match border {
             Border::Projects => Self { projects: SIDEBAR_WIDTH, ..self },
             Border::Workspaces => Self { workspaces: WORKSPACES_WIDTH, ..self },
+            Border::Changes => Self { changes: None, ..self },
         }
     }
 }
@@ -144,6 +165,9 @@ pub struct Areas {
     pub pane: Rect,
     pub projects_border: Rect,
     pub workspaces_border: Rect,
+    pub changes: Rect,
+    pub changes_border: Rect,
+    pub changes_button: Rect,
 }
 
 impl Areas {
@@ -151,11 +175,12 @@ impl Areas {
         match border {
             Border::Projects => self.projects_border,
             Border::Workspaces => self.workspaces_border,
+            Border::Changes => self.changes_border,
         }
     }
 
     pub fn border_hit(&self, pos: Position) -> Option<Border> {
-        [Border::Projects, Border::Workspaces].into_iter().find(|&b| self.border(b).contains(pos))
+        [Border::Projects, Border::Workspaces, Border::Changes].into_iter().find(|&b| self.border(b).contains(pos))
     }
 
     pub fn compact(&self) -> bool {
@@ -236,11 +261,25 @@ fn below_header(r: Rect) -> Rect {
 }
 
 pub fn layout(area: Rect, widths: Widths) -> Areas {
-    if area.width < COMPACT_WIDTH { compact_layout(area) } else { wide_layout(area, widths) }
+    layout_with(area, widths, false)
+}
+
+pub fn layout_with(area: Rect, widths: Widths, changes: bool) -> Areas {
+    if area.width < COMPACT_WIDTH {
+        return compact_layout(area, changes);
+    }
+    if !changes {
+        return wide_layout(area, widths);
+    }
+    let [main, panel] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(widths.changes_width(area.width))]).areas(area);
+    let border = Rect { width: panel.width.min(1), ..panel };
+    let content = Rect { x: panel.x.saturating_add(1), width: panel.width.saturating_sub(1), ..panel };
+    Areas { changes: content, changes_border: border, ..wide_layout(main, widths) }
 }
 
 fn wide_layout(area: Rect, widths: Widths) -> Areas {
-    let Widths { projects, workspaces } = widths.fit(area.width);
+    let Widths { projects, workspaces, .. } = widths.fit(area.width);
     let [columns, _, pane] = Layout::horizontal([
         Constraint::Length(projects + workspaces),
         Constraint::Length(PANE_PADDING),
@@ -285,14 +324,19 @@ fn wide_layout(area: Rect, widths: Widths) -> Areas {
         pane,
         projects_border: right_edge(sidebar),
         workspaces_border: right_edge(workspaces),
+        changes: Rect::default(),
+        changes_border: Rect::default(),
+        changes_button: Rect::default(),
     }
 }
 
-fn compact_layout(area: Rect) -> Areas {
+fn compact_layout(area: Rect, changes: bool) -> Areas {
     let pitch = COMPACT_PITCH;
     let [bar, below] = Layout::vertical([Constraint::Length(pitch), Constraint::Min(0)]).areas(area);
     let search_width = COMPACT_BUTTON_WIDTH.min(bar.width);
     let search_button = Rect { x: bar.right() - search_width, width: search_width, ..bar };
+    let changes_width = COMPACT_BUTTON_WIDTH.min(search_button.x.saturating_sub(bar.x));
+    let changes_button = Rect { x: search_button.x - changes_width, width: changes_width, ..bar };
     let [_, menu] = Layout::vertical([Constraint::Length(GAP), Constraint::Min(0)]).areas(below);
     let column = |footer: u16| {
         Layout::vertical([
@@ -330,6 +374,9 @@ fn compact_layout(area: Rect) -> Areas {
         pane: below,
         projects_border: Rect::default(),
         workspaces_border: Rect::default(),
+        changes: if changes { below } else { Rect::default() },
+        changes_border: Rect::default(),
+        changes_button,
     }
 }
 
@@ -614,6 +661,11 @@ pub fn form_toggle(form: Rect) -> Rect {
 
 fn button_width(label: &str) -> u16 {
     u16::try_from(label.chars().count()).unwrap_or(u16::MAX).saturating_add(2)
+}
+
+pub fn changes_button(issues: Rect, label: &str) -> Rect {
+    let width = button_width(label);
+    Rect { x: issues.right().saturating_sub(width + 1), width, ..issues }.intersection(issues)
 }
 
 pub fn update_button(settings: Rect, label: &str) -> Rect {
@@ -1128,6 +1180,7 @@ pub struct Picker {
     pub hint: String,
     pub error: Option<String>,
     pub submit: &'static str,
+    pub empty: &'static str,
 }
 
 pub struct SettingsRow {
@@ -1258,6 +1311,11 @@ pub struct WorkspaceEntry {
     pub behind: u32,
 }
 
+pub struct ChangesButton {
+    pub label: String,
+    pub open: bool,
+}
+
 pub struct TabView {
     pub layout: Node<usize>,
     pub screens: Vec<Snapshot>,
@@ -1286,6 +1344,8 @@ pub struct View<'a> {
     pub toast: Option<&'a str>,
     pub nav: Option<Nav>,
     pub update: Option<String>,
+    pub changes: Option<changes::View>,
+    pub changes_button: Option<ChangesButton>,
 }
 
 impl View<'_> {
@@ -1326,7 +1386,7 @@ impl View<'_> {
 }
 
 pub fn draw(f: &mut Frame, view: &View) {
-    let areas = layout(f.area(), view.widths).shown(view.nav);
+    let areas = layout_with(f.area(), view.widths, view.changes.is_some()).shown(view.nav);
     match &view.tab {
         Some(tab) => draw_tab(f, view, tab, areas.pane),
         None if view.has_project => f.render_widget(
@@ -1352,6 +1412,17 @@ pub fn draw(f: &mut Frame, view: &View) {
     }
     if !areas.workspaces.is_empty() {
         draw_workspaces(f, view, &areas);
+    }
+    if let Some(panel) = &view.changes
+        && !areas.changes.is_empty()
+    {
+        f.render_widget(Clear, areas.changes);
+        let border = areas.changes_border;
+        let line = Paragraph::new(vec![Line::from("│"); usize::from(border.height)])
+            .style(Style::default().fg(Color::DarkGray));
+        f.render_widget(line, border);
+        draw_border(f, view, border, Border::Changes);
+        changes::draw(f, areas.changes, panel, view.hover.filter(|_| view.overlay.is_none()));
     }
     match &view.overlay {
         Some(Overlay::Menu { at, items }) => draw_menu(f, view, *at, items),
@@ -1676,7 +1747,7 @@ fn draw_picker(f: &mut Frame, view: &View, picker: &Picker) {
     );
 
     if picker.items.is_empty() {
-        let text = if picker.filter.is_empty() { "no folders here" } else { "no matches" };
+        let text = if picker.filter.is_empty() { picker.empty } else { "no matches" };
         f.render_widget(Paragraph::new(Span::styled(format!(" {text}"), dim)), list);
     }
     for (i, item) in picker.items.iter().enumerate() {
@@ -1980,12 +2051,15 @@ fn draw_sidebar(f: &mut Frame, view: &View, areas: &Areas) {
 
 fn draw_borders(f: &mut Frame, view: &View, areas: &Areas) {
     for border in [Border::Projects, Border::Workspaces] {
-        let r = areas.border(border);
-        if view.resizing == Some(border) || sidebar_hovered(view, r) {
-            let buf = f.buffer_mut();
-            for y in r.top()..r.bottom() {
-                buf[(r.x, y)].set_fg(Color::Cyan);
-            }
+        draw_border(f, view, areas.border(border), border);
+    }
+}
+
+fn draw_border(f: &mut Frame, view: &View, r: Rect, border: Border) {
+    if view.resizing == Some(border) || sidebar_hovered(view, r) {
+        let buf = f.buffer_mut();
+        for y in r.top()..r.bottom() {
+            buf[(r.x, y)].set_fg(Color::Cyan);
         }
     }
 }
@@ -2085,7 +2159,14 @@ fn draw_bar(f: &mut Frame, view: &View, areas: &Areas) {
         return;
     }
     let pressed = Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD);
-    let menu = Rect { width: areas.bar.width.saturating_sub(areas.search_button.width), ..areas.bar };
+    let mut right = areas.search_button.width;
+    if let Some(button) = &view.changes_button {
+        let r = areas.changes_button;
+        right += r.width;
+        let style = if button.open || sidebar_hovered(view, r) { pressed } else { surface.fg(Color::DarkGray) };
+        draw_band(f, r, Span::styled(centered(CHANGES_ICON, r.width), style), style);
+    }
+    let menu = Rect { width: areas.bar.width.saturating_sub(right), ..areas.bar };
     let icon = Rect { width: COMPACT_BUTTON_WIDTH.min(menu.width), ..menu };
     let style = if view.nav.is_some() || sidebar_hovered(view, menu) { pressed } else { surface.fg(Color::Cyan) };
     draw_band(f, icon, Span::styled(centered(MENU_ICON, icon.width), style), style);
@@ -2246,10 +2327,27 @@ fn draw_workspaces(f: &mut Frame, view: &View, areas: &Areas) {
     let r = layout.button();
     draw_button(f, r, " ", "+ new workspace", button_style(view, r, accent, Color::Cyan));
 
+    let changes = view.changes_button.as_ref().filter(|_| !areas.compact());
     if view.issues {
         draw_separator(f, areas.workspaces_separator);
-        let style = button_style(view, areas.issues, Style::default().fg(Color::DarkGray), Color::Cyan);
-        draw_button(f, areas.issues, " ", ISSUES_LABEL, style);
+        let issues = match changes {
+            Some(button) => {
+                let start = changes_button(areas.issues, &button.label).x;
+                Rect { width: start.saturating_sub(areas.issues.x), ..areas.issues }
+            }
+            None => areas.issues,
+        };
+        let style = button_style(view, issues, Style::default().fg(Color::DarkGray), Color::Cyan);
+        draw_button(f, issues, " ", ISSUES_LABEL, style);
+    }
+    if let Some(button) = changes {
+        let r = changes_button(areas.issues, &button.label);
+        let idle = if button.open {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        draw_button(f, r, "", &button.label, button_style(view, r, idle, Color::Cyan));
     }
 }
 
@@ -2410,6 +2508,8 @@ mod tests {
             toast: None,
             nav: None,
             update: None,
+            changes: None,
+            changes_button: None,
         }
     }
 
@@ -2458,6 +2558,85 @@ mod tests {
 
     fn close_x() -> u16 {
         list().right() - 2
+    }
+
+    mod changes_layout {
+        use super::*;
+
+        const BIG: Rect = Rect { x: 0, y: 0, width: 160, height: 30 };
+
+        #[test]
+        fn the_panel_sits_right_of_the_pane() {
+            let a = layout_with(BIG, Widths::default(), true);
+            assert_eq!(
+                (a.changes_border.x, a.changes.x, a.changes.right(), a.pane.right()),
+                (a.pane.right(), a.pane.right() + 1, BIG.right(), BIG.width - Widths::default().changes_width(160))
+            );
+        }
+
+        #[test]
+        fn the_panel_border_drags() {
+            let a = layout_with(BIG, Widths::default(), true);
+            assert_eq!(a.border_hit(a.changes_border.as_position()), Some(Border::Changes));
+        }
+
+        #[test]
+        fn a_compact_panel_covers_the_screen_below_the_bar() {
+            let small = Rect { width: 80, ..BIG };
+            let a = layout_with(small, Widths::default(), true);
+            assert_eq!((a.changes, a.changes_button.right()), (a.pane, a.search_button.x));
+        }
+
+        fn with_panel() -> View<'static> {
+            let tints = crate::changes::Tints::of(&HostTheme::default());
+            let panel = changes::View {
+                mode: crate::changes::Mode::Uncommitted,
+                base: None,
+                body: changes::Body::Loading,
+                folded: Vec::new(),
+                viewed: Vec::new(),
+                gaps: HashMap::new(),
+                scroll: 0,
+                live: false,
+                light: false,
+                tints,
+            };
+            View {
+                has_project: true,
+                issues: true,
+                workspaces: vec![WorkspaceEntry { name: "main".into(), tabs: vec!["zsh".into()], behind: 0 }],
+                active_tab: Some(0),
+                changes: Some(panel),
+                changes_button: Some(ChangesButton { label: "changes 3".into(), open: true }),
+                ..view(&["shop"])
+            }
+        }
+
+        #[test]
+        fn draws_the_panel_and_its_button() {
+            insta::assert_snapshot!(render_sized(&with_panel(), 140, 16).backend());
+        }
+
+        #[test]
+        fn hovering_the_changes_button_leaves_issues_unlit() {
+            let r = changes_button(layout(Rect::new(0, 0, 140, 16), Widths::default()).issues, "changes 3");
+            let t = render_sized(&View { hover: Some(r.as_position()), ..with_panel() }, 140, 16);
+            let issues_x = layout(Rect::new(0, 0, 140, 16), Widths::default()).issues.x + 2;
+            let buffer = t.backend().buffer();
+            assert_eq!((buffer[(issues_x, r.y)].bg, buffer[(r.x + 1, r.y)].bg), (Color::Reset, Color::Cyan));
+        }
+
+        #[test]
+        fn the_bar_has_a_changes_button_in_compact_mode() {
+            let v = View {
+                changes: None,
+                changes_button: Some(ChangesButton { label: "changes".into(), open: false }),
+                ..with_panel()
+            };
+            let t = render_sized(&v, 80, 16);
+            let r = layout(Rect::new(0, 0, 80, 16), Widths::default()).changes_button;
+            assert_eq!(row_text(&t, Rect { y: r.y + 1, height: 1, ..r }).trim(), "±");
+        }
     }
 
     mod layout {
@@ -2535,7 +2714,32 @@ mod tests {
     mod widths {
         use super::*;
 
-        const WIDE: Widths = Widths { projects: 40, workspaces: 30 };
+        const WIDE: Widths = Widths { projects: 40, workspaces: 30, changes: None };
+
+        #[test]
+        fn the_changes_panel_takes_half_of_the_free_space_up_to_its_default() {
+            let free = 160 - SIDEBAR_WIDTH - WORKSPACES_WIDTH - PANE_PADDING;
+            let widths = Widths::default();
+            assert_eq!((widths.changes_width(160), widths.changes_width(300)), (free / 2, changes::DEFAULT_WIDTH));
+        }
+
+        #[test]
+        fn a_dragged_changes_panel_keeps_its_width() {
+            let widths = Widths::default().dragged(Border::Changes, 100, 200);
+            assert_eq!((widths.changes, widths.changes_width(200)), (Some(100), 100));
+        }
+
+        #[test]
+        fn the_changes_panel_leaves_room_for_the_pane_and_columns() {
+            let widths = Widths { changes: Some(90), ..Widths::default() };
+            assert_eq!(widths.changes_width(100), 100 - PANE_PADDING - MIN_PANE_WIDTH - 2 * MIN_COLUMN_WIDTH);
+        }
+
+        #[test]
+        fn a_double_click_makes_the_changes_panel_automatic_again() {
+            let widths = Widths { changes: Some(90), ..Widths::default() };
+            assert_eq!(widths.reset(Border::Changes).changes, None);
+        }
 
         #[test]
         fn fit_keeps_widths_that_leave_room_for_the_pane() {
@@ -2545,18 +2749,21 @@ mod tests {
         #[test]
         fn fit_shrinks_the_workspaces_column_first() {
             let room = 80 - PANE_PADDING - MIN_PANE_WIDTH;
-            assert_eq!(WIDE.fit(80), Widths { projects: 40, workspaces: room - 40 });
+            assert_eq!(WIDE.fit(80), Widths { projects: 40, workspaces: room - 40, ..Widths::default() });
         }
 
         #[test]
         fn fit_shrinks_the_projects_column_once_workspaces_is_at_its_minimum() {
             let room = 60 - PANE_PADDING - MIN_PANE_WIDTH;
-            assert_eq!(WIDE.fit(60), Widths { projects: room - MIN_COLUMN_WIDTH, workspaces: MIN_COLUMN_WIDTH });
+            assert_eq!(
+                WIDE.fit(60),
+                Widths { projects: room - MIN_COLUMN_WIDTH, workspaces: MIN_COLUMN_WIDTH, ..Widths::default() }
+            );
         }
 
         #[test]
         fn fit_never_goes_below_the_minimum() {
-            let min = Widths { projects: MIN_COLUMN_WIDTH, workspaces: MIN_COLUMN_WIDTH };
+            let min = Widths { projects: MIN_COLUMN_WIDTH, workspaces: MIN_COLUMN_WIDTH, ..Widths::default() };
             assert_eq!(WIDE.fit(20), min);
         }
 
@@ -2568,7 +2775,7 @@ mod tests {
         #[test]
         fn dragging_the_workspaces_border_puts_it_under_the_mouse() {
             let widths = Widths::default().dragged(Border::Workspaces, SIDEBAR_WIDTH + 29, W);
-            assert_eq!(widths, Widths { projects: SIDEBAR_WIDTH, workspaces: 30 });
+            assert_eq!(widths, Widths { projects: SIDEBAR_WIDTH, workspaces: 30, ..Widths::default() });
         }
 
         #[rstest]
@@ -2590,7 +2797,10 @@ mod tests {
 
         #[test]
         fn reset_brings_back_the_default_width_of_that_column_only() {
-            assert_eq!(WIDE.reset(Border::Projects), Widths { projects: SIDEBAR_WIDTH, workspaces: 30 });
+            assert_eq!(
+                WIDE.reset(Border::Projects),
+                Widths { projects: SIDEBAR_WIDTH, workspaces: 30, ..Widths::default() }
+            );
         }
     }
 
@@ -2610,7 +2820,7 @@ mod tests {
 
         #[test]
         fn they_follow_the_widths() {
-            let widths = Widths { projects: 40, workspaces: 20 };
+            let widths = Widths { projects: 40, workspaces: 20, ..Widths::default() };
             let areas = layout(AREA, widths);
             assert_eq!((areas.projects_border.x, areas.workspaces_border.x, areas.pane.x), (39, 59, 61));
         }
@@ -3657,6 +3867,7 @@ mod tests {
                 hint: "enter opens ~/projects".into(),
                 error: None,
                 submit: "open",
+                empty: "no folders here",
             }
         }
 

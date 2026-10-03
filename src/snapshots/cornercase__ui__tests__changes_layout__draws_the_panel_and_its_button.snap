@@ -1,0 +1,21 @@
+---
+source: src/ui.rs
+assertion_line: 2589
+expression: "render_sized(&with_panel(), 140, 16).backend()"
+---
+" ▄▀▀▀ cornercase                                         │  no tab open                             │  uncommitted   commits   all       ×  "
+" █                                                       │                                          │ reading changes…                      "
+"                                                         │                                          │                                       "
+"  ⌕ search projects, workspaces, tabs                    │                                          │                                       "
+"                                                         │                                          │                                       "
+" projects                      │ workspaces              │                                          │                                       "
+"                               │                         │                                          │                                       "
+"▌ shop (1)                     │  main                   │                                          │                                       "
+"                               │  ▌ zsh                  │                                          │                                       "
+"  + new project                │    + tab                │                                          │                                       "
+"                               │                         │                                          │                                       "
+"                               │  + new workspace        │                                          │                                       "
+"                               │                         │                                          │                                       "
+" ───────────────────────────── │ ─────────────────────── │                                          │                                       "
+"  settings                     │  issues      changes 3  │                                          │ ───────────────────────────────────── "
+"  quit                         │                         │                                          │                                       "

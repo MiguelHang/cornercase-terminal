@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod app;
+pub mod changes;
 pub mod client;
 pub mod clipboard;
 pub mod config;

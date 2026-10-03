@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "cornercase"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -274,6 +274,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "signal-hook 0.4.4",
+ "similar",
  "syntect",
  "thiserror 2.0.21",
  "ureq",

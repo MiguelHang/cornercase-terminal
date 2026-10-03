@@ -75,7 +75,7 @@ fn command<I: IntoIterator<Item = S>, S: AsRef<OsStr>>(repo: &Path, args: I) -> 
     cmd
 }
 
-fn check(out: Output) -> Result<Vec<u8>> {
+pub fn check(out: Output) -> Result<Vec<u8>> {
     if out.status.success() {
         return Ok(out.stdout);
     }

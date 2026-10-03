@@ -141,26 +141,15 @@ impl Picker {
     }
 
     pub fn move_selection(&mut self, delta: isize, rows: usize) {
-        let last = match self.items().len() {
-            0 => return,
-            len => len - 1,
-        };
-        let i = match self.selected {
-            Some(i) => i.saturating_add_signed(delta).min(last),
-            None if delta < 0 => last,
-            None => 0,
-        };
-        self.selected = Some(i);
-        if i < self.scroll {
-            self.scroll = i;
-        } else if rows > 0 && i >= self.scroll + rows {
-            self.scroll = i + 1 - rows;
-        }
+        let mut cursor = Cursor { selected: self.selected, scroll: self.scroll };
+        cursor.move_by(delta, self.items().len(), rows);
+        (self.selected, self.scroll) = (cursor.selected, cursor.scroll);
     }
 
     pub fn scroll_by(&mut self, delta: isize, rows: usize) {
-        let max = self.items().len().saturating_sub(rows);
-        self.scroll = self.scroll.min(max).saturating_add_signed(delta).min(max);
+        let mut cursor = Cursor { selected: self.selected, scroll: self.scroll };
+        cursor.scroll_by(delta, self.items().len(), rows);
+        self.scroll = cursor.scroll;
     }
 
     fn go(&mut self, dir: &Path) {
@@ -184,6 +173,34 @@ fn folders(dir: &Path) -> io::Result<Vec<Item>> {
         .collect();
     folders.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.name.cmp(&b.name)));
     Ok(folders)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Cursor {
+    pub selected: Option<usize>,
+    pub scroll: usize,
+}
+
+impl Cursor {
+    pub fn move_by(&mut self, delta: isize, len: usize, rows: usize) {
+        let Some(last) = len.checked_sub(1) else { return };
+        let i = match self.selected {
+            Some(i) => i.saturating_add_signed(delta).min(last),
+            None if delta < 0 => last,
+            None => 0,
+        };
+        self.selected = Some(i);
+        if i < self.scroll {
+            self.scroll = i;
+        } else if rows > 0 && i >= self.scroll + rows {
+            self.scroll = i + 1 - rows;
+        }
+    }
+
+    pub fn scroll_by(&mut self, delta: isize, len: usize, rows: usize) {
+        let max = len.saturating_sub(rows);
+        self.scroll = self.scroll.min(max).saturating_add_signed(delta).min(max);
+    }
 }
 
 #[cfg(test)]

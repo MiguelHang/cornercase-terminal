@@ -143,7 +143,7 @@ fn restore_input_modes() {
 }
 
 fn attach(stream: UnixStream, terminal: &DefaultTerminal) -> Result<Option<PathBuf>> {
-    let theme = query_host_theme();
+    let theme = HostTheme { truecolor: truecolor(), ..query_host_theme() };
     let size = terminal.size()?;
     let mut writer = stream.try_clone()?;
     let hello =
@@ -168,6 +168,10 @@ fn receive(mut stream: UnixStream) -> Result<Option<PathBuf>> {
             Ok(Some(ServerMessage::Detached | ServerMessage::Shutdown) | None) | Err(_) => return Ok(None),
         }
     }
+}
+
+fn truecolor() -> bool {
+    std::env::var("COLORTERM").is_ok_and(|v| matches!(v.as_str(), "truecolor" | "24bit"))
 }
 
 fn query_host_theme() -> HostTheme {

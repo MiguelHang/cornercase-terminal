@@ -14,11 +14,12 @@ pub struct HostTheme {
     pub foreground: Option<RgbColor>,
     pub background: Option<RgbColor>,
     pub palette: [Option<RgbColor>; PALETTE_LEN],
+    pub truecolor: bool,
 }
 
 impl Default for HostTheme {
     fn default() -> Self {
-        Self { foreground: None, background: None, palette: [None; PALETTE_LEN] }
+        Self { foreground: None, background: None, palette: [None; PALETTE_LEN], truecolor: false }
     }
 }
 
@@ -29,6 +30,8 @@ struct WireTheme {
     foreground: WireColor,
     background: WireColor,
     palette: Vec<WireColor>,
+    #[serde(default)]
+    truecolor: bool,
 }
 
 impl From<HostTheme> for WireTheme {
@@ -38,6 +41,7 @@ impl From<HostTheme> for WireTheme {
             foreground: wire(theme.foreground),
             background: wire(theme.background),
             palette: theme.palette.iter().copied().map(wire).collect(),
+            truecolor: theme.truecolor,
         }
     }
 }
@@ -45,7 +49,12 @@ impl From<HostTheme> for WireTheme {
 impl From<WireTheme> for HostTheme {
     fn from(wire: WireTheme) -> Self {
         let rgb = |c: WireColor| c.map(|(r, g, b)| RgbColor { r, g, b });
-        let mut theme = Self { foreground: rgb(wire.foreground), background: rgb(wire.background), ..Self::default() };
+        let mut theme = Self {
+            foreground: rgb(wire.foreground),
+            background: rgb(wire.background),
+            truecolor: wire.truecolor,
+            ..Self::default()
+        };
         for (slot, color) in theme.palette.iter_mut().zip(wire.palette) {
             *slot = rgb(color);
         }

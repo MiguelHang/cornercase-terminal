@@ -32,7 +32,7 @@ impl Address {
 }
 `;
 
-const THEME_RS = `pub enum Theme {
+export const THEME_RS = `pub enum Theme {
     Light,
     Dark,
 }
@@ -44,6 +44,21 @@ impl Theme {
             Theme::Dark => "#0e0d14",
         }
     }
+}
+`;
+
+export const RETURNS_RS = `mod address;
+
+use axum::{Json, Router, routing::post};
+
+pub use address::Address;
+
+pub fn routes() -> Router {
+    Router::new().route("/returns", post(create))
+}
+
+async fn create(Json(address): Json<Address>) -> String {
+    format!("label for {}", address.first_line())
 }
 `;
 
@@ -88,26 +103,13 @@ pub fn routes() -> Router {
 `,
     'theme.rs': THEME_RS,
     returns: {
-      'mod.rs': `mod address;
-
-use axum::{Json, Router, routing::post};
-
-pub use address::Address;
-
-pub fn routes() -> Router {
-    Router::new().route("/returns", post(create))
-}
-
-async fn create(Json(address): Json<Address>) -> String {
-    format!("label for {}", address.first_line())
-}
-`,
+      'mod.rs': RETURNS_RS,
       'address.rs': ADDRESS_RS,
     },
   },
 };
 
-const API: Tree = {
+export const API: Tree = {
   'package.json': '{ "name": "api", "version": "2.1.0", "type": "module" }\n',
   'README.md': '# api\n\nPublic API for orders and returns.\n',
   src: {
