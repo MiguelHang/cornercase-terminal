@@ -144,7 +144,7 @@ src/error.rs      library error type
 **Client / server (`client.rs`, `server.rs`, `protocol.rs`)**
 - The server owns the PTYs so shells outlive the UI. The client starts it if needed (`cornercase server`, logging to `server.log` next to the socket).
 - One server per socket, guarded by `flock` on `server.lock`. The server calls `setsid` and ignores SIGHUP.
-- The server renders, the client only writes frames. Input travels as serialized crossterm events. Several clients mirror each other; the shared size is the smallest client's.
+- The server renders, the client only writes frames. Input travels as serialized crossterm events. Several clients mirror each other; the shared size is the last used client's (attach, key, paste or mouse other than a bare move), like tmux's `window-size latest`, so a hung client (a phone whose SSH dropped) never shrinks a new one. Ping/pong would not catch that: the hung client is a healthy local process. Smaller clients get the frame cropped by `CropBackend`.
 - Every shell gets `CORNERCASE=1`; a client seeing it refuses to start (no nesting).
 - `Hello` carries a protocol version and build id; a server from another build rejects the client. Keep `ClientMessage::KillServer` and `ServerMessage::Rejected` as the first variants (`protocol::tests::compatibility`).
 - Socket: `$XDG_RUNTIME_DIR/cornercase/server.sock` or `$TMPDIR/cornercase-<uid>/server.sock`; `CORNERCASE_SOCKET` overrides it. Paths must fit in 108 bytes.

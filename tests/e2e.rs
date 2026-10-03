@@ -194,6 +194,12 @@ impl Harness {
         self.writer.flush().expect("flush pty");
     }
 
+    fn stop(&mut self) {
+        let pid = self.child.process_id().expect("client pid").to_string();
+        let status = std::process::Command::new("kill").args(["-STOP", &pid]).status().expect("run kill");
+        assert!(status.success(), "kill -STOP failed");
+    }
+
     fn click(&mut self, pos: Position) {
         let (x, y) = (pos.x + 1, pos.y + 1);
         self.send(format!("\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m").as_bytes());
@@ -220,6 +226,10 @@ impl Drop for Harness {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+fn columns() -> u16 {
+    ui::SIDEBAR_WIDTH + ui::WORKSPACES_WIDTH + ui::PANE_PADDING
 }
 
 fn entry(name: &str) -> String {
@@ -510,18 +520,48 @@ fn clients_mirror_each_other() {
 }
 
 #[test]
-fn the_smallest_client_sets_the_size() {
+fn the_last_used_client_sets_the_size() {
+    let mut big = Harness::start();
+    let mut small = big.attach(ROWS - 6, COLS - 8);
+
+    small.send(b"stty size\r");
+    small.wait_for("pane fits the small client", |s| s.contains(&format!("{} {}", ROWS - 6, COLS - 8 - columns())));
+    big.send(b"stty size\r");
+
+    big.wait_for("pane fits the big client", |s| s.contains(&format!("{ROWS} {}", COLS - columns())));
+}
+
+#[test]
+fn a_hung_small_client_does_not_shrink_a_new_big_one() {
+    let first = Harness::start();
+    let mut small = first.attach(ROWS - 6, COLS - 8);
+    small.send(b"stty size\r");
+    small.wait_for("pane fits the small client", |s| s.contains(&format!("{} {}", ROWS - 6, COLS - 8 - columns())));
+    small.stop();
+    drop(first);
+
+    let mut big = Harness::open(Arc::clone(&small.session), ROWS, COLS);
+    big.wait_for("client shows the sidebar", |s| s.contains("projects"));
+    big.send(b"stty size\r");
+
+    big.wait_for("pane fits the new big client", |s| s.contains(&format!("{ROWS} {}", COLS - columns())));
+}
+
+#[test]
+fn a_smaller_client_sees_the_frame_cut_off() {
     let mut big = Harness::start();
     let small = big.attach(ROWS - 6, COLS - 8);
+    let line = format!("{}>", "=".repeat(usize::from(COLS - columns() - 1)));
 
-    let columns = ui::SIDEBAR_WIDTH + ui::WORKSPACES_WIDTH + ui::PANE_PADDING;
+    big.send(format!("clear; printf '%s\\n' '{line}'\r").as_bytes());
+    big.wait_for("the line fills the big pane", |s| s.lines().any(|l| l.ends_with(&line)));
 
-    big.send(b"stty size\r");
-    big.wait_for("pane fits the small client", |s| s.contains(&format!("{} {}", ROWS - 6, COLS - 8 - columns)));
-    drop(small);
-    big.send(b"stty size\r");
-
-    big.wait_for("pane grows back", |s| s.contains(&format!("{ROWS} {}", COLS - columns)));
+    let cut = |h: &Harness| h.screen.lock().screen().rows(0, COLS - 8).take(usize::from(ROWS - 6)).collect::<Vec<_>>();
+    let deadline = Instant::now() + TIMEOUT;
+    while cut(&small) != cut(&big) {
+        assert!(Instant::now() < deadline, "the small client does not show the cut frame\n{}", small.text());
+        thread::sleep(POLL);
+    }
 }
 
 #[test]

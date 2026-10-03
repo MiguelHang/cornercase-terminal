@@ -8,9 +8,10 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crossterm::event::Event;
-use ratatui::backend::CrosstermBackend;
-use ratatui::layout::Rect;
+use crossterm::event::{Event, MouseEventKind};
+use ratatui::backend::{Backend, ClearType, CrosstermBackend, WindowSize};
+use ratatui::buffer::Cell;
+use ratatui::layout::{Position, Rect, Size};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -57,11 +58,70 @@ impl Write for FrameWriter {
     }
 }
 
-type Screen = Terminal<CrosstermBackend<FrameWriter>>;
+struct CropBackend {
+    inner: CrosstermBackend<FrameWriter>,
+    area: Rect,
+    visible: Rect,
+}
+
+impl Backend for CropBackend {
+    type Error = io::Error;
+
+    fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        let visible = self.visible;
+        self.inner.draw(content.filter(|&(x, y, _)| visible.contains(Position::new(x, y))))
+    }
+
+    fn hide_cursor(&mut self) -> io::Result<()> {
+        self.inner.hide_cursor()
+    }
+
+    fn show_cursor(&mut self) -> io::Result<()> {
+        self.inner.show_cursor()
+    }
+
+    fn get_cursor_position(&mut self) -> io::Result<Position> {
+        self.inner.get_cursor_position()
+    }
+
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+        let position = position.into();
+        if !self.visible.contains(position) {
+            return self.inner.hide_cursor();
+        }
+        self.inner.set_cursor_position(position)
+    }
+
+    fn clear(&mut self) -> io::Result<()> {
+        self.inner.clear()
+    }
+
+    fn clear_region(&mut self, clear_type: ClearType) -> io::Result<()> {
+        self.inner.clear_region(clear_type)
+    }
+
+    fn size(&self) -> io::Result<Size> {
+        Ok(self.area.as_size())
+    }
+
+    fn window_size(&mut self) -> io::Result<WindowSize> {
+        Ok(WindowSize { columns_rows: self.area.as_size(), pixels: Size::default() })
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Backend::flush(&mut self.inner)
+    }
+}
+
+type Screen = Terminal<CropBackend>;
 
 struct Client {
     id: u64,
     size: Option<(u16, u16)>,
+    used: u64,
     screen: Option<Screen>,
     out: Sender<ServerMessage>,
     writer: JoinHandle<()>,
@@ -73,8 +133,10 @@ impl Client {
     }
 
     fn reset_screen(&mut self, area: Rect) {
+        let Some((width, height)) = self.size else { return };
         self.send(ServerMessage::Frame(CLEAR_SCREEN.to_vec()));
-        let backend = CrosstermBackend::new(FrameWriter { buf: Vec::new(), out: self.out.clone() });
+        let inner = CrosstermBackend::new(FrameWriter { buf: Vec::new(), out: self.out.clone() });
+        let backend = CropBackend { inner, area, visible: Rect::new(0, 0, width, height) };
         self.screen = Terminal::with_options(backend, TerminalOptions { viewport: Viewport::Fixed(area) }).ok();
     }
 }
@@ -84,6 +146,7 @@ struct Server {
     clients: Vec<Client>,
     area: Option<Rect>,
     next_client: u64,
+    uses: u64,
     started: bool,
     build: String,
     saver: Saver,
@@ -109,6 +172,7 @@ pub fn run() -> Result<()> {
         clients: Vec::new(),
         area: None,
         next_client: 1,
+        uses: 0,
         started: false,
         build: protocol::build_id(),
         saver: Saver::new(state::path(), None),
@@ -264,7 +328,7 @@ impl Server {
         let (out, out_rx) = mpsc::channel();
         let writer = spawn_client_writer(stream, out_rx);
         spawn_client_reader(id, reader, self.tx.clone());
-        self.clients.push(Client { id, size: None, screen: None, out, writer });
+        self.clients.push(Client { id, size: None, used: 0, screen: None, out, writer });
     }
 
     fn client_mut(&mut self, id: u64) -> Option<&mut Client> {
@@ -278,7 +342,8 @@ impl Server {
         }
         let Some(client) = self.client_mut(id) else { return };
         client.size = Some((hello.cols, hello.rows));
-        self.fit(id);
+        self.touch(id);
+        self.fit(Some(id));
         if !self.started {
             self.started = true;
             self.app.set_theme(hello.theme);
@@ -305,8 +370,12 @@ impl Server {
         let Some(client) = self.client_mut(id).filter(|c| c.size.is_some()) else { return };
         if let Event::Resize(cols, rows) = ev {
             client.size = Some((cols, rows));
-            self.fit(id);
+            self.fit(Some(id));
             return;
+        }
+        if is_use(&ev) {
+            self.touch(id);
+            self.fit(None);
         }
         let Some(area) = self.area else { return };
         if let Err(e) = self.app.handle_event(AppEvent::Input(ev), area) {
@@ -321,17 +390,21 @@ impl Server {
         }
     }
 
-    fn fit(&mut self, changed: u64) {
-        let smallest = self
-            .clients
-            .iter()
-            .filter_map(|c| c.size)
-            .reduce(|(c1, r1), (c2, r2)| (c1.min(c2), r1.min(r2)))
-            .map(|(cols, rows)| Rect::new(0, 0, cols, rows));
-        let Some(area) = smallest else { return };
+    fn touch(&mut self, id: u64) {
+        self.uses += 1;
+        let uses = self.uses;
+        if let Some(client) = self.client_mut(id) {
+            client.used = uses;
+        }
+    }
+
+    fn fit(&mut self, resized: Option<u64>) {
+        let latest = self.clients.iter().filter(|c| c.size.is_some()).max_by_key(|c| c.used).and_then(|c| c.size);
+        let Some((cols, rows)) = latest else { return };
+        let area = Rect::new(0, 0, cols, rows);
         let area_changed = self.area != Some(area);
         self.area = Some(area);
-        for client in self.clients.iter_mut().filter(|c| c.size.is_some() && (area_changed || c.id == changed)) {
+        for client in self.clients.iter_mut().filter(|c| area_changed || Some(c.id) == resized) {
             client.reset_screen(area);
         }
     }
@@ -347,7 +420,7 @@ impl Server {
         let before = self.clients.len();
         self.clients.retain(|c| c.id != id);
         if self.clients.len() != before {
-            self.fit(id);
+            self.fit(None);
         }
     }
 
@@ -364,6 +437,14 @@ impl Server {
             drop((out, screen));
             let _ = writer.join();
         }
+    }
+}
+
+fn is_use(ev: &Event) -> bool {
+    match ev {
+        Event::Key(_) | Event::Paste(_) => true,
+        Event::Mouse(mouse) => mouse.kind != MouseEventKind::Moved,
+        Event::FocusGained | Event::FocusLost | Event::Resize(..) => false,
     }
 }
 
