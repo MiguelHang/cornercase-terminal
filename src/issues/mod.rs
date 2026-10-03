@@ -1,7 +1,7 @@
 pub mod browser;
 pub mod cache;
 pub mod github;
-mod http;
+pub mod http;
 pub mod linear;
 pub mod shortcut;
 

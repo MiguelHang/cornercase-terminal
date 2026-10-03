@@ -15,6 +15,7 @@ pub const DEFAULT_ISSUE_TABS: [&str; 4] = ["all", "github", "shortcut", "linear"
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[expect(clippy::struct_excessive_bools, reason = "each switch is its own key in config.json")]
 pub struct Config {
     pub worktrees_dir: String,
     pub issue_tabs: Vec<String>,
@@ -28,6 +29,7 @@ pub struct Config {
     pub trust_prompt_pattern: String,
     pub gh: String,
     pub dim_inactive_panes: bool,
+    pub check_updates: bool,
 }
 
 impl Default for Config {
@@ -45,6 +47,7 @@ impl Default for Config {
             trust_prompt_pattern: agents::DEFAULT_TRUST_PROMPT.into(),
             gh: DEFAULT_GH.into(),
             dim_inactive_panes: true,
+            check_updates: true,
         }
     }
 }

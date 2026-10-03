@@ -7,6 +7,8 @@ use ureq::http::Response;
 use crate::error::{Error, Result};
 
 const TIMEOUT: Duration = Duration::from_secs(20);
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+const DOWNLOAD_LIMIT: u64 = 256 * 1024 * 1024;
 
 pub struct Service {
     pub name: &'static str,
@@ -24,12 +26,12 @@ impl Answer {
     }
 }
 
-fn agent() -> Agent {
-    Agent::config_builder().timeout_global(Some(TIMEOUT)).http_status_as_error(false).build().into()
+fn agent(timeout: Duration) -> Agent {
+    Agent::config_builder().timeout_global(Some(timeout)).http_status_as_error(false).build().into()
 }
 
 pub fn get(service: &Service, url: &str, query: &[(&str, &str)], headers: &[(&str, &str)]) -> Result<Answer> {
-    let mut request = agent().get(url).header("Accept", "application/json");
+    let mut request = agent(TIMEOUT).get(url).header("Accept", "application/json");
     for (key, value) in headers {
         request = request.header(*key, *value);
     }
@@ -37,20 +39,42 @@ pub fn get(service: &Service, url: &str, query: &[(&str, &str)], headers: &[(&st
 }
 
 pub fn post(service: &Service, url: &str, headers: &[(&str, &str)], body: &Value) -> Result<Answer> {
-    let mut request = agent().post(url).header("Accept", "application/json");
+    let mut request = agent(TIMEOUT).post(url).header("Accept", "application/json");
     for (key, value) in headers {
         request = request.header(*key, *value);
     }
     finish(service, request.content_type("application/json").send(body.to_string()))
 }
 
-fn finish(service: &Service, result: std::result::Result<Response<ureq::Body>, ureq::Error>) -> Result<Answer> {
-    let mut response = result.map_err(|e| match e {
+pub fn download(service: &Service, url: &str) -> Result<Vec<u8>> {
+    let mut response = reached(service, agent(DOWNLOAD_TIMEOUT).get(url).call(), DOWNLOAD_TIMEOUT)?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        return Err(Error::Api(format!("{} answered {status} for {url}", service.name)));
+    }
+    response
+        .body_mut()
+        .with_config()
+        .limit(DOWNLOAD_LIMIT)
+        .read_to_vec()
+        .map_err(|e| Error::Api(format!("could not download from {}: {e}", service.name)))
+}
+
+fn reached(
+    service: &Service,
+    result: std::result::Result<Response<ureq::Body>, ureq::Error>,
+    timeout: Duration,
+) -> Result<Response<ureq::Body>> {
+    result.map_err(|e| match e {
         ureq::Error::Timeout(_) => {
-            Error::Api(format!("{} did not answer within {} s", service.name, TIMEOUT.as_secs()))
+            Error::Api(format!("{} did not answer within {} s", service.name, timeout.as_secs()))
         }
         e => Error::Api(format!("could not reach {}: {e}", service.name)),
-    })?;
+    })
+}
+
+fn finish(service: &Service, result: std::result::Result<Response<ureq::Body>, ureq::Error>) -> Result<Answer> {
+    let mut response = reached(service, result, TIMEOUT)?;
     let status = response.status().as_u16();
     if status == 401 || status == 403 {
         return Err(Error::Api(service.rejected.into()));
@@ -121,6 +145,24 @@ mod tests {
         let server = FakeHttp::start(vec![("GET /x", status, "{}")]);
         let err = get(&SERVICE, &format!("{}/x", server.url()), &[], &[]).err().map(|e| e.to_string());
         assert_eq!(err.as_deref(), Some(message));
+    }
+
+    #[test]
+    fn download_reads_the_whole_body() {
+        let server = FakeHttp::start(vec![("GET /file", 200, "some bytes")]);
+
+        let bytes = download(&SERVICE, &format!("{}/file", server.url())).expect("download");
+
+        assert_eq!(bytes, b"some bytes");
+    }
+
+    #[test]
+    fn download_fails_on_a_missing_file() {
+        let server = FakeHttp::start(Vec::<(&str, u16, &str)>::new());
+
+        let err = download(&SERVICE, &format!("{}/file", server.url())).err().map(|e| e.to_string());
+
+        assert_eq!(err, Some(format!("Tracker answered 404 for {}/file", server.url())));
     }
 
     #[test]
