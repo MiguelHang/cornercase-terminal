@@ -19,7 +19,7 @@ A terminal multiplexer for working on several projects at once, each with its ow
 You need:
 
 - Linux or macOS (on macOS, the Xcode Command Line Tools: `xcode-select --install`)
-- Rust (stable, installed with [rustup](https://rustup.rs))
+- [rustup](https://rustup.rs) (it installs the Rust version pinned in `rust-toolchain.toml` on the first build)
 - [Zig 0.15.2](https://ziglang.org/download/) on your `PATH`, exactly this version: it builds Ghostty's terminal core, which refuses any other. Package managers such as Homebrew may ship a newer one, so download it from ziglang.org if in doubt.
 - `git`, and network access for the first build (it fetches Ghostty's sources)
 

@@ -177,7 +177,7 @@ mod tests {
 
         #[test]
         fn is_empty_for_a_short_buffer() {
-            assert!(procargs(&[1, 0]).is_empty());
+            assert_eq!(procargs(&[1, 0]), Vec::<String>::new());
         }
     }
 }

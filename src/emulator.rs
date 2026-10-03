@@ -338,7 +338,7 @@ mod tests {
         #[case::an_empty_write(b"\x1b]52;c;\x07")]
         #[case::plain_output(b"hello")]
         fn hands_over_nothing_for(#[case] output: &[u8]) {
-            assert!(copied_by(output).is_empty());
+            assert_eq!(copied_by(output), Vec::<String>::new());
         }
 
         #[test]
@@ -346,7 +346,7 @@ mod tests {
             let (mut emu, _) = emulator();
             emu.feed(b"\x1b]52;c;aGVsbG8=\x07");
             emu.take_copied();
-            assert!(emu.take_copied().is_empty());
+            assert_eq!(emu.take_copied(), Vec::<String>::new());
         }
     }
 

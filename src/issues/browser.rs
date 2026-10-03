@@ -1355,7 +1355,7 @@ mod tests {
             let mut b = browser();
             b.people.github[0] = Who::Me;
             b.loaded(Source::Github, &Query::default(), Ok(vec![issue(Source::Github, 1, "x")]));
-            assert!(b.shown().is_empty());
+            assert_eq!(b.shown(), Vec::<&Issue>::new());
         }
     }
 

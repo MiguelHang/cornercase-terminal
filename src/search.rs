@@ -136,7 +136,7 @@ mod tests {
 
         #[test]
         fn an_empty_query_finds_nothing() {
-            assert!(rank(vec![candidate(Kind::Project, "api", &["api"])], "  ").is_empty());
+            assert_eq!(rank(vec![candidate(Kind::Project, "api", &["api"])], "  "), Vec::<Candidate>::new());
         }
 
         #[test]

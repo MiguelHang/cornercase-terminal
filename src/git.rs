@@ -110,13 +110,13 @@ mod tests {
             git(repo.path(), &["worktree", "add", "--quiet", "-b", "gone", &path.display().to_string()]);
             std::fs::remove_dir_all(&path).expect("remove worktree folder");
 
-            assert!(linked_worktrees(repo.path()).is_empty());
+            assert_eq!(linked_worktrees(repo.path()), Vec::<PathBuf>::new());
         }
 
         #[test]
         fn is_empty_without_worktrees() {
             let repo = git_repo(&[]);
-            assert!(linked_worktrees(repo.path()).is_empty());
+            assert_eq!(linked_worktrees(repo.path()), Vec::<PathBuf>::new());
         }
     }
 

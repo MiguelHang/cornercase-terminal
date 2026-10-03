@@ -13,7 +13,7 @@ The design and the reasons behind it are written down in [CLAUDE.md](CLAUDE.md).
 
 ## Setup
 
-You need Linux or macOS (with the Xcode Command Line Tools), stable Rust, `git` and [Zig 0.15.2](https://ziglang.org/download/) on your `PATH` (exactly this version). The first build fetches Ghostty's sources and takes a couple of minutes.
+You need Linux or macOS (with the Xcode Command Line Tools), [rustup](https://rustup.rs) (it installs the pinned Rust version by itself), `git` and [Zig 0.15.2](https://ziglang.org/download/) on your `PATH` (exactly this version). The first build fetches Ghostty's sources and takes a couple of minutes.
 
 ```sh
 cargo run                  # build and attach
