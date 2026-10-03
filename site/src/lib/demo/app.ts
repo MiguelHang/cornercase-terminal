@@ -742,7 +742,12 @@ export class App {
 
   settingsRows(page: number): SettingsRow[] {
     const c = this.config;
-    if (page === 0) return [{ id: 'folder', section: '', label: 'worktrees folder', value: c.worktreesDir, note: 'new worktrees go in <folder>/<repo>/<branch>' }];
+    if (page === 0) {
+      return [
+        { id: 'folder', section: '', label: 'worktrees folder', value: c.worktreesDir, note: 'new worktrees go in <folder>/<repo>/<branch>' },
+        { id: 'fetch', section: '', label: 'fetch branches every', value: c.fetchMinutes ? `${c.fetchMinutes} min` : 'off', note: 'commits to pull show as ↓n' },
+      ];
+    }
     if (page === 1) {
       const rows: SettingsRow[] = [
         { id: 'agent', section: 'Agent', label: 'default agent', value: c.agent, note: c.agent === 'auto' ? 'the agent in your tab, otherwise ask' : '' },
@@ -801,6 +806,7 @@ export class App {
     const c = this.config;
     o.notice = undefined;
     if (row.id === 'folder') o.edit = { row: row.id, label: 'worktrees folder', input: c.worktreesDir, token: false };
+    else if (row.id === 'fetch') o.edit = { row: row.id, label: 'fetch branches every (minutes, 0 turns it off)', input: String(c.fetchMinutes), token: false };
     else if (row.id === 'submit') {
       c.submit = !c.submit;
       o.notice = c.submit ? 'the prompt is sent for you' : 'the prompt is typed; you press Enter';
@@ -889,6 +895,14 @@ export class App {
         this.config.worktreesDir = v;
         o.edit = undefined;
         o.notice = `new worktrees go in ${v}/<repo>/<branch>`;
+      }
+    } else if (edit.row === 'fetch') {
+      const v = edit.input.trim();
+      if (!/^\d+$/.test(v)) edit.error = 'use a whole number of minutes, 0 turns it off';
+      else {
+        this.config.fetchMinutes = Number(v);
+        o.edit = undefined;
+        o.notice = this.config.fetchMinutes ? `branches are fetched every ${this.config.fetchMinutes} min` : 'branches are not fetched: commits to pull are not shown';
       }
     } else if (edit.row.startsWith('token:')) {
       const source = edit.row.slice(6) as 'shortcut' | 'linear';

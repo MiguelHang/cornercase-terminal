@@ -30,6 +30,7 @@ export interface Workspace {
   tabs: Tab[];
   active: number;
   flags: Place['flags'];
+  behind?: number;
 }
 
 export interface Project {
@@ -99,6 +100,7 @@ export type Overlay =
 
 export interface Config {
   worktreesDir: string;
+  fetchMinutes: number;
   agent: string;
   submit: boolean;
   trust: boolean;
@@ -110,6 +112,7 @@ export interface Config {
 
 export const defaultConfig = (): Config => ({
   worktreesDir: '~/.cornercase/worktrees',
+  fetchMinutes: 5,
   agent: 'claude',
   submit: false,
   trust: true,

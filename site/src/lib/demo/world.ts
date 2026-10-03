@@ -44,7 +44,8 @@ export function world(app: App): App {
   const main = shop.workspaces[0];
   const editorPane = main.tabs[0].panes[0];
   editorPane.shell.start(new Editor(app.host(shop, main, () => editorPane.id), () => editorPane.shell.finish(), 'src/returns/address.rs', ADDRESS_RS, 11));
-  const logTab = app.newTab([app.newPane(shop, main, [prompt('shop', 'git log --oneline --graph'), ...gitLog('shop', 'main'), prompt('shop', 'git status -sb'), [seg('## main')]])]);
+  main.behind = 2;
+  const logTab = app.newTab([app.newPane(shop, main, [prompt('shop', 'git log --oneline --graph'), ...gitLog('shop', 'main'), prompt('shop', 'git status -sb'), [seg('## main...origin/main [behind 2]')]])]);
   main.tabs.push(logTab);
 
   const dark = app.addWorkspace(shop, 'feat/dark-mode', true);

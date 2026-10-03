@@ -22,6 +22,7 @@ pub enum Status {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row {
     Folder,
+    Fetch,
     DimPanes,
     Token(Source),
     Tab(&'static str),
@@ -35,7 +36,7 @@ pub enum Row {
 impl Row {
     pub fn section(&self) -> &'static str {
         match self {
-            Self::Folder | Self::DimPanes => "",
+            Self::Folder | Self::Fetch | Self::DimPanes => "",
             Self::Token(_) => "Accounts",
             Self::Tab(_) => "Sources shown",
             Self::DefaultAgent | Self::Submit | Self::Trust => "Agent",
@@ -45,7 +46,7 @@ impl Row {
 
     pub fn page(&self) -> Page {
         match self {
-            Self::Folder => Page::Worktrees,
+            Self::Folder | Self::Fetch => Page::Worktrees,
             Self::DefaultAgent | Self::Submit | Self::Trust | Self::Kind(_) | Self::AddAgent => Page::Agents,
             Self::Token(_) | Self::Tab(_) => Page::Issues,
             Self::DimPanes => Page::Tui,
@@ -179,7 +180,7 @@ impl Settings {
     pub fn rows(&self) -> Vec<Row> {
         let shown = self.shown_tabs();
         let hidden = TAB_IDS.iter().filter(|id| !shown.contains(id)).copied();
-        let mut rows = vec![Row::Folder];
+        let mut rows = vec![Row::Folder, Row::Fetch];
         rows.extend(self.tokens.iter().map(|(source, _)| Row::Token(*source)));
         rows.extend(shown.iter().copied().chain(hidden).map(Row::Tab));
         rows.extend([Row::DefaultAgent, Row::Submit, Row::Trust]);
@@ -228,6 +229,7 @@ impl Settings {
         self.notice = None;
         match row {
             Row::Folder => self.start_edit(row, self.config.worktrees_dir.clone()),
+            Row::Fetch => self.start_edit(row, self.config.fetch_minutes.to_string()),
             Row::Token(source) => {
                 if self.status(source) == Some(&Status::Env) {
                     let env = source.token_env().unwrap_or_default();
@@ -377,6 +379,21 @@ impl Settings {
                     self.edit = None;
                     let notice = format!("new worktrees go in {worktrees_dir}/<repo>/<branch>");
                     self.save(Config { worktrees_dir, ..self.config.clone() }, notice)
+                }
+                Err(message) => {
+                    edit.error = Some(message.into());
+                    Action::None
+                }
+            },
+            Row::Fetch => match config::check_fetch_minutes(&edit.input) {
+                Ok(fetch_minutes) => {
+                    self.edit = None;
+                    let notice = if fetch_minutes == 0 {
+                        "branches are not fetched: commits to pull are not shown".into()
+                    } else {
+                        format!("branches are fetched every {fetch_minutes} min")
+                    };
+                    self.save(Config { fetch_minutes, ..self.config.clone() }, notice)
                 }
                 Err(message) => {
                     edit.error = Some(message.into());
@@ -552,6 +569,11 @@ impl Settings {
                 "new worktrees go in <folder>/<repo>/<branch>".to_string(),
                 false,
             ),
+            Row::Fetch => {
+                let value =
+                    if config.fetch_minutes == 0 { "off".into() } else { format!("{} min", config.fetch_minutes) };
+                ("fetch branches every".into(), value, "commits to pull show as ↓n".into(), false)
+            }
             Row::Token(source) => {
                 let label = format!("{} {}", source.name(), source.token_name());
                 let (value, note) = match self.status(*source) {
@@ -632,6 +654,7 @@ impl Settings {
             let token = matches!(edit.row, Row::Token(_));
             let label = match &edit.row {
                 Row::Folder => "worktrees folder".to_string(),
+                Row::Fetch => "fetch branches every (minutes, 0 turns it off)".to_string(),
                 Row::Token(source) => format!("{} {}", source.name(), source.token_name()),
                 Row::Kind(kind) => format!("{kind} extra arguments"),
                 _ => String::new(),
@@ -761,7 +784,7 @@ mod tests {
 
         #[test]
         fn the_first_one_is_worktrees() {
-            assert_eq!(settings().rows(), [Row::Folder]);
+            assert_eq!(settings().rows(), [Row::Folder, Row::Fetch]);
         }
 
         #[rstest]
@@ -795,7 +818,8 @@ mod tests {
         fn down_stays_on_the_page() {
             let mut s = settings();
             press(&mut s, KeyCode::Down);
-            assert_eq!((s.page, s.row()), (Page::Worktrees, Some(Row::Folder)));
+            press(&mut s, KeyCode::Down);
+            assert_eq!((s.page, s.row()), (Page::Worktrees, Some(Row::Fetch)));
         }
     }
 
@@ -821,6 +845,41 @@ mod tests {
             let mut s = settings();
             press(&mut s, KeyCode::Enter);
             s.edit.as_mut().expect("editing").input = "rel".into();
+            assert_eq!(press(&mut s, KeyCode::Enter), Action::None);
+            assert!(s.edit.as_ref().is_some_and(|e| e.error.is_some()));
+        }
+    }
+
+    mod fetch {
+        use super::*;
+
+        #[test]
+        fn is_edited_and_saved() {
+            let mut s = settings();
+            go_to(&mut s, &Row::Fetch);
+            press(&mut s, KeyCode::Enter);
+            press(&mut s, KeyCode::Backspace);
+            type_text(&mut s, "15");
+            assert_eq!(saved(press(&mut s, KeyCode::Enter)).fetch_minutes, 15);
+        }
+
+        #[test]
+        fn zero_turns_it_off() {
+            let mut s = settings();
+            go_to(&mut s, &Row::Fetch);
+            press(&mut s, KeyCode::Enter);
+            s.edit.as_mut().expect("editing").input = "0".into();
+            press(&mut s, KeyCode::Enter);
+            let ui::Overlay::Settings(view) = s.view() else { panic!("not the settings") };
+            assert_eq!(view.rows[1].value, "off");
+        }
+
+        #[test]
+        fn a_word_is_refused() {
+            let mut s = settings();
+            go_to(&mut s, &Row::Fetch);
+            press(&mut s, KeyCode::Enter);
+            s.edit.as_mut().expect("editing").input = "often".into();
             assert_eq!(press(&mut s, KeyCode::Enter), Action::None);
             assert!(s.edit.as_ref().is_some_and(|e| e.error.is_some()));
         }

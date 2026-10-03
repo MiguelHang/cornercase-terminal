@@ -384,7 +384,13 @@ export class Painter {
       if (spec.kind === 'ws') {
         const w = p.workspaces[spec.w];
         const style: Style = spec.w === p.active ? { fg: 15, add: BOLD } : { fg: 7, add: BOLD };
-        this.band(r, [seg(`  ${truncateRight(workspaceLabel(w), r.w - 2 - closeWidth - 1)}`, style)], {});
+        const room = r.w - 2 - closeWidth - 1;
+        const tag = app.config.fetchMinutes && w.behind ? `↓${w.behind}` : '';
+        const shown = tag && tag.length + 1 < room ? tag : '';
+        const name = truncateRight(workspaceLabel(w), room - (shown ? shown.length + 1 : 0));
+        const segs = [seg(`  ${name}`, style)];
+        if (shown) segs.push(seg(' '.repeat(Math.max(0, room - name.length - shown.length))), seg(shown, { fg: 3 }));
+        this.band(r, segs, {});
         this.region({ r, click: () => app.selectWorkspace(spec.w), right: (x, y) => app.openMenu({ x, y }, { kind: 'workspace', project: p.id, workspace: w.id }), cursor: 'pointer' });
         this.closeX(r, {}, () => app.closeWorkspace(spec.w));
       } else if (spec.kind === 'tab') {

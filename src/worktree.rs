@@ -60,13 +60,18 @@ pub fn remove(repo: &Path, path: &Path, force: bool) -> Result<()> {
     check(git(repo, args)?).map(drop)
 }
 
-fn git<I: IntoIterator<Item = S>, S: AsRef<OsStr>>(repo: &Path, args: I) -> Result<Output> {
+pub fn git<I: IntoIterator<Item = S>, S: AsRef<OsStr>>(repo: &Path, args: I) -> Result<Output> {
     command(repo, args).stdin(Stdio::null()).output().map_err(Error::RunGit)
 }
 
 fn command<I: IntoIterator<Item = S>, S: AsRef<OsStr>>(repo: &Path, args: I) -> Command {
     let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(repo).args(args).env("GIT_TERMINAL_PROMPT", "0");
+    cmd.arg("-C")
+        .arg(repo)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "")
+        .env("SSH_ASKPASS_REQUIRE", "never");
     cmd
 }
 

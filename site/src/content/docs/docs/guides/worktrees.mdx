@@ -53,9 +53,19 @@ To keep them somewhere else, change **settings → Worktrees → worktrees folde
 
 <Screen
   name="settings-worktrees"
-  crop={[2, 1, 106, 6]}
-  alt="The Worktrees tab of the settings: worktrees folder ~/.cornercase/worktrees, new worktrees go in folder/repo/branch"
+  crop={[2, 1, 106, 7]}
+  alt="The Worktrees tab of the settings: worktrees folder ~/.cornercase/worktrees, new worktrees go in folder/repo/branch; fetch branches every 5 min, commits to pull show as ↓n"
 />
+
+## Commits to pull
+
+When a workspace's branch is behind its upstream, the workspace row ends with the number of commits you don't have yet, such as `↓3`, so you know it's time to pull. It goes away once you pull.
+
+- It works with any remote, not only GitHub, for branches that have an upstream (`git push -u` or `git branch --set-upstream-to` sets one). A branch without an upstream, or a folder without git, shows nothing.
+- cornercase runs `git fetch --all` in the background for each project every **5 minutes**, and counts the commits every few seconds, so a pull shows right away. The first fetch happens as soon as the project is open.
+- The fetch never asks for a password or passphrase: if it needs one, or the network is down, it fails silently and the number stays as it was. Use an SSH agent or a credential helper so it can run unattended.
+
+To fetch more or less often, change **settings → Worktrees → fetch branches every**, in minutes. `0` turns it off: nothing is fetched and no numbers are shown.
 
 ## Worktrees you made elsewhere
 

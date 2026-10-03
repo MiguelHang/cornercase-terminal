@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -12,11 +13,13 @@ pub const DEFAULT_WORKTREES_DIR: &str = "~/.cornercase/worktrees";
 pub const DEFAULT_PROMPT: &str = "{url}";
 pub const DEFAULT_GH: &str = "gh";
 pub const DEFAULT_ISSUE_TABS: [&str; 4] = ["all", "github", "shortcut", "linear"];
+pub const DEFAULT_FETCH_MINUTES: u64 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub worktrees_dir: String,
+    pub fetch_minutes: u64,
     pub issue_tabs: Vec<String>,
     pub agent: String,
     pub agent_args: BTreeMap<String, Vec<String>>,
@@ -34,6 +37,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             worktrees_dir: DEFAULT_WORKTREES_DIR.into(),
+            fetch_minutes: DEFAULT_FETCH_MINUTES,
             issue_tabs: DEFAULT_ISSUE_TABS.map(String::from).to_vec(),
             agent: agents::AUTO.into(),
             agent_args: BTreeMap::new(),
@@ -56,6 +60,10 @@ impl Config {
 
     pub fn gh(&self, home: Option<&Path>) -> PathBuf {
         expand_home(&self.gh, home)
+    }
+
+    pub fn fetch_every(&self) -> Option<Duration> {
+        (self.fetch_minutes > 0).then(|| Duration::from_secs(self.fetch_minutes.saturating_mul(60)))
     }
 }
 
@@ -95,6 +103,10 @@ pub fn check_worktrees_dir(input: &str, home: Option<&Path>) -> Result<String, &
         return Err("use an absolute path or one starting with ~/");
     }
     Ok(dir.to_string())
+}
+
+pub fn check_fetch_minutes(input: &str) -> Result<u64, &'static str> {
+    input.trim().parse().map_err(|_| "use a whole number of minutes, 0 turns it off")
 }
 
 #[cfg(test)]
@@ -171,6 +183,31 @@ mod tests {
         #[case::relative("worktrees", Err("use an absolute path or one starting with ~/"))]
         fn accepts_only_absolute_folders(#[case] input: &str, #[case] expected: Result<String, &'static str>) {
             assert_eq!(check_worktrees_dir(input, Some(Path::new("/home/ana"))), expected);
+        }
+    }
+
+    mod check_fetch_minutes {
+        use super::*;
+
+        #[rstest]
+        #[case::minutes(" 15 ", Ok(15))]
+        #[case::off("0", Ok(0))]
+        #[case::empty("", Err("use a whole number of minutes, 0 turns it off"))]
+        #[case::negative("-1", Err("use a whole number of minutes, 0 turns it off"))]
+        #[case::fraction("1.5", Err("use a whole number of minutes, 0 turns it off"))]
+        fn accepts_whole_minutes(#[case] input: &str, #[case] expected: Result<u64, &'static str>) {
+            assert_eq!(check_fetch_minutes(input), expected);
+        }
+    }
+
+    mod fetch_every {
+        use super::*;
+
+        #[rstest]
+        #[case::default(DEFAULT_FETCH_MINUTES, Some(Duration::from_secs(300)))]
+        #[case::off(0, None)]
+        fn is_the_interval_in_minutes(#[case] fetch_minutes: u64, #[case] expected: Option<Duration>) {
+            assert_eq!(Config { fetch_minutes, ..Config::default() }.fetch_every(), expected);
         }
     }
 }
