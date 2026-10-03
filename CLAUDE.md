@@ -55,6 +55,7 @@ src/highlight.rs  syntax highlighting of fenced code (syntect scopes -> palette 
 src/issues/       issue model and clients: github.rs (gh CLI), shortcut.rs (REST), linear.rs (GraphQL), http.rs, browser.rs (modal state), cache.rs (lists on disk)
 src/clipboard.rs  OSC 52
 src/worktree.rs   `git worktree add`/`remove`, checkout path, `.worktreeinclude`
+src/upstream.rs   `git fetch` and commits to pull per workspace (`↓n`)
 src/search.rs     global search: candidates, ranking, state
 src/picker.rs     folder picker state
 src/process.rs    a pid's cwd, name and arguments: /proc on Linux, libproc and sysctl on macOS
@@ -111,6 +112,7 @@ src/error.rs      library error type
 - Every linked worktree of the repo shows up, also ones created outside cornercase (`App::refresh`, throttled to once a second).
 - Removing asks first, runs `git worktree remove` (offering `--force` when git refuses) and never deletes the branch.
 - `.worktreeinclude`: files matching it **and** ignored by git are copied into a new checkout. Matching is delegated to git (`ls-files`, `check-ignore`).
+- **Commits to pull** (`↓n` at the end of a workspace row, before the `×`): every 3 s a thread per project counts `HEAD..@{upstream}` in each workspace and answers with `AppEvent::Behind`; it runs `git fetch --all` first once `fetch_minutes` (default 5, 0 turns all of it off) have passed. One thread per project at a time. Git never prompts (`GIT_TERMINAL_PROMPT=0`, empty `GIT_ASKPASS`, `SSH_ASKPASS_REQUIRE=never`); failures count as 0.
 
 **Issues (`issues/`)**
 - `Browser` is pure state that returns `Action`s; `App` does the I/O on threads. Answers carry their query and issue key so stale ones are dropped. Lists are cached in memory and in `issues.json` (titles and metadata only, never tokens).

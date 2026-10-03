@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
@@ -32,6 +32,7 @@ use crate::state::{self, IssuesState, PaneState, ProjectState, State, TabState, 
 use crate::term::{SpawnOptions, Term};
 use crate::ui::{self, FormHit, PickerHit, SidebarHit, WorkspaceHit, WorkspaceRow};
 use crate::update::{self, Install, Release, Updates};
+use crate::upstream;
 use crate::worktree;
 
 #[derive(Debug)]
@@ -45,6 +46,7 @@ pub enum AppEvent {
     IssueRead { source: Source, key: String, result: Result<Detail> },
     TokenChecked { source: Source, token: Secret, result: Result<Account> },
     PeopleLoaded { project: u64, source: Source, result: Result<Vec<Person>> },
+    Behind { project: u64, behind: Vec<(u64, u32)> },
     UpdateChecked(Result<Option<Release>>),
     Updated(Result<()>),
 }
@@ -108,6 +110,7 @@ const PICKER_SUBMIT: &str = "open";
 const WORKTREE_TOGGLE: &str = "with its own worktree";
 const WHEEL_ROWS: isize = 3;
 const SYNC_EVERY: Duration = Duration::from_secs(1);
+const COUNT_BEHIND_EVERY: Duration = Duration::from_secs(3);
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const TOAST_FOR: Duration = Duration::from_secs(2);
 const COPIED: &str = "copied to clipboard";
@@ -226,6 +229,9 @@ pub struct App {
     env_tokens: HashMap<Source, String>,
     secrets_path: PathBuf,
     launches: Vec<Launch>,
+    fetched: HashMap<u64, Instant>,
+    counting: HashSet<u64>,
+    counted: Option<Instant>,
     updates: Updates,
     update_scroll: usize,
     restart: bool,
@@ -297,6 +303,9 @@ impl App {
             env_tokens: env_tokens(),
             secrets_path,
             launches: Vec::new(),
+            fetched: HashMap::new(),
+            counting: HashSet::new(),
+            counted: None,
             updates: Updates::from_env(),
             update_scroll: 0,
             restart: false,
@@ -356,6 +365,52 @@ impl App {
         }
         self.synced = Some(now);
         self.sync_worktrees();
+        self.count_behind(now);
+    }
+
+    fn count_behind(&mut self, now: Instant) {
+        let Some(fetch_every) = self.config.fetch_every() else {
+            self.projects.iter_mut().flat_map(|p| &mut p.workspaces).for_each(|w| w.behind = 0);
+            return;
+        };
+        if self.counted.is_some_and(|at| now.duration_since(at) < COUNT_BEHIND_EVERY) {
+            return;
+        }
+        self.counted = Some(now);
+        self.fetched.retain(|id, _| self.projects.iter().any(|p| p.id == *id));
+        for project in &self.projects {
+            let workspaces: Vec<(u64, PathBuf)> = project
+                .workspaces
+                .iter()
+                .filter(|w| git::branch(&w.path).is_some())
+                .map(|w| (w.id, w.path.clone()))
+                .collect();
+            if workspaces.is_empty() || !self.counting.insert(project.id) {
+                continue;
+            }
+            let fetch = self.fetched.get(&project.id).is_none_or(|at| now.duration_since(*at) >= fetch_every);
+            if fetch {
+                self.fetched.insert(project.id, now);
+            }
+            let (id, repo, tx) = (project.id, project.path.clone(), self.tx.clone());
+            std::thread::spawn(move || {
+                let behind = upstream::check(&repo, &workspaces, fetch);
+                let _ = tx.send(AppEvent::Behind { project: id, behind });
+            });
+        }
+    }
+
+    fn behind_counted(&mut self, project: u64, behind: &[(u64, u32)]) {
+        self.counting.remove(&project);
+        if self.config.fetch_every().is_none() {
+            return;
+        }
+        let Some(p) = self.projects.iter_mut().find(|p| p.id == project) else { return };
+        for (id, n) in behind {
+            if let Some(w) = p.workspaces.iter_mut().find(|w| w.id == *id) {
+                w.behind = *n;
+            }
+        }
     }
 
     fn drive_launches(&mut self, now: Instant) {
@@ -680,6 +735,7 @@ impl App {
             }
             AppEvent::TokenChecked { source, token, result } => self.token_checked(source, &token, result, area)?,
             AppEvent::PeopleLoaded { project, source, result } => self.people_loaded(project, source, result),
+            AppEvent::Behind { project, behind } => self.behind_counted(project, &behind),
             AppEvent::UpdateChecked(result) => self.update_checked(result),
             AppEvent::Updated(result) => self.updated(result),
             AppEvent::Output(id, bytes) => {
@@ -2245,7 +2301,11 @@ impl App {
                 true,
                 p.workspaces
                     .iter()
-                    .map(|w| ui::WorkspaceEntry { name: w.label(), tabs: w.tabs.iter().map(Tab::label).collect() })
+                    .map(|w| ui::WorkspaceEntry {
+                        name: w.label(),
+                        tabs: w.tabs.iter().map(Tab::label).collect(),
+                        behind: w.behind,
+                    })
                     .collect(),
                 p.active,
                 p.workspace().filter(|w| !w.tabs.is_empty()).map(|w| w.active),
@@ -2914,6 +2974,62 @@ mod tests {
             app.sync_worktrees();
 
             assert_eq!(app.projects[0].workspaces.len(), 1);
+        }
+
+        mod behind {
+            use super::*;
+            use crate::test_util::git;
+
+            fn behind(app: &App) -> u32 {
+                app.projects[0].workspaces[0].behind
+            }
+
+            fn commit(dir: &Path) {
+                git(dir, &["commit", "--quiet", "--allow-empty", "-m", "more"]);
+            }
+
+            #[test]
+            fn a_commit_on_the_remote_shows_until_it_is_pulled() {
+                let remote = git_repo(&[]);
+                let tmp = TempDir::new();
+                git(tmp.path(), &["clone", "--quiet", &remote.path().display().to_string(), "clone"]);
+                let clone = tmp.path().join("clone");
+                let (mut app, rx) = app_in(&clone, no_config());
+                commit(remote.path());
+                let start = Instant::now();
+
+                app.count_behind(start);
+                pump_until(&mut app, &rx, "the commit to pull shows", |a| behind(a) == 1);
+                git(&clone, &["pull", "--quiet", "--ff-only"]);
+                app.count_behind(start + COUNT_BEHIND_EVERY);
+
+                pump_until(&mut app, &rx, "the pulled commit is gone", |a| behind(a) == 0);
+            }
+
+            #[test]
+            fn a_repo_without_upstream_shows_nothing() {
+                let repo = git_repo(&[]);
+                let (mut app, rx) = app_in(repo.path(), no_config());
+
+                app.count_behind(Instant::now());
+
+                pump_until(&mut app, &rx, "the count answers", |a| a.counting.is_empty());
+                assert_eq!(behind(&app), 0);
+            }
+
+            #[test]
+            fn nothing_is_fetched_when_turned_off() {
+                let repo = git_repo(&[]);
+                let tmp = TempDir::new();
+                let config_path = tmp.path().join("config.json");
+                config::save(&config_path, &Config { fetch_minutes: 0, ..Config::default() }).expect("save config");
+                let (mut app, _rx) = app_in(repo.path(), config_path);
+                app.projects[0].workspaces[0].behind = 2;
+
+                app.count_behind(Instant::now());
+
+                assert_eq!((app.counting.len(), behind(&app)), (0, 0));
+            }
         }
 
         #[test]

@@ -16,13 +16,14 @@ The modal has four tabs. Click a row, or select it and press `Enter`, to change 
 
 <Screen
   name="settings-worktrees"
-  crop={[2, 1, 106, 6]}
-  alt="The Worktrees tab: worktrees folder ~/.cornercase/worktrees, new worktrees go in folder/repo/branch"
+  crop={[2, 1, 106, 7]}
+  alt="The Worktrees tab: worktrees folder ~/.cornercase/worktrees, new worktrees go in folder/repo/branch; fetch branches every 5 min, commits to pull show as ↓n"
 />
 
 | Row | What it sets |
 | --- | --- |
 | **worktrees folder** | Where new [worktrees](../../guides/worktrees/) are checked out: `<folder>/<repository>/<branch>`. Must be an absolute path or start with `~/`. |
+| **fetch branches every** | How often, in minutes, the remotes are fetched to show the [commits to pull](../../guides/worktrees/#commits-to-pull) as `↓n` on each workspace. `0` turns it off. |
 
 ### Agents
 
@@ -102,6 +103,7 @@ Every key is optional: a missing key takes its default. Here is a complete file,
 ```json title="config.json"
 {
   "worktrees_dir": "~/.cornercase/worktrees",
+  "fetch_minutes": 5,
   "issue_tabs": ["all", "github", "shortcut", "linear"],
   "agent": "claude",
   "agent_args": {
@@ -124,6 +126,7 @@ Every key is optional: a missing key takes its default. Here is a complete file,
 | Key | Type | Default |
 | --- | --- | --- |
 | [`worktrees_dir`](#worktrees_dir) | string | `"~/.cornercase/worktrees"` |
+| [`fetch_minutes`](#fetch_minutes) | number | `5` |
 | [`issue_tabs`](#issue_tabs) | array of strings | `["all", "github", "shortcut", "linear"]` |
 | [`agent`](#agent) | string | `"auto"` |
 | [`agent_args`](#agent_args) | object | `{}` |
@@ -140,6 +143,10 @@ Every key is optional: a missing key takes its default. Here is a complete file,
 #### `worktrees_dir`
 
 The folder for new worktrees, checked out in `<worktrees_dir>/<repository>/<branch>`. An absolute path, or one starting with `~/`.
+
+#### `fetch_minutes`
+
+How often, in minutes, each project's remotes are fetched to show the [commits to pull](../../guides/worktrees/#commits-to-pull) on its workspaces. A whole number; `0` turns fetching and the counts off.
 
 #### `issue_tabs`
 

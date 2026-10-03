@@ -47,6 +47,7 @@ const COMPACT_CLOSE_WIDTH: u16 = 5;
 const TOAST_ICON: &str = " ✓ ";
 const TOAST_MARGIN: u16 = 1;
 const NAME_RESERVED_COLS: usize = 6;
+const BEHIND_ICON: &str = "↓";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Border {
@@ -1138,6 +1139,7 @@ pub struct ProjectEntry {
 pub struct WorkspaceEntry {
     pub name: String,
     pub tabs: Vec<String>,
+    pub behind: u32,
 }
 
 pub struct TabView {
@@ -2010,9 +2012,20 @@ fn draw_workspaces(f: &mut Frame, view: &View, areas: &Areas) {
                 } else {
                     Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)
                 };
-                let max = usize::from(r.width).saturating_sub(2 + close_width + 1);
-                let name = truncate_right(&view.workspaces[w].name, max);
-                draw_band(f, r, Span::styled(format!("  {name}"), style), Style::default());
+                let entry = &view.workspaces[w];
+                let room = usize::from(r.width).saturating_sub(2 + close_width + 1);
+                let behind = Some(entry.behind)
+                    .filter(|n| *n > 0)
+                    .map(|n| format!("{BEHIND_ICON}{n}"))
+                    .filter(|tag| tag.chars().count() + 1 < room);
+                let tag_width = behind.as_ref().map_or(0, |tag| tag.chars().count() + 1);
+                let name = truncate_right(&entry.name, room - tag_width);
+                let mut line = vec![Span::styled(format!("  {name}"), style)];
+                if let Some(tag) = behind {
+                    let pad = room.saturating_sub(name.chars().count() + tag.chars().count());
+                    line.extend([Span::raw(" ".repeat(pad)), Span::styled(tag, Style::default().fg(Color::Yellow))]);
+                }
+                draw_band(f, r, Line::from(line), Style::default());
                 draw_row_close(f, view, r, Style::default());
             }
             WorkspaceRow::Tab(w, t) => {
@@ -2460,8 +2473,8 @@ mod tests {
             View {
                 has_project: true,
                 workspaces: vec![
-                    WorkspaceEntry { name: "feat/login".into(), tabs: vec!["claude".into(), "nvim".into()] },
-                    WorkspaceEntry { name: "main".into(), tabs: vec!["zsh".into()] },
+                    WorkspaceEntry { name: "feat/login".into(), tabs: vec!["claude".into(), "nvim".into()], behind: 0 },
+                    WorkspaceEntry { name: "main".into(), tabs: vec!["zsh".into()], behind: 0 },
                 ],
                 active_tab: Some(0),
                 nav,
@@ -2517,6 +2530,13 @@ mod tests {
         #[test]
         fn renders_the_workspaces_menu() {
             insta::assert_snapshot!(render_small(&in_a_project(Some(Nav::Workspaces))).backend());
+        }
+
+        #[test]
+        fn renders_commits_to_pull_in_the_workspaces_menu() {
+            let mut v = in_a_project(Some(Nav::Workspaces));
+            v.workspaces[0].behind = 12;
+            insta::assert_snapshot!(render_small(&v).backend());
         }
 
         #[test]
@@ -2645,7 +2665,7 @@ mod tests {
         fn hidden_workspace_rows_count_workspaces_and_tabs_only() {
             let v = View {
                 has_project: true,
-                workspaces: vec![WorkspaceEntry { name: "main".into(), tabs: vec!["zsh".into(); 10] }],
+                workspaces: vec![WorkspaceEntry { name: "main".into(), tabs: vec!["zsh".into(); 10], behind: 0 }],
                 active_tab: Some(0),
                 ..view(&["cornercase"])
             };
@@ -2764,8 +2784,8 @@ mod tests {
             View {
                 has_project: true,
                 workspaces: vec![
-                    WorkspaceEntry { name: "login".into(), tabs: vec!["claude".into(), "nvim".into()] },
-                    WorkspaceEntry { name: "main".into(), tabs: vec!["zsh".into()] },
+                    WorkspaceEntry { name: "login".into(), tabs: vec!["claude".into(), "nvim".into()], behind: 0 },
+                    WorkspaceEntry { name: "main".into(), tabs: vec!["zsh".into()], behind: 0 },
                 ],
                 active_tab,
                 ..view(&["cornercase"])
@@ -2833,6 +2853,24 @@ mod tests {
         }
 
         #[test]
+        fn renders_commits_to_pull_before_the_close_button() {
+            let mut v = View { hover: Some(at(0)), ..with_workspaces(Some(0)) };
+            v.workspaces[0].behind = 3;
+            v.workspaces[1].behind = 1;
+            insta::assert_snapshot!(render(&v).backend());
+        }
+
+        #[rstest]
+        #[case::nothing_to_pull("login", 0, "  login")]
+        #[case::some("login", 3, "  login            ↓3")]
+        #[case::long_name_is_cut_first("feature-with-a-very-long-name", 3, "  feature-with-a-… ↓3")]
+        fn commits_to_pull_sit_at_the_end_of_the_row(#[case] name: &str, #[case] behind: u32, #[case] expected: &str) {
+            let mut v = with_workspaces(Some(0));
+            v.workspaces[0] = WorkspaceEntry { name: name.into(), behind, ..v.workspaces.remove(0) };
+            assert_eq!(row_text(&v, WorkspaceRow::Workspace(0)).trim_end(), expected);
+        }
+
+        #[test]
         fn marks_the_active_tab() {
             let pos = Position::new(wlist().x + 2, wlist().y + 1);
             assert_eq!(render(&with_workspaces(Some(0))).backend().buffer()[pos].symbol(), "▌");
@@ -2847,7 +2885,7 @@ mod tests {
         #[test]
         fn an_empty_workspace_says_so_in_the_pane() {
             let v = View {
-                workspaces: vec![WorkspaceEntry { name: "main".into(), tabs: Vec::new() }],
+                workspaces: vec![WorkspaceEntry { name: "main".into(), tabs: Vec::new(), behind: 0 }],
                 ..with_workspaces(None)
             };
             let text: String =
