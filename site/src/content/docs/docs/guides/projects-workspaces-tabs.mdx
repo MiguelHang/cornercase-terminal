@@ -11,7 +11,7 @@ cornercase organises your shells in three levels, each in its own column: **proj
 <Screen
   name="hover-close"
   crop={[0, 5, 48, 21]}
-  alt="The projects column with shop, api, infra and notes, and the workspaces column of shop: main with nvim and bash, feat/dark-mode, feat/login hovered, with a lighter background and a close button, and an issue workspace with a claude tab"
+  alt="The projects column with shop, api, infra and notes, and the workspaces column of shop: main with nvim and bash, feat/dark-mode, feat/login hovered, with a lighter background and a close button, and an issue workspace whose claude tab shows ◐ while the agent works"
   caption="The two columns, with feat/login hovered: a lighter background and its × button."
 />
 
@@ -105,6 +105,21 @@ Each workspace lists its tabs under its name. Click **`+ tab`** under a workspac
 A tab is named after the program in the foreground of its active pane, so the name follows what you do: `bash` while you are at the prompt, `nvim` while you edit, `claude` while an agent works. Tabs started from an issue in a folder that isn't a repository are named after the issue instead.
 
 The shell is the one in your `SHELL` environment variable when the server started, or `/bin/sh` if it isn't set.
+
+### What your agents are doing
+
+When Claude Code runs in a tab, an icon before the tab's name tells you what it is doing:
+
+| Icon | Means |
+| --- | --- |
+| `◐` yellow | Claude is working. |
+| `!` orange | Claude needs you: it asks for permission or asks you a question. |
+| `✓` green | Claude finished while you were looking at another tab. It goes away when you open the tab. |
+| `○` grey | Claude waits for your next message. |
+
+So that a finished or waiting agent in another project doesn't go unnoticed, `!` and `✓` also show at the end of its workspace's row, of its project's row and, while the group is collapsed, of its group's header. When several tabs below a row disagree, `!` wins over `✓`. In the [compact layout](../small-terminals/) the `≡` button shows them for every tab except the one on screen.
+
+cornercase reads what Claude Code reports about itself: the small file it keeps for each running session in `~/.claude/sessions` (or in `$CLAUDE_CONFIG_DIR/sessions`), the same one `claude agents --json` reads. Nothing is installed and none of Claude's settings change. Without that file, for example with an older Claude Code, cornercase falls back to the title Claude gives the terminal, which only tells working from idle. Other agents don't get an icon yet.
 
 ## Rename
 

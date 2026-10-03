@@ -49,6 +49,7 @@ src/state.rs      the saved session as JSON, migrations, and the Saver that writ
 src/config.rs     user settings (config.json), `~` expansion, validation
 src/settings.rs   the settings modal's state; returns Actions for App
 src/agents.rs     known coding agents, their modes and arguments, which agent takes an issue, detection, trust prompt
+src/activity.rs   what the agent in a pane is doing: Claude Code's session file, its title glyph, done-but-unseen, rollups
 src/launch.rs     starting an agent in a new tab (pure state machine)
 src/secrets.rs    Shortcut / Linear tokens in secrets.json (0600)
 src/markdown.rs   Markdown -> wrapped ratatui Lines
@@ -140,6 +141,13 @@ src/error.rs      library error type
 - `launch::Launch` types the command once the shell is quiet, waits until the agent is in the foreground and the screen is quiet, answers the trust prompt, then pastes the prompt. Readiness is a heuristic.
 - The trust prompt may highlight "No" by default (Claude Code does), so `answer_keys` moves the selection to the "yes" option before pressing Enter.
 
+**Agent status (`activity.rs`)**
+- Every 500 ms (`WATCH_AGENTS_EVERY`, from `App::refresh`) each pane whose foreground process is Claude Code (`agents::detect` on its arguments) gets an `Activity`: working, waiting or idle. The source is the file Claude Code keeps for each running process, `<CLAUDE_CONFIG_DIR or ~/.claude>/sessions/<pid>.json`, the registry behind `claude agents --json` (its documented interface for status bars): `status` is `busy`, `waiting` (permission prompt, question, dialog), `idle` or `shell` (idle with a background shell). Its fields are not documented, so a missing file or an unknown value falls back to the title Claude sets (`◐`/`◑`, or braille in older versions, while busy; `✳` otherwise; it stays `✳` when Claude sees `TMUX`, `STY` or `ZELLIJ`), then to idle.
+- No hooks and no screen scraping. Hooks mean editing the user's `~/.claude/settings.json` (or shipping a plugin), `Stop` never fires on an Esc interrupt and the permission notification comes ~6 s late; Claude's screen changes too often to match. The session file turns idle within a tick of an interrupt and waiting as soon as a prompt shows.
+- `Status` adds done: a pane that went from working or waiting to idle while its tab was not the visible one (`App::focus().tab`) is done until that tab is shown. `watch_agents` clears it for the visible tab on every `refresh`, not only every 500 ms, so a click shows `○` at once. An unknown state counts as idle, so a fresh Claude never looks done.
+- A tab shows its most urgent pane (`Tab::status`, the order of `Status`): waiting `!` > done `✓` > working `◐` > idle `○`, before the name. Workspace, project and collapsed group rows show only what needs you (`activity::attention`: waiting or done), right-aligned and before `↓n`; working stays on the tab so the sidebar is not always full of icons. The compact `≡` shows the same for every tab but the visible one (`View::attention`).
+- Only Claude Code for now; another agent plugs in by returning an `Activity` from its own signals. A Claude running through `ssh` or in a container is not seen (no local process, no local file).
+
 **Settings (`config.rs`, `settings.rs`)**
 - Tabs: Worktrees, Agents, Issues, TUI. Every change is saved to `config.json` at once. File: `$XDG_CONFIG_HOME/cornercase/config.json`, or next to the socket when `CORNERCASE_SOCKET` is set (so tests never touch the real one). Missing keys take defaults; a corrupt file means all defaults.
 
@@ -179,6 +187,7 @@ src/error.rs      library error type
 - `term.rs` / `app.rs` tests spawn real `/bin/sh` PTYs (never the user's shell) and wait with `test_util::wait_until`, never sleeps. `/bin/sh` is `bash` on macOS, so tests check its name with `test_util::is_sh`. `TempDir` paths are canonical, because macOS' temp dir is behind a symlink (`/var` → `/private/var`).
 - Helpers: `test_util::TempDir`, `git_repo`, `fake_gh`, `FakeHttp` (canned HTTP), `write_executable` (through a `/bin/sh` child to avoid `ETXTBSY`). Nothing calls real `gh`, Shortcut or Linear. App tests clear `App::env_tokens` and never use the real config.
 - Agents are faked with a script (`FAKE_AGENT`) that asks a trust question and echoes what it reads.
+- Agent status is faked with a script named `claude` that writes its own `sessions/$$.json`; app tests point `App::claude_dir` at a temp dir, and e2e sets `CLAUDE_CONFIG_DIR` per `Session`, so nothing reads the real `~/.claude`.
 - `tests/e2e.rs` runs the real binary in a PTY (`SHELL=/bin/sh`, `PS1='$ '`), parses output with `vt100`, sends raw bytes and SGR mouse sequences, and answers the startup colour query. Each test gets its own server through a `Session`; dropping it runs `kill-server`.
 - Avoid races in e2e: wait for output that proves the previous step finished (`echo cat-""starts; cat -v`).
 - A safety-net test must fail without the code it protects.

@@ -35,6 +35,7 @@ When `CORNERCASE_SOCKET` is set, everything moves next to that socket, so a sepa
 
 - **Worktrees** that cornercase creates go in `~/.cornercase/worktrees/<repository>/<branch>`, or in the folder set in [settings](../configuration/#worktrees). They are ordinary git worktrees: `git worktree list` shows them.
 - While it [updates](../../installation/#update), cornercase unpacks the download in a hidden `.cornercase-update-<pid>` folder next to its binary, and removes it when done.
+- cornercase reads, and never writes, the files Claude Code keeps for its running sessions in `~/.claude/sessions/` (or `$CLAUDE_CONFIG_DIR/sessions/`), to show [what an agent is doing](../../guides/projects-workspaces-tabs/#what-your-agents-are-doing).
 - Inside your projects, cornercase only changes what you ask for: the worktrees you create (which git records in the repository's `.git` folder) and the files `.worktreeinclude` copies into them.
 
 ## Environment variables
@@ -48,6 +49,7 @@ When `CORNERCASE_SOCKET` is set, everything moves next to that socket, so a sepa
 | `SHORTCUT_API_TOKEN` | Shortcut token. Takes precedence over a saved one. |
 | `LINEAR_API_KEY` | Linear API key. Takes precedence over a saved one. |
 | `HOME` | Expands `~` in paths, and is the base of the default folders. |
+| `CLAUDE_CONFIG_DIR` | Where Claude Code keeps its files; cornercase reads its running sessions from `sessions/` in it. Without it, `~/.claude`. |
 | `XDG_CONFIG_HOME` | Folder for `config.json` and `secrets.json`. |
 | `XDG_STATE_HOME` | Folder for `session.json` and `issues.json`. |
 | `XDG_RUNTIME_DIR`, `TMPDIR` | Folder for the socket, lock and log. |

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod changes;
 
+use crate::activity::{self, Status};
 use crate::emulator::Snapshot;
 use crate::split::{Dir, Node};
 
@@ -53,6 +54,7 @@ const TOAST_ICON: &str = " ✓ ";
 const TOAST_MARGIN: u16 = 1;
 const NAME_RESERVED_COLS: usize = 6;
 const BEHIND_ICON: &str = "↓";
+const WAITING_COLOR: Color = Color::Indexed(208);
 const GROUP_INDENT: &str = "  ";
 pub const GROUP_ICONS: [char; 12] = ['●', '◉', '◐', '◆', '■', '▲', '▼', '★', '✦', '♥', '♣', '♠'];
 pub const GROUP_COLOURS: [u8; 16] = [1, 9, 208, 214, 3, 11, 2, 10, 6, 14, 4, 12, 99, 5, 13, 205];
@@ -1288,6 +1290,7 @@ pub struct ProjectEntry {
     pub name: String,
     pub workspaces: usize,
     pub group: Option<usize>,
+    pub status: Option<Status>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1307,8 +1310,26 @@ impl GroupEntry {
 
 pub struct WorkspaceEntry {
     pub name: String,
-    pub tabs: Vec<String>,
+    pub tabs: Vec<TabEntry>,
     pub behind: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabEntry {
+    pub name: String,
+    pub status: Option<Status>,
+}
+
+impl From<&str> for TabEntry {
+    fn from(name: &str) -> Self {
+        Self { name: name.to_string(), status: None }
+    }
+}
+
+impl From<String> for TabEntry {
+    fn from(name: String) -> Self {
+        Self { name, status: None }
+    }
 }
 
 pub struct ChangesButton {
@@ -1346,6 +1367,7 @@ pub struct View<'a> {
     pub update: Option<String>,
     pub changes: Option<changes::View>,
     pub changes_button: Option<ChangesButton>,
+    pub attention: Option<Status>,
 }
 
 impl View<'_> {
@@ -2168,8 +2190,9 @@ fn draw_bar(f: &mut Frame, view: &View, areas: &Areas) {
     }
     let menu = Rect { width: areas.bar.width.saturating_sub(right), ..areas.bar };
     let icon = Rect { width: COMPACT_BUTTON_WIDTH.min(menu.width), ..menu };
-    let style = if view.nav.is_some() || sidebar_hovered(view, menu) { pressed } else { surface.fg(Color::Cyan) };
-    draw_band(f, icon, Span::styled(centered(MENU_ICON, icon.width), style), style);
+    let lit = view.nav.is_some() || sidebar_hovered(view, menu);
+    let style = if lit { pressed } else { surface.fg(Color::Cyan) };
+    draw_band(f, icon, menu_label(view.attention, icon.width, style, lit), style);
     let crumbs = Rect { x: icon.right() + 2, width: menu.width.saturating_sub(icon.width + 2), ..middle(menu) };
     f.render_widget(Paragraph::new(Line::from(breadcrumb(view, usize::from(crumbs.width)))), crumbs);
     let r = areas.search_button;
@@ -2197,10 +2220,11 @@ fn breadcrumb(view: &View, room: usize) -> Vec<Span<'static>> {
     };
     let workspace = view.workspaces.get(view.active_workspace);
     let tab = workspace.zip(view.active_tab).and_then(|(w, t)| w.tabs.get(t));
-    let crumbs: Vec<&str> = [Some(project.name.as_str()), workspace.map(|w| w.name.as_str()), tab.map(String::as_str)]
-        .into_iter()
-        .flatten()
-        .collect();
+    let crumbs: Vec<&str> =
+        [Some(project.name.as_str()), workspace.map(|w| w.name.as_str()), tab.map(|t| t.name.as_str())]
+            .into_iter()
+            .flatten()
+            .collect();
     let text = truncate_right(&crumbs.join(CRUMB_SEPARATOR), room);
     let project_len = project.name.chars().count().min(text.chars().count());
     let bold = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
@@ -2283,17 +2307,14 @@ fn draw_workspaces(f: &mut Frame, view: &View, areas: &Areas) {
                 };
                 let entry = &view.workspaces[w];
                 let room = usize::from(r.width).saturating_sub(2 + close_width + 1);
+                let badge = activity::attention(entry.tabs.iter().map(|t| t.status)).map(status_icon);
                 let behind = Some(entry.behind)
                     .filter(|n| *n > 0)
-                    .map(|n| format!("{BEHIND_ICON}{n}"))
-                    .filter(|tag| tag.chars().count() + 1 < room);
-                let tag_width = behind.as_ref().map_or(0, |tag| tag.chars().count() + 1);
-                let name = truncate_right(&entry.name, room - tag_width);
+                    .map(|n| Span::styled(format!("{BEHIND_ICON}{n}"), Style::default().fg(Color::Yellow)));
+                let marks = Tags::fit(badge.into_iter().chain(behind).collect(), room);
+                let name = truncate_right(&entry.name, room.saturating_sub(marks.reserved()));
                 let mut line = vec![Span::styled(format!("  {name}"), style)];
-                if let Some(tag) = behind {
-                    let pad = room.saturating_sub(name.chars().count() + tag.chars().count());
-                    line.extend([Span::raw(" ".repeat(pad)), Span::styled(tag, Style::default().fg(Color::Yellow))]);
-                }
+                marks.push_onto(&mut line, name.chars().count(), room);
                 let bg = view.row_background(r, false);
                 draw_band(f, r, Line::from(line), bg);
                 draw_row_close(f, view, r, bg);
@@ -2306,10 +2327,16 @@ fn draw_workspaces(f: &mut Frame, view: &View, areas: &Areas) {
                     ("  ", Style::default().fg(Color::Gray))
                 };
                 let bg = view.row_background(r, active);
-                let max = usize::from(r.width).saturating_sub(4 + close_width + 1);
-                let name = truncate_right(&view.workspaces[w].tabs[t], max);
-                let line = Line::from(vec![Span::raw("  "), Span::styled(marker, accent), Span::styled(name, style)]);
-                draw_band(f, r, line, bg);
+                let tab = &view.workspaces[w].tabs[t];
+                let icon = tab.status.map(status_icon);
+                let icon_width = if icon.is_some() { 2 } else { 0 };
+                let max = usize::from(r.width).saturating_sub(4 + icon_width + close_width + 1);
+                let mut line = vec![Span::raw("  "), Span::styled(marker, accent)];
+                if let Some(icon) = icon {
+                    line.extend([icon, Span::raw(" ")]);
+                }
+                line.push(Span::styled(truncate_right(&tab.name, max), style));
+                draw_band(f, r, Line::from(line), bg);
                 draw_row_close(f, view, r, bg);
             }
             WorkspaceRow::NewTab(_) => draw_button(f, r, "   ", "+ tab", button_style(view, r, dim, Color::Cyan)),
@@ -2348,6 +2375,72 @@ fn draw_workspaces(f: &mut Frame, view: &View, areas: &Areas) {
             Style::default().fg(Color::DarkGray)
         };
         draw_button(f, r, "", &button.label, button_style(view, r, idle, Color::Cyan));
+    }
+}
+
+fn status_icon(status: Status) -> Span<'static> {
+    let (glyph, style) = match status {
+        Status::Idle => ("○", Style::default().fg(Color::DarkGray)),
+        Status::Working => ("◐", Style::default().fg(Color::Yellow)),
+        Status::Done => ("✓", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Status::Waiting => ("!", Style::default().fg(WAITING_COLOR).add_modifier(Modifier::BOLD)),
+    };
+    Span::styled(glyph, style)
+}
+
+fn group_attention(view: &View, g: usize) -> Option<Status> {
+    activity::attention(view.projects.iter().filter(|p| p.group == Some(g)).map(|p| p.status))
+}
+
+fn menu_label(attention: Option<Status>, width: u16, style: Style, lit: bool) -> Line<'static> {
+    let Some(status) = attention else { return Line::from(Span::styled(centered(MENU_ICON, width), style)) };
+    let width = usize::from(width);
+    let left = width.saturating_sub(1) / 2;
+    let badge = status_icon(status);
+    let badge = if lit { Span::styled(badge.content, style) } else { badge };
+    Line::from(vec![
+        Span::styled(format!("{}{MENU_ICON} ", " ".repeat(left)), style),
+        badge,
+        Span::styled(" ".repeat(width.saturating_sub(left + 3)), style),
+    ])
+}
+
+struct Tags {
+    spans: Vec<Span<'static>>,
+    width: usize,
+}
+
+impl Tags {
+    fn fit(tags: Vec<Span<'static>>, room: usize) -> Self {
+        let mut fitted = Self { spans: Vec::new(), width: 0 };
+        for tag in tags {
+            let width = if fitted.is_empty() { tag.width() } else { fitted.width + 1 + tag.width() };
+            if width + 1 >= room {
+                break;
+            }
+            if !fitted.is_empty() {
+                fitted.spans.push(Span::raw(" "));
+            }
+            fitted.spans.push(tag);
+            fitted.width = width;
+        }
+        fitted
+    }
+
+    fn is_empty(&self) -> bool {
+        self.spans.is_empty()
+    }
+
+    fn reserved(&self) -> usize {
+        if self.is_empty() { 0 } else { self.width + 1 }
+    }
+
+    fn push_onto(self, line: &mut Vec<Span<'static>>, used: usize, room: usize) {
+        if self.is_empty() {
+            return;
+        }
+        line.push(Span::raw(" ".repeat(room.saturating_sub(used + self.width))));
+        line.extend(self.spans);
     }
 }
 
@@ -2406,14 +2499,24 @@ fn draw_group(f: &mut Frame, view: &View, g: usize, r: Rect, holds_active: bool)
     } else {
         ("▾ ", String::new())
     };
-    let max = usize::from(r.width).saturating_sub(NAME_RESERVED_COLS + 2 + count.chars().count());
-    let line = Line::from(vec![
+    let badge = group.collapsed.then(|| group_attention(view, g)).flatten().map(status_icon);
+    let room = usize::from(r.width).saturating_sub(4 + usize::from(row_close_button(r).width) + 1);
+    let used = 2 + count.chars().count();
+    let marks = Tags::fit(badge.into_iter().collect(), room.saturating_sub(used));
+    let max = if marks.is_empty() {
+        usize::from(r.width).saturating_sub(NAME_RESERVED_COLS + 2 + count.chars().count())
+    } else {
+        room.saturating_sub(used + marks.reserved())
+    };
+    let shown = used + truncate_right(&group.name, max).chars().count();
+    let mut line = vec![
         Span::styled(marker, Style::default().fg(Color::Cyan)),
         Span::styled(arrow, Style::default().fg(Color::DarkGray)),
         group_header(group, max),
         Span::styled(count, Style::default().fg(Color::DarkGray)),
-    ]);
-    draw_band(f, r, line, view.row_background(r, false));
+    ];
+    marks.push_onto(&mut line, shown, room);
+    draw_band(f, r, Line::from(line), view.row_background(r, false));
 }
 
 fn draw_project(f: &mut Frame, view: &View, p: usize, r: Rect) {
@@ -2427,14 +2530,20 @@ fn draw_project(f: &mut Frame, view: &View, p: usize, r: Rect) {
     let indent = if entry.group.is_some() { GROUP_INDENT } else { "" };
     let count = format!(" ({})", entry.workspaces);
     let reserved = NAME_RESERVED_COLS + indent.len() + usize::from(row_close_button(r).width - CLOSE_BUTTON_WIDTH);
-    let max = usize::from(r.width).saturating_sub(reserved + count.chars().count());
-    let line = Line::from(vec![
+    let room = usize::from(r.width).saturating_sub(reserved);
+    let marks =
+        Tags::fit(entry.status.map(status_icon).into_iter().collect(), room.saturating_sub(count.chars().count()));
+    let max = room.saturating_sub(count.chars().count() + marks.reserved());
+    let name = truncate_right(&entry.name, max);
+    let shown = name.chars().count() + count.chars().count();
+    let mut line = vec![
         Span::styled(marker, Style::default().fg(Color::Cyan)),
         Span::raw(indent),
-        Span::styled(truncate_right(&entry.name, max), title_style),
+        Span::styled(name, title_style),
         Span::styled(count, Style::default().fg(Color::DarkGray)),
-    ]);
-    draw_band(f, r, line, bg);
+    ];
+    marks.push_onto(&mut line, shown, room);
+    draw_band(f, r, Line::from(line), bg);
     draw_row_close(f, view, r, bg);
 }
 
@@ -2489,7 +2598,7 @@ mod tests {
             groups: Vec::new(),
             projects: names
                 .iter()
-                .map(|n| ProjectEntry { name: (*n).to_string(), workspaces: 1, group: None })
+                .map(|n| ProjectEntry { name: (*n).to_string(), workspaces: 1, group: None, status: None })
                 .collect(),
             active: 0,
             has_project: false,
@@ -2510,6 +2619,7 @@ mod tests {
             update: None,
             changes: None,
             changes_button: None,
+            attention: None,
         }
     }
 
@@ -3509,6 +3619,150 @@ mod tests {
         }
     }
 
+    mod agent_status {
+        use super::*;
+
+        const SMALL: Rect = Rect { x: 0, y: 0, width: 80, height: 30 };
+
+        fn tab(name: &str, status: Option<Status>) -> TabEntry {
+            TabEntry { name: name.into(), status }
+        }
+
+        fn with_agents() -> View<'static> {
+            let mut v = View {
+                has_project: true,
+                workspaces: vec![
+                    WorkspaceEntry {
+                        name: "login".into(),
+                        tabs: vec![
+                            tab("claude", Some(Status::Working)),
+                            tab("claude", Some(Status::Waiting)),
+                            "nvim".into(),
+                        ],
+                        behind: 2,
+                    },
+                    WorkspaceEntry {
+                        name: "main".into(),
+                        tabs: vec![tab("claude", Some(Status::Done)), tab("claude", Some(Status::Idle))],
+                        behind: 0,
+                    },
+                ],
+                active_tab: Some(0),
+                ..view(&["shop", "api", "web", "docs"])
+            };
+            v.groups = vec![GroupEntry { name: "work".into(), icon: '●', colour: 4, collapsed: true }];
+            for (p, status) in [(0, Status::Waiting), (1, Status::Done), (3, Status::Waiting)] {
+                v.projects[p].status = Some(status);
+            }
+            for p in [2, 3] {
+                v.projects[p].group = Some(0);
+            }
+            v
+        }
+
+        fn tab_row(v: &View, w: usize, t: usize) -> Rect {
+            workspace_row(areas().workspaces_list, areas().pitch, &v.tab_counts(), 0, WorkspaceRow::Tab(w, t))
+        }
+
+        fn workspace_line(v: &View, w: usize) -> String {
+            let r =
+                workspace_row(areas().workspaces_list, areas().pitch, &v.tab_counts(), 0, WorkspaceRow::Workspace(w));
+            row_text(&render(v), r).trim_end().to_string()
+        }
+
+        fn sidebar_row(v: &View, row: SidebarRow) -> Rect {
+            let sidebar = v.sidebar_rows();
+            let i = sidebar.iter().position(|r| *r == row).expect("the row is in the sidebar");
+            project_rows(list(), areas().pitch, &sidebar, 0).item(i)
+        }
+
+        fn mark_cell(v: &View, r: Rect) -> (String, Color) {
+            let t = render(v);
+            let cell = &t.backend().buffer()[(r.right() - CLOSE_BUTTON_WIDTH - 2, r.y)];
+            (cell.symbol().to_string(), cell.fg)
+        }
+
+        #[test]
+        fn renders_icons_on_tabs_and_marks_on_the_rows_above() {
+            insta::assert_snapshot!(render(&with_agents()).backend());
+        }
+
+        #[rstest]
+        #[case::working(Status::Working, "◐", Color::Yellow)]
+        #[case::waiting(Status::Waiting, "!", WAITING_COLOR)]
+        #[case::done(Status::Done, "✓", Color::Green)]
+        #[case::idle(Status::Idle, "○", Color::DarkGray)]
+        fn a_tab_shows_its_agent_before_the_name(#[case] status: Status, #[case] icon: &str, #[case] colour: Color) {
+            let mut v = with_agents();
+            v.workspaces[0].tabs[1] = tab("claude", Some(status));
+            let r = tab_row(&v, 0, 1);
+            let t = render(&v);
+            let cell = &t.backend().buffer()[(r.x + 4, r.y)];
+            assert_eq!((row_text(&t, r).trim_end().to_string(), cell.fg), (format!("    {icon} claude"), colour));
+        }
+
+        #[test]
+        fn a_tab_without_an_agent_has_no_icon() {
+            let v = with_agents();
+            assert_eq!(row_text(&render(&v), tab_row(&v, 0, 2)).trim_end(), "    nvim");
+        }
+
+        #[test]
+        fn the_workspace_mark_comes_before_the_commits_to_pull() {
+            assert_eq!(workspace_line(&with_agents(), 0), "  login          ! ↓2");
+        }
+
+        #[test]
+        fn only_what_needs_you_reaches_the_workspace() {
+            let mut v = with_agents();
+            v.workspaces[0].tabs = vec![tab("claude", Some(Status::Working)), tab("claude", Some(Status::Idle))];
+            assert_eq!(workspace_line(&v, 0), "  login            ↓2");
+        }
+
+        #[test]
+        fn done_waits_behind_what_needs_you() {
+            let mut v = with_agents();
+            v.workspaces[0].tabs = vec![tab("claude", Some(Status::Done)), tab("claude", Some(Status::Waiting))];
+            assert_eq!(workspace_line(&v, 0), "  login          ! ↓2");
+        }
+
+        #[rstest]
+        #[case::waiting(0, ("!", WAITING_COLOR))]
+        #[case::done(1, ("✓", Color::Green))]
+        fn a_project_shows_its_mark_at_the_end_of_the_row(#[case] p: usize, #[case] expected: (&str, Color)) {
+            let v = with_agents();
+            let (symbol, fg) = mark_cell(&v, sidebar_row(&v, SidebarRow::Project(p)));
+            assert_eq!((symbol.as_str(), fg), expected);
+        }
+
+        #[test]
+        fn a_collapsed_group_shows_the_mark_of_its_projects() {
+            let v = with_agents();
+            let (symbol, fg) = mark_cell(&v, sidebar_row(&v, SidebarRow::Group(0)));
+            assert_eq!((symbol.as_str(), fg), ("!", WAITING_COLOR));
+        }
+
+        #[test]
+        fn an_expanded_group_leaves_the_mark_to_its_projects() {
+            let mut v = with_agents();
+            v.groups[0].collapsed = false;
+            let (group, _) = mark_cell(&v, sidebar_row(&v, SidebarRow::Group(0)));
+            let (project, _) = mark_cell(&v, sidebar_row(&v, SidebarRow::Project(3)));
+            assert_eq!((group.as_str(), project.as_str()), (" ", "!"));
+        }
+
+        #[rstest]
+        #[case::nothing(None, "   ≡   ")]
+        #[case::done_elsewhere(Some(Status::Done), "   ≡ ✓ ")]
+        #[case::waiting_elsewhere(Some(Status::Waiting), "   ≡ ! ")]
+        fn the_menu_button_says_when_another_tab_needs_you(#[case] attention: Option<Status>, #[case] expected: &str) {
+            let v = View { attention, ..with_agents() };
+            let mut t = Terminal::new(TestBackend::new(SMALL.width, SMALL.height)).expect("test backend");
+            t.draw(|f| draw(f, &v)).expect("draw");
+            assert_eq!(row_text(&t, Rect::new(0, 1, COMPACT_BUTTON_WIDTH, 1)), expected);
+        }
+    }
+
     mod dialogs {
         use super::*;
 
@@ -3634,7 +3888,7 @@ mod tests {
         #[test]
         fn a_long_name_is_cut_before_the_count() {
             let v = View {
-                projects: vec![ProjectEntry { name: "a".repeat(40), workspaces: 12, group: None }],
+                projects: vec![ProjectEntry { name: "a".repeat(40), workspaces: 12, group: None, status: None }],
                 ..view(&[])
             };
             let row: String =

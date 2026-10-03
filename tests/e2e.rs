@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use cornercase::activity::CLAUDE_DIR_ENV;
 use cornercase::protocol::{NESTED_ENV, SOCKET_ENV};
 use cornercase::split::{self, Dir};
 use cornercase::ui::{self, SidebarRow, WorkspaceRow};
@@ -34,6 +35,10 @@ impl Session {
 
     fn socket(&self) -> PathBuf {
         self.dir.join("server.sock")
+    }
+
+    fn claude_dir(&self) -> PathBuf {
+        self.dir.join("claude")
     }
 
     fn socket_var(&self) -> String {
@@ -123,6 +128,7 @@ impl Harness {
         cmd.env("SHELL", "/bin/sh");
         cmd.env("PS1", "$ ");
         cmd.env(SOCKET_ENV, session.socket());
+        cmd.env(CLAUDE_DIR_ENV, session.claude_dir());
         cmd.env_remove(NESTED_ENV);
         cmd.env_remove("SHORTCUT_API_TOKEN");
         cmd.env_remove("LINEAR_API_KEY");
@@ -347,6 +353,28 @@ fn the_project_name_stays_after_cd() {
 
     app.wait_for("the shell moved", |s| s.contains("cd-done"));
     assert!(app.row(list().y).contains(&first_entry()), "entry row: {:?}", app.row(list().y));
+}
+
+#[test]
+fn a_tab_running_claude_shows_what_it_is_doing() {
+    let mut app = Harness::start();
+    let sessions = app.session.claude_dir().join("sessions");
+    std::fs::create_dir_all(&sessions).expect("create the sessions folder");
+    let bin = temp_dir("claude");
+    let claude = bin.join("claude");
+    write_executable(
+        &claude,
+        "#!/bin/sh\nprintf '{\"pid\":%s,\"status\":\"waiting\"}' $$ > \"$1/$$.json\"\nread answer\nrm -f \"$1/$$.json\"\n",
+    );
+    let tab = usize::from(ui::workspace_row(workspaces_list(), 1, &[1], 0, WorkspaceRow::Tab(0, 0)).y);
+    let tab_row = |s: &str| s.lines().nth(tab).unwrap_or_default().to_string();
+
+    app.send(format!("{} {}\r", claude.display(), sessions.display()).as_bytes());
+    app.wait_for("the tab says claude needs you", |s| tab_row(s).contains("▌ ! "));
+    app.send(b"\r");
+
+    app.wait_for("the icon goes once claude exits", |s| !tab_row(s).contains('!'));
+    let _ = std::fs::remove_dir_all(&bin);
 }
 
 #[test]

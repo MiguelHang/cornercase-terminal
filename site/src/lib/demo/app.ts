@@ -5,6 +5,7 @@ import { BASES, type ChangesMode, type FileDiff, type HunkAction, hasChanges, wo
 import { type Border, GROUP_COLOURS, GROUP_ICONS, type Rows, type SidebarRow, type Widths, activeRow, dragged, layout, mainWidth, sidebarLayout, sidebarRows } from './layout';
 import { render as markdown } from './markdown';
 import {
+  type Activity,
   type Config,
   type Group,
   type IssuesOverlay,
@@ -16,13 +17,17 @@ import {
   type Pos,
   type Project,
   type SettingsOverlay,
+  type Status,
   type Tab,
   type Target,
   type Workspace,
   activePane,
+  attention,
   defaultConfig,
   projectLabel,
   tabLabel,
+  tabStatus,
+  watchPane,
   workspaceLabel,
 } from './model';
 import { AGENT_KINDS, Agent, Editor, type Host, type Key, type Place, Shell } from './programs';
@@ -73,6 +78,12 @@ const RENAME: Record<Target['kind'], { label: string; hint: string }> = {
   workspace: { label: 'rename workspace', hint: 'leave it empty to use the branch name' },
   tab: { label: 'rename tab', hint: 'leave it empty to use the program name' },
 };
+
+function agentActivity(pane: Pane): Activity | null {
+  const fg = pane.shell.fg;
+  if (!(fg instanceof Agent) || fg.name !== 'claude') return null;
+  return fg.working ? 'working' : 'idle';
+}
 
 export class App {
   cols = 120;
@@ -185,6 +196,7 @@ export class App {
 
   render(): { grid: Grid; cursor: Cursor | null } {
     if (this.toast && this.toast.until < this.now()) this.toast = null;
+    this.watchAgents();
     this.grid.reset();
     this.follow();
     this.frame = new Painter(this, this.grid).draw();
@@ -194,6 +206,19 @@ export class App {
 
   get stale(): boolean {
     return this.needsDraw;
+  }
+
+  private watchAgents(): void {
+    const visible = this.tab();
+    for (const t of this.projects.flatMap((p) => p.workspaces.flatMap((w) => w.tabs))) {
+      for (const pane of t.panes) watchPane(pane, agentActivity(pane), t === visible);
+    }
+  }
+
+  attentionElsewhere(): Status | null {
+    const visible = this.tab();
+    const tabs = this.projects.flatMap((p) => p.workspaces.flatMap((w) => w.tabs));
+    return attention(tabs.filter((t) => t !== visible).map(tabStatus));
   }
 
   project(): Project | undefined {

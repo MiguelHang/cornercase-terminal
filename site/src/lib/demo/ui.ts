@@ -31,9 +31,9 @@ import {
   styleLabels,
   tabsIn,
 } from './layout';
-import { type Group, type IssuesOverlay, type Pane, type SettingsOverlay, type Tab, projectLabel, tabLabel, workspaceLabel } from './model';
+import { type Group, type IssuesOverlay, type Pane, type SettingsOverlay, type Status, type Tab, attention, projectAttention, projectLabel, tabLabel, tabStatus, workspaceLabel } from './model';
 import { type Divider, dividers, grab, panes } from './split';
-import { type Line, drawLine, seg, truncateLeft, truncateRight, wrapAll } from './text';
+import { type Line, type Seg, drawLine, seg, truncateLeft, truncateRight, wrapAll } from './text';
 
 export type Drag = { kind: 'border'; border: Border } | { kind: 'divider'; tab: Tab; divider: Divider; area: Rect };
 
@@ -57,6 +57,12 @@ export interface Frame {
 const DARK: Style = { fg: 8 };
 const CYAN: Style = { fg: 6 };
 const PRESSED: Style = { fg: 0, bg: 6, add: BOLD };
+const STATUS_ICONS: Record<Status, Seg> = {
+  idle: seg('○', { fg: 8 }),
+  working: seg('◐', { fg: 3 }),
+  done: seg('✓', { fg: 2, add: BOLD }),
+  waiting: seg('!', { fg: 208, add: BOLD }),
+};
 const BRAND = 99;
 const INPUT_PROMPT = '› ';
 
@@ -301,8 +307,9 @@ export class Painter {
       this.region({ r: c, click: () => app.toggleChanges(), cursor: 'pointer' });
     }
     const icon = rect(menu.x, menu.y, Math.min(7, menu.w), menu.h);
-    const menuStyle = app.nav || this.sidebarHovered(menu) ? PRESSED : { fg: 6, bg: this.surface };
-    this.band(icon, [seg(centered('≡', icon.w))], menuStyle);
+    const lit = !!app.nav || this.sidebarHovered(menu);
+    const menuStyle = lit ? PRESSED : { fg: 6, bg: this.surface };
+    this.band(icon, menuLabel(app.attentionElsewhere(), icon.w, lit), menuStyle);
     const crumbs = rect(right(icon) + 2, middle(menu).y, Math.max(0, menu.w - icon.w - 2), 1);
     this.line(crumbs, this.breadcrumb(crumbs.w), { bg: this.surface });
     this.region({ r: menu, click: () => app.toggleNav(), cursor: 'pointer' });
@@ -365,8 +372,13 @@ export class Painter {
         const group = app.groups[spec.g];
         const inside = app.projects.filter((p) => p.group === group.id).length;
         const count = group.collapsed ? ` (${inside})` : '';
-        const max = r.w - 8 - count.length;
+        const badge = group.collapsed ? attention(app.projects.filter((p) => p.group === group.id).map(projectAttention)) : null;
+        const room = r.w - 4 - closeButton(r).w - 1;
+        const used = 2 + count.length;
+        const marks = fitTags(badge ? [STATUS_ICONS[badge]] : [], room - used);
+        const max = marks.segs.length ? room - used - marks.reserved : r.w - 8 - count.length;
         const line = [seg(i === marked ? '▌ ' : '  ', CYAN), seg(group.collapsed ? '▸ ' : '▾ ', DARK), this.groupHeader(group, max), seg(count, DARK)];
+        pushTags(line, marks, used + [...truncateRight(group.name, max)].length, room);
         this.band(r, line, this.rowBackground(r, false));
         this.region({ r, click: () => app.toggleGroup(spec.g), right: (x, y) => app.openGroupMenu({ x, y }, spec.g), cursor: 'pointer' });
         return;
@@ -378,8 +390,13 @@ export class Painter {
       const indent = p.group !== undefined ? '  ' : '';
       const reserved = 6 + indent.length + (closeButton(r).w - 3);
       const count = ` (${p.workspaces.length})`;
-      const name = truncateRight(projectLabel(p), r.w - reserved - count.length);
-      this.band(r, [seg(active ? '▌ ' : '  ', CYAN), seg(indent), seg(name, active ? { fg: 15, add: BOLD } : { fg: 7 }), seg(count, DARK)], bg);
+      const room = r.w - reserved;
+      const badge = projectAttention(p);
+      const marks = fitTags(badge ? [STATUS_ICONS[badge]] : [], room - count.length);
+      const name = truncateRight(projectLabel(p), room - count.length - marks.reserved);
+      const line = [seg(active ? '▌ ' : '  ', CYAN), seg(indent), seg(name, active ? { fg: 15, add: BOLD } : { fg: 7 }), seg(count, DARK)];
+      pushTags(line, marks, [...name].length + count.length, room);
+      this.band(r, line, bg);
       this.region({ r, click: () => app.selectProject(pi), right: (x, y) => app.openMenu({ x, y }, { kind: 'project', project: p.id }), cursor: 'pointer' });
       this.closeX(r, bg, () => app.closeProject(pi));
     });
@@ -430,11 +447,12 @@ export class Painter {
         const w = p.workspaces[spec.w];
         const style: Style = spec.w === p.active ? { fg: 15, add: BOLD } : { fg: 7, add: BOLD };
         const room = r.w - 2 - closeWidth - 1;
-        const tag = app.config.fetchMinutes && w.behind ? `↓${w.behind}` : '';
-        const shown = tag && tag.length + 1 < room ? tag : '';
-        const name = truncateRight(workspaceLabel(w), room - (shown ? shown.length + 1 : 0));
+        const badge = attention(w.tabs.map(tabStatus));
+        const behind = app.config.fetchMinutes && w.behind ? [seg(`↓${w.behind}`, { fg: 3 })] : [];
+        const marks = fitTags([...(badge ? [STATUS_ICONS[badge]] : []), ...behind], room);
+        const name = truncateRight(workspaceLabel(w), room - marks.reserved);
         const segs = [seg(`  ${name}`, style)];
-        if (shown) segs.push(seg(' '.repeat(Math.max(0, room - name.length - shown.length))), seg(shown, { fg: 3 }));
+        pushTags(segs, marks, [...name].length, room);
         const bg = this.rowBackground(r, false);
         this.band(r, segs, bg);
         this.region({ r, click: () => app.selectWorkspace(spec.w), right: (x, y) => app.openMenu({ x, y }, { kind: 'workspace', project: p.id, workspace: w.id }), cursor: 'pointer' });
@@ -444,8 +462,12 @@ export class Painter {
         const t = w.tabs[spec.t];
         const active = spec.w === p.active && spec.t === w.active;
         const bg = this.rowBackground(r, active);
-        const name = truncateRight(tabLabel(t), r.w - 4 - closeWidth - 1);
-        this.band(r, [seg('  '), seg(active ? '▌ ' : '  ', CYAN), seg(name, active ? { fg: 15 } : { fg: 7 })], bg);
+        const status = tabStatus(t);
+        const name = truncateRight(tabLabel(t), r.w - 4 - (status ? 2 : 0) - closeWidth - 1);
+        const line = [seg('  '), seg(active ? '▌ ' : '  ', CYAN)];
+        if (status) line.push(STATUS_ICONS[status], seg(' '));
+        line.push(seg(name, active ? { fg: 15 } : { fg: 7 }));
+        this.band(r, line, bg);
         this.region({ r, click: () => app.selectTab(spec.w, spec.t), right: (x, y) => app.openMenu({ x, y }, { kind: 'tab', project: p.id, workspace: w.id, tab: t.id }), cursor: 'pointer' });
         this.closeX(r, bg, () => app.closeTab(spec.w, spec.t));
       } else {
@@ -826,6 +848,36 @@ export class Painter {
     const x = this.span(r.x + 1, r.y + 1, ' ✓ ', { fg: 2 });
     this.span(x, r.y + 1, message, {}, right(r) - 1 - x);
   }
+}
+
+function menuLabel(status: Status | null, w: number, lit: boolean): Line {
+  if (!status) return [seg(centered('≡', w))];
+  const left = Math.floor((w - 1) / 2);
+  return [seg(`${' '.repeat(left)}≡ `), lit ? seg(STATUS_ICONS[status].t) : STATUS_ICONS[status], seg(' '.repeat(Math.max(0, w - left - 3)))];
+}
+
+interface Tags {
+  segs: Seg[];
+  width: number;
+  reserved: number;
+}
+
+function fitTags(tags: Seg[], room: number): Tags {
+  const segs: Seg[] = [];
+  let width = 0;
+  for (const tag of tags) {
+    const next = segs.length ? width + 1 + [...tag.t].length : [...tag.t].length;
+    if (next + 1 >= room) break;
+    if (segs.length) segs.push(seg(' '));
+    segs.push(tag);
+    width = next;
+  }
+  return { segs, width, reserved: segs.length ? width + 1 : 0 };
+}
+
+function pushTags(line: Line, tags: Tags, used: number, room: number): void {
+  if (!tags.segs.length) return;
+  line.push(seg(' '.repeat(Math.max(0, room - used - tags.width))), ...tags.segs);
 }
 
 export function centered(text: string, w: number): string {

@@ -107,6 +107,10 @@ impl Emulator {
         self.mode(Mode::DECCKM)
     }
 
+    pub fn title(&self) -> String {
+        self.vt.title().map(str::to_string).unwrap_or_default()
+    }
+
     pub fn bracketed_paste(&self) -> bool {
         self.mode(Mode::BRACKETED_PASTE)
     }
@@ -361,6 +365,25 @@ mod tests {
             emu.feed(b"\x1b]52;c;aGVsbG8=\x07");
             emu.take_copied();
             assert_eq!(emu.take_copied(), Vec::<String>::new());
+        }
+    }
+
+    mod title {
+        use super::*;
+
+        fn title_after(output: &[u8]) -> String {
+            let (mut emu, _) = emulator();
+            emu.feed(output);
+            emu.title()
+        }
+
+        #[rstest]
+        #[case::osc_0("\x1b]0;✳ Claude Code\x07", "✳ Claude Code")]
+        #[case::osc_2("\x1b]2;◐ fix the login\x1b\\", "◐ fix the login")]
+        #[case::the_latest("\x1b]0;one\x07\x1b]0;two\x07", "two")]
+        #[case::none_set("hello", "")]
+        fn is_what_the_program_set(#[case] output: &str, #[case] expected: &str) {
+            assert_eq!(title_after(output.as_bytes()), expected);
         }
     }
 

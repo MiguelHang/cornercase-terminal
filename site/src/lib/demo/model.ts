@@ -11,7 +11,13 @@ export interface Pane {
   id: number;
   shell: Shell;
   rightClicks: boolean;
+  activity?: Activity | null;
+  unseen?: boolean;
 }
+
+export type Activity = 'working' | 'waiting' | 'idle';
+export type Status = 'idle' | 'working' | 'done' | 'waiting';
+const URGENCY: Status[] = ['idle', 'working', 'done', 'waiting'];
 
 export interface Tab {
   id: number;
@@ -154,3 +160,25 @@ export function activePane(t: Tab): Pane | undefined {
 }
 
 export const tabLabel = (t: Tab) => t.name || activePane(t)?.shell.name || 'bash';
+
+export function watchPane(pane: Pane, activity: Activity | null, seen: boolean): void {
+  const finished = pane.activity === 'working' || pane.activity === 'waiting';
+  pane.unseen = activity === 'idle' && !seen && (!!pane.unseen || finished);
+  pane.activity = activity;
+}
+
+export function paneStatus(pane: Pane): Status | null {
+  if (!pane.activity) return null;
+  if (pane.activity === 'idle') return pane.unseen ? 'done' : 'idle';
+  return pane.activity;
+}
+
+function mostUrgent(statuses: (Status | null)[]): Status | null {
+  let best: Status | null = null;
+  for (const s of statuses) if (s && (!best || URGENCY.indexOf(s) > URGENCY.indexOf(best))) best = s;
+  return best;
+}
+
+export const attention = (statuses: (Status | null)[]): Status | null => mostUrgent(statuses.filter((s) => s === 'done' || s === 'waiting'));
+export const tabStatus = (t: Tab): Status | null => mostUrgent(t.panes.map(paneStatus));
+export const projectAttention = (p: Project): Status | null => attention(p.workspaces.flatMap((w) => w.tabs.map(tabStatus)));

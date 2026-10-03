@@ -8,6 +8,7 @@ use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 
+use crate::activity::{self, Activity};
 use crate::agents;
 use crate::changes::diff::File as ChangedFile;
 use crate::changes::{self, BranchPicker, Checkout, Tints};
@@ -25,6 +26,7 @@ use crate::launch::{self, Launch, Step};
 use crate::markdown;
 use crate::mouse;
 use crate::picker::Picker;
+use crate::process;
 use crate::project::{Group, Project, Tab, Workspace, shift_active};
 use crate::search::{self, Candidate, Goto, Kind, Search};
 use crate::secrets;
@@ -175,6 +177,7 @@ const WORKTREE_TOGGLE: &str = "with its own worktree";
 const WHEEL_ROWS: isize = 3;
 const SYNC_EVERY: Duration = Duration::from_secs(1);
 const COUNT_BEHIND_EVERY: Duration = Duration::from_secs(3);
+const WATCH_AGENTS_EVERY: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const TOAST_FOR: Duration = Duration::from_secs(2);
 const COPIED: &str = "copied to clipboard";
@@ -255,6 +258,12 @@ struct Focus {
     tab: Option<u64>,
 }
 
+fn claude_activity(config: &Config, dir: Option<&Path>, term: &Term) -> Option<Activity> {
+    let pid = term.foreground_pid()?;
+    let agent = agents::detect(config, &process::args(pid))?;
+    (agent == agents::CLAUDE).then(|| activity::claude(dir, pid, &term.emulator.title()))
+}
+
 fn wheel(kind: MouseEventKind) -> Option<isize> {
     match kind {
         MouseEventKind::ScrollUp => Some(-WHEEL_ROWS),
@@ -309,6 +318,8 @@ pub struct App {
     restart: bool,
     changes: changes::Panel,
     editor_env: Vec<(String, String)>,
+    claude_dir: Option<PathBuf>,
+    watched: Option<Instant>,
 }
 
 struct Apis {
@@ -340,6 +351,8 @@ fn env_tokens() -> HashMap<Source, String> {
 impl App {
     pub fn new(shell: String, theme: HostTheme, config_path: PathBuf, tx: Sender<AppEvent>) -> Self {
         let secrets_path = secrets::path(&config_path);
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let claude_dir = activity::claude_dir(home.as_deref());
         Self {
             groups: Vec::new(),
             projects: Vec::new(),
@@ -362,7 +375,7 @@ impl App {
             config: config::load(&config_path),
             config_path,
             shell,
-            home: std::env::var_os("HOME").map(PathBuf::from),
+            home,
             theme,
             tx,
             synced: None,
@@ -386,6 +399,8 @@ impl App {
             restart: false,
             changes: changes::Panel::default(),
             editor_env: Vec::new(),
+            claude_dir,
+            watched: None,
         }
     }
 
@@ -446,6 +461,7 @@ impl App {
 
     pub fn refresh(&mut self, now: Instant) {
         self.drive_launches(now);
+        self.watch_agents(now);
         self.check_updates(now);
         self.refresh_changes(now);
         if self.synced.is_some_and(|at| now.duration_since(at) < SYNC_EVERY) {
@@ -454,6 +470,26 @@ impl App {
         self.synced = Some(now);
         self.sync_worktrees();
         self.count_behind(now);
+    }
+
+    fn watch_agents(&mut self, now: Instant) {
+        let visible = self.focus().tab;
+        let read = self.watched.is_none_or(|at| now.duration_since(at) >= WATCH_AGENTS_EVERY);
+        if read {
+            self.watched = Some(now);
+        }
+        let (config, dir) = (&self.config, self.claude_dir.as_deref());
+        for tab in self.projects.iter_mut().flat_map(|p| &mut p.workspaces).flat_map(|w| &mut w.tabs) {
+            let seen = visible == Some(tab.id);
+            for term in &mut tab.panes {
+                if read {
+                    let activity = claude_activity(config, dir, term);
+                    term.agent.update(activity, seen);
+                } else if seen {
+                    term.agent.see();
+                }
+            }
+        }
     }
 
     fn count_behind(&mut self, now: Instant) {
@@ -2631,7 +2667,12 @@ impl App {
             .projects
             .iter()
             .zip(self.project_groups())
-            .map(|(p, group)| ui::ProjectEntry { name: self.project_label(p), workspaces: p.workspaces.len(), group })
+            .map(|(p, group)| ui::ProjectEntry {
+                name: self.project_label(p),
+                workspaces: p.workspaces.len(),
+                group,
+                status: activity::attention(p.workspaces.iter().flat_map(|w| &w.tabs).map(Tab::status)),
+            })
             .collect();
         let groups = self.groups.iter().map(|g| g.entry.clone()).collect();
         let (has_project, workspaces, active_workspace, active_tab) = match self.project() {
@@ -2641,7 +2682,7 @@ impl App {
                     .iter()
                     .map(|w| ui::WorkspaceEntry {
                         name: w.label(),
-                        tabs: w.tabs.iter().map(Tab::label).collect(),
+                        tabs: w.tabs.iter().map(|t| ui::TabEntry { name: t.label(), status: t.status() }).collect(),
                         behind: w.behind,
                     })
                     .collect(),
@@ -2661,6 +2702,9 @@ impl App {
             Some(ui::TabView { layout, screens, active: tab.active, dim_inactive, dragging })
         });
         self.toast = self.toast.filter(|(_, at)| at.elapsed() < TOAST_FOR);
+        let visible = self.focus().tab;
+        let tabs = self.projects.iter().flat_map(|p| &p.workspaces).flat_map(|w| &w.tabs);
+        let attention = activity::attention(tabs.filter(|t| Some(t.id) != visible).map(Tab::status));
         let view = ui::View {
             groups,
             projects,
@@ -2683,6 +2727,7 @@ impl App {
             update: self.update_label(),
             changes: if self.changes_shown() { self.panel_view() } else { None },
             changes_button: self.changes_label().map(|label| ui::ChangesButton { label, open: self.changes.open }),
+            attention,
         };
         ui::draw(f, &view);
     }
@@ -4503,6 +4548,124 @@ mod tests {
             app.handle_event(AppEvent::Input(Event::Mouse(ev)), AREA).expect("handle wheel");
 
             assert_eq!(self::picker(&app).scroll(), usize::try_from(WHEEL_ROWS).expect("rows"));
+        }
+    }
+
+    mod agent_status {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        use super::*;
+        use crate::activity::Status;
+        use crate::test_util::write_executable;
+
+        const FAKE_CLAUDE: &str = r#"#!/bin/sh
+s="$1/sessions/$$.json"
+printf '{"pid":%s,"status":"busy"}' $$ > "$s"
+while [ -d "$1" ] && [ ! -e "$1/finish" ]; do sleep 0.02; done
+printf '{"pid":%s,"status":"idle"}' $$ > "$s"
+while [ -d "$1" ] && [ ! -e "$1/quit" ]; do sleep 0.02; done
+rm -f "$s"
+"#;
+
+        struct Claude {
+            dir: TempDir,
+            _bin: TempDir,
+            script: PathBuf,
+        }
+
+        impl Claude {
+            fn new() -> Self {
+                let (dir, bin) = (TempDir::new(), TempDir::new());
+                std::fs::create_dir(dir.path().join("sessions")).expect("create the sessions folder");
+                let script = bin.path().join("claude");
+                write_executable(&script, FAKE_CLAUDE);
+                Self { dir, _bin: bin, script }
+            }
+
+            fn start(&self, app: &mut App) {
+                app.claude_dir = Some(self.dir.path().to_path_buf());
+                type_line(app, &format!("{} {}", self.script.display(), self.dir.path().display()));
+            }
+
+            fn signal(&self, name: &str) {
+                std::fs::write(self.dir.path().join(name), "").expect("write the signal");
+            }
+        }
+
+        fn watch_until(app: &mut App, rx: &Receiver<AppEvent>, what: &str, cond: impl Fn(&App) -> bool) {
+            wait_until(what, || {
+                while let Ok(ev) = rx.try_recv() {
+                    app.handle_event(ev, AREA).expect("handle event");
+                }
+                let now = app.watched.map_or_else(Instant::now, |at| at + WATCH_AGENTS_EVERY);
+                app.watch_agents(now);
+                cond(app)
+            });
+        }
+
+        fn status(app: &App, p: usize, t: usize) -> Option<Status> {
+            app.projects[p].workspaces[0].tabs[t].status()
+        }
+
+        fn rendered(app: &mut App, area: Rect) -> Terminal<TestBackend> {
+            let mut t = Terminal::new(TestBackend::new(area.width, area.height)).expect("test backend");
+            t.draw(|f| app.draw(f)).expect("draw");
+            t
+        }
+
+        fn text(t: &Terminal<TestBackend>, r: Rect) -> String {
+            (r.x..r.right()).map(|x| t.backend().buffer()[(x, r.y)].symbol().to_string()).collect()
+        }
+
+        #[test]
+        fn a_tab_follows_what_claude_says_it_is_doing() {
+            let (mut app, rx, _dirs) = app_with(1);
+            let claude = Claude::new();
+
+            claude.start(&mut app);
+            watch_until(&mut app, &rx, "claude works", |a| status(a, 0, 0) == Some(Status::Working));
+            claude.signal("finish");
+            watch_until(&mut app, &rx, "claude finishes in sight", |a| status(a, 0, 0) == Some(Status::Idle));
+            claude.signal("quit");
+
+            watch_until(&mut app, &rx, "the tab loses its icon", |a| status(a, 0, 0).is_none());
+        }
+
+        #[test]
+        fn finishing_out_of_sight_marks_the_tab_done_until_it_is_opened() {
+            let (mut app, rx, _dirs) = app_with(1);
+            let claude = Claude::new();
+            claude.start(&mut app);
+            watch_until(&mut app, &rx, "claude works", |a| status(a, 0, 0) == Some(Status::Working));
+            app.add_tab(0, 0, AREA).expect("add a tab");
+            claude.signal("finish");
+            watch_until(&mut app, &rx, "claude finishes out of sight", |a| status(a, 0, 0) == Some(Status::Done));
+
+            click_row(&mut app, WorkspaceRow::Tab(0, 0));
+            let now = app.watched.expect("watched");
+            app.watch_agents(now);
+
+            assert_eq!(status(&app, 0, 0), Some(Status::Idle));
+        }
+
+        #[test]
+        fn another_project_and_the_menu_button_show_that_claude_finished() {
+            let (mut app, rx, _dirs) = app_with(2);
+            app.active = 0;
+            let claude = Claude::new();
+            claude.start(&mut app);
+            watch_until(&mut app, &rx, "claude works", |a| status(a, 0, 0) == Some(Status::Working));
+            app.active = 1;
+            claude.signal("finish");
+            watch_until(&mut app, &rx, "claude finishes out of sight", |a| status(a, 0, 0) == Some(Status::Done));
+
+            let row = ui::entry_row(list(), areas().pitch, &app.sidebar_rows(), 0, SidebarRow::Project(0));
+            let sidebar = text(&rendered(&mut app, AREA), row);
+            let small = Rect::new(0, 0, 80, 30);
+            let bar = text(&rendered(&mut app, small), Rect::new(0, 1, 7, 1));
+
+            assert_eq!((sidebar.trim_end().ends_with('✓'), bar.as_str()), (true, "   ≡ ✓ "));
         }
     }
 
