@@ -2065,7 +2065,7 @@ pub fn truncate_right(s: &str, max: usize) -> String {
         return s.to_string();
     }
     let head: String = s.chars().take(max - 1).collect();
-    format!("{head}…")
+    format!("{}…", head.trim_end_matches('…'))
 }
 
 pub fn truncate_left(s: &str, max: usize) -> String {
@@ -2074,7 +2074,7 @@ pub fn truncate_left(s: &str, max: usize) -> String {
         return s.to_string();
     }
     let tail: String = s.chars().skip(n - (max - 1)).collect();
-    format!("…{tail}")
+    format!("…{}", tail.trim_start_matches('…'))
 }
 
 #[cfg(test)]
@@ -2826,6 +2826,7 @@ mod tests {
         #[case::fits("short", 10, "short")]
         #[case::keeps_the_end("/a/b/c/project", 8, "…project")]
         #[case::counts_chars_not_bytes("ñandú/añil", 5, "…añil")]
+        #[case::keeps_a_single_ellipsis("x › …/b/project", 12, "…/b/project")]
         fn shortens_from_the_left(#[case] input: &str, #[case] max: usize, #[case] expected: &str) {
             assert_eq!(truncate_left(input, max), expected);
         }
@@ -2838,6 +2839,7 @@ mod tests {
         #[case::fits("short", 10, "short")]
         #[case::keeps_the_start("feature/login-page", 8, "feature…")]
         #[case::counts_chars_not_bytes("ñandú/añil", 5, "ñand…")]
+        #[case::keeps_a_single_ellipsis("shop › #482 empty addr… › bash", 24, "shop › #482 empty addr…")]
         fn shortens_from_the_right(#[case] input: &str, #[case] max: usize, #[case] expected: &str) {
             assert_eq!(truncate_right(input, max), expected);
         }
