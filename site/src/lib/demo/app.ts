@@ -208,15 +208,19 @@ export class App {
     return this.needsDraw;
   }
 
+  private visibleTab(): Tab | undefined {
+    return this.nav ? undefined : this.tab();
+  }
+
   private watchAgents(): void {
-    const visible = this.tab();
+    const visible = this.visibleTab();
     for (const t of this.projects.flatMap((p) => p.workspaces.flatMap((w) => w.tabs))) {
       for (const pane of t.panes) watchPane(pane, agentActivity(pane), t === visible);
     }
   }
 
   attentionElsewhere(): Status | null {
-    const visible = this.tab();
+    const visible = this.visibleTab();
     const tabs = this.projects.flatMap((p) => p.workspaces.flatMap((w) => w.tabs));
     return attention(tabs.filter((t) => t !== visible).map(tabStatus));
   }

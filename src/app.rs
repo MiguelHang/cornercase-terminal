@@ -473,7 +473,7 @@ impl App {
     }
 
     fn watch_agents(&mut self, now: Instant) {
-        let visible = self.focus().tab;
+        let visible = self.visible_tab();
         let read = self.watched.is_none_or(|at| now.duration_since(at) >= WATCH_AGENTS_EVERY);
         if read {
             self.watched = Some(now);
@@ -678,6 +678,10 @@ impl App {
 
     fn tab(&self) -> Option<&Tab> {
         self.project().and_then(Project::workspace).and_then(Workspace::tab)
+    }
+
+    fn visible_tab(&self) -> Option<u64> {
+        self.focus().tab.filter(|_| self.nav.is_none())
     }
 
     fn focus(&self) -> Focus {
@@ -2702,7 +2706,7 @@ impl App {
             Some(ui::TabView { layout, screens, active: tab.active, dim_inactive, dragging })
         });
         self.toast = self.toast.filter(|(_, at)| at.elapsed() < TOAST_FOR);
-        let visible = self.focus().tab;
+        let visible = self.visible_tab();
         let tabs = self.projects.iter().flat_map(|p| &p.workspaces).flat_map(|w| &w.tabs);
         let attention = activity::attention(tabs.filter(|t| Some(t.id) != visible).map(Tab::status));
         let view = ui::View {
@@ -4647,6 +4651,25 @@ rm -f "$s"
             app.watch_agents(now);
 
             assert_eq!(status(&app, 0, 0), Some(Status::Idle));
+        }
+
+        #[test]
+        fn the_compact_menu_hides_the_tab_beneath_it() {
+            let (mut app, rx, _dirs) = app_with(1);
+            let claude = Claude::new();
+            claude.start(&mut app);
+            watch_until(&mut app, &rx, "claude works", |a| status(a, 0, 0) == Some(Status::Working));
+            app.nav = Some(ui::Nav::Workspaces);
+            claude.signal("finish");
+            watch_until(&mut app, &rx, "claude finishes under the menu", |a| status(a, 0, 0) == Some(Status::Done));
+            let small = Rect::new(0, 0, 80, 30);
+            let bar = text(&rendered(&mut app, small), Rect::new(0, 1, 7, 1));
+
+            app.nav = None;
+            let now = app.watched.expect("watched");
+            app.watch_agents(now);
+
+            assert_eq!((bar.as_str(), status(&app, 0, 0)), ("   ≡ ✓ ", Some(Status::Idle)));
         }
 
         #[test]
