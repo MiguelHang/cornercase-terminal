@@ -84,6 +84,17 @@ pub enum AppEvent {
         request: Box<changes::git::Request>,
         result: Result<changes::git::Loaded>,
     },
+    Branches {
+        workspace: u64,
+        branches: Vec<String>,
+        default: Option<String>,
+    },
+    Gap {
+        workspace: u64,
+        file: std::sync::Arc<ChangedFile>,
+        hunk: usize,
+        lines: Vec<changes::GapLine>,
+    },
     UpdateChecked(Result<Option<Release>>),
     Updated(Result<()>),
 }
@@ -297,6 +308,7 @@ pub struct App {
     update_scroll: usize,
     restart: bool,
     changes: changes::Panel,
+    editor_env: Vec<(String, String)>,
 }
 
 struct Apis {
@@ -373,6 +385,7 @@ impl App {
             update_scroll: 0,
             restart: false,
             changes: changes::Panel::default(),
+            editor_env: Vec::new(),
         }
     }
 
@@ -579,7 +592,16 @@ impl App {
     fn spawn(&mut self, area: Rect, cwd: PathBuf) -> Result<Term> {
         let (rows, cols) = self.pane_size(area);
         let id = self.take_id();
-        let opts = SpawnOptions { id, shell: &self.shell, args: &[], rows, cols, cwd: Some(cwd), theme: &self.theme };
+        let opts = SpawnOptions {
+            id,
+            shell: &self.shell,
+            args: &[],
+            env: &[],
+            rows,
+            cols,
+            cwd: Some(cwd),
+            theme: &self.theme,
+        };
         Term::spawn(opts, self.tx.clone())
     }
 
@@ -883,6 +905,8 @@ impl App {
             AppEvent::Changes { workspace, generation, request, result } => {
                 self.changes.loaded(workspace, generation, &request, result);
             }
+            AppEvent::Branches { workspace, branches, default } => self.branches_listed(workspace, branches, default),
+            AppEvent::Gap { workspace, file, hunk, lines } => self.gap_loaded(workspace, &file, hunk, lines),
             AppEvent::UpdateChecked(result) => self.update_checked(result),
             AppEvent::Updated(result) => self.updated(result),
             AppEvent::Output(id, bytes) => {
@@ -2854,11 +2878,13 @@ impl App {
                 }
             }
             Some(PanelHit::Gap(i, h)) => {
-                if let Some(f) = file(i)
-                    && let Some(new_side) = changes::git::new_side(&target.dir, self.changes.mode, &f.path)
-                {
-                    let lines = changes::gap_lines(&f, h, &new_side);
-                    self.changes.set_gap(target.workspace, &f, h, lines);
+                if let Some(f) = file(i) {
+                    let (tx, mode, workspace, dir) = (self.tx.clone(), self.changes.mode, target.workspace, target.dir);
+                    std::thread::spawn(move || {
+                        let Some(new_side) = changes::git::new_side(&dir, mode, &f.path) else { return };
+                        let lines = changes::gap_lines(&f, h, &new_side);
+                        let _ = tx.send(AppEvent::Gap { workspace, file: f, hunk: h, lines });
+                    });
                 }
             }
             Some(PanelHit::Action(i, h, action)) => {
@@ -2909,6 +2935,7 @@ impl App {
             id,
             shell: "/bin/sh",
             args: &args,
+            env: &self.editor_env,
             rows,
             cols,
             cwd: Some(target.dir.clone()),
@@ -2953,10 +2980,29 @@ impl App {
     }
 
     fn open_branches(&mut self, target: &Checkout) {
-        let branches = changes::git::branches(&target.dir);
-        let default = changes::git::default_base(&target.dir);
-        let current = self.changes.label(target.workspace).or_else(|| target.base.clone());
-        self.overlay = Some(Overlay::Branches(BranchPicker::new(target.workspace, branches, default, current)));
+        let (tx, workspace, dir) = (self.tx.clone(), target.workspace, target.dir.clone());
+        std::thread::spawn(move || {
+            let branches = changes::git::branches(&dir);
+            let default = changes::git::default_base(&dir);
+            let _ = tx.send(AppEvent::Branches { workspace, branches, default });
+        });
+    }
+
+    fn branches_listed(&mut self, workspace: u64, branches: Vec<String>, default: Option<String>) {
+        let Some(target) = self.changes_target().filter(|t| t.workspace == workspace) else { return };
+        if self.overlay.is_some() {
+            return;
+        }
+        let current = self.changes.label(workspace).or(target.base);
+        self.overlay = Some(Overlay::Branches(BranchPicker::new(workspace, branches, default, current)));
+    }
+
+    fn gap_loaded(&mut self, workspace: u64, file: &ChangedFile, hunk: usize, lines: Vec<changes::GapLine>) {
+        let Some(target) = self.changes_target().filter(|t| t.workspace == workspace) else { return };
+        let current = self.changed_diff(&target).is_some_and(|d| d.files.iter().any(|f| f.digest == file.digest));
+        if current {
+            self.changes.set_gap(workspace, file, hunk, lines);
+        }
     }
 
     fn branch_rows(area: Rect) -> usize {
@@ -6503,6 +6549,7 @@ mod tests {
             let view = app.panel_view().expect("panel");
             let pos = panel::base(panel_area(&app), &view).as_position();
             click(&mut app, pos);
+            pump_until(&mut app, &rx, "the branches show", |a| matches!(a.overlay, Some(Overlay::Branches(_))));
             submit_text(&mut app, "rel");
             let saved = app.state().projects[0].workspaces[0].base.clone();
             assert_eq!((app.overlay.is_none(), saved.as_deref()), (true, Some("release")));
@@ -6511,12 +6558,34 @@ mod tests {
         #[test]
         fn picking_the_default_branch_forgets_the_choice() {
             let repo = repo_with_edit();
-            let (mut app, _rx) = app_in(repo.path(), no_config());
+            let (mut app, rx) = app_in(repo.path(), no_config());
             app.projects[0].workspaces[0].base = Some("old".into());
             let target = app.changes_target().expect("target");
             app.open_branches(&target);
+            pump_until(&mut app, &rx, "the branches show", |a| matches!(a.overlay, Some(Overlay::Branches(_))));
             submit_text(&mut app, "main");
             assert_eq!(app.projects[0].workspaces[0].base, None);
+        }
+
+        #[test]
+        fn unchanged_lines_open_from_a_thread() {
+            let lines: String = (1..=20).flat_map(|n| ["line ".to_string(), n.to_string(), "\n".to_string()]).collect();
+            let repo = git_repo(&[("a.txt", lines.as_str())]);
+            let edited = lines.replace("line 2\n", "LINE 2\n").replace("line 19\n", "LINE 19\n");
+            std::fs::write(repo.path().join("a.txt"), edited).expect("edit");
+            let (mut app, rx) = app_in(repo.path(), no_config());
+            app.changes.open = true;
+            refresh_until_loaded(&mut app, &rx);
+            let view = app.panel_view().expect("panel");
+            let gap = panel::rows(&view).iter().position(|r| matches!(r, panel::Row::Gap(0, 1))).expect("a gap");
+            let body = panel::parts(panel_area(&app)).body;
+            let y = body.y + u16::try_from(gap).expect("row");
+            click(&mut app, Position::new(body.x + 12, y));
+            pump_until(&mut app, &rx, "the unchanged lines open", |a| {
+                let target = a.changes_target().expect("target");
+                let file = a.changed_diff(&target).expect("diff").files[0].clone();
+                a.changes.gap(target.workspace, &file, 1).is_some()
+            });
         }
 
         #[test]
@@ -6589,6 +6658,7 @@ mod tests {
         fn open_starts_the_editor_in_a_new_tab() {
             let repo = repo_with_edit();
             let (mut app, rx) = app_in(repo.path(), no_config());
+            app.editor_env = vec![("VISUAL".into(), "true".into())];
             refresh_until_loaded(&mut app, &rx);
             let target = app.changes_target().expect("target");
             let file = app.changed_diff(&target).expect("diff").files[0].clone();

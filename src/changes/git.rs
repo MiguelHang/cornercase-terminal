@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -97,7 +98,13 @@ fn untracked(dir: &Path) -> Result<Vec<Untracked>> {
     let mut budget = UNTRACKED_READ_BYTES;
     for raw in out.split(|b| *b == 0).filter(|p| !p.is_empty()) {
         let path = String::from_utf8_lossy(raw).into_owned();
-        let Ok(meta) = std::fs::metadata(dir.join(&path)) else { continue };
+        let Ok(meta) = std::fs::symlink_metadata(dir.join(&path)) else { continue };
+        if meta.is_symlink() {
+            let target = std::fs::read_link(dir.join(&path)).map(|t| t.into_os_string().into_vec()).unwrap_or_default();
+            let size = target.len() as u64;
+            files.push(Untracked { path, size, bytes: Some(target), modified: meta.modified().ok() });
+            continue;
+        }
         if !meta.is_file() {
             continue;
         }
@@ -337,6 +344,17 @@ mod tests {
         files(repo.path(), Mode::Uncommitted);
         let after = std::fs::metadata(&index).and_then(|m| m.modified()).expect("index time");
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn an_untracked_symlink_shows_its_target_not_its_contents() {
+        let repo = git_repo(&[]);
+        let outside = TempDir::new();
+        std::fs::write(outside.path().join("secret.txt"), "secret\n").expect("write target");
+        std::os::unix::fs::symlink(outside.path().join("secret.txt"), repo.path().join("link")).expect("symlink");
+        let diff = load(&request(repo.path(), Mode::Uncommitted)).expect("load").diff.expect("diff");
+        let line = &diff.files[0].hunks[0].lines[0].text;
+        assert_eq!(line, &outside.path().join("secret.txt").display().to_string());
     }
 
     #[test]
