@@ -1,11 +1,13 @@
 import type { Cursor } from '../term/canvas';
 import { BOLD, Grid, type Rect, contains } from '../term/grid';
 import { AGENTS, FOLDERS, ISSUES, type Issue, MODES, type Tree } from './data';
-import { type Rows, dragged } from './layout';
+import { GROUP_COLOURS, GROUP_ICONS, type Rows, type SidebarRow, activeRow, dragged, layout, sidebarLayout, sidebarRows } from './layout';
 import { render as markdown } from './markdown';
 import {
   type Config,
+  type Group,
   type IssuesOverlay,
+  type MenuAction,
   type Overlay,
   type Pane,
   type PaneAction,
@@ -64,11 +66,19 @@ type Listener = (event: string, detail?: string) => void;
 const SOURCE_NAMES: Record<string, string> = { all: 'All', github: 'GitHub', shortcut: 'Shortcut', linear: 'Linear' };
 const DOUBLE_CLICK = 400;
 
+const RENAME: Record<Target['kind'], { label: string; hint: string }> = {
+  group: { label: 'rename group', hint: 'leave it empty to keep the current name' },
+  project: { label: 'rename project', hint: 'leave it empty to use the folder name' },
+  workspace: { label: 'rename workspace', hint: 'leave it empty to use the branch name' },
+  tab: { label: 'rename tab', hint: 'leave it empty to use the program name' },
+};
+
 export class App {
   cols = 120;
   rows = 34;
   widths = { projects: 32, workspaces: 26 };
   nav: 'projects' | 'workspaces' | null = null;
+  groups: Group[] = [];
   projects: Project[] = [];
   active = 0;
   projectsScroll = 0;
@@ -89,6 +99,7 @@ export class App {
   private frame: Frame | null = null;
   private grid = new Grid(this.cols, this.rows);
   private lastClick: { at: number; border: string } | null = null;
+  private followed: number | null = null;
   private needsDraw = true;
 
   on(listener: Listener): void {
@@ -168,6 +179,7 @@ export class App {
   render(): { grid: Grid; cursor: Cursor | null } {
     if (this.toast && this.toast.until < this.now()) this.toast = null;
     this.grid.reset();
+    this.follow();
     this.frame = new Painter(this, this.grid).draw();
     this.needsDraw = false;
     return { grid: this.grid, cursor: this.frame.cursor };
@@ -251,6 +263,72 @@ export class App {
   notify(text: string): void {
     this.toast = { text, until: this.now() + 2000 };
     this.after(2050, () => this.dirty());
+    this.dirty();
+  }
+
+  group(id: number | undefined): Group | undefined {
+    return this.groups.find((g) => g.id === id);
+  }
+
+  groupIndex(id: number | undefined): number | null {
+    const g = this.groups.findIndex((x) => x.id === id);
+    return g >= 0 ? g : null;
+  }
+
+  sidebarRows(): SidebarRow[] {
+    return sidebarRows(
+      this.projects.map((p) => this.groupIndex(p.group)),
+      this.groups.map((g) => g.collapsed),
+    );
+  }
+
+  private follow(): void {
+    const p = this.project();
+    if (!p || p.id === this.followed) return;
+    this.followed = p.id;
+    const { list, pitch } = layout(this.cols, this.rows, this.widths, 'projects');
+    const sidebar = this.sidebarRows();
+    const i = activeRow(sidebar, this.active, this.groupIndex(p.group));
+    if (i >= 0) this.projectsScroll = sidebarLayout(list, pitch, sidebar, this.projectsScroll).reveal(i);
+  }
+
+  toggleGroup(g: number): void {
+    const group = this.groups[g];
+    if (!group) return;
+    group.collapsed = !group.collapsed;
+    this.dirty();
+  }
+
+  addGroup(name: string, colour?: number): Group {
+    const n = this.groups.length;
+    const group = { id: this.id(), name, icon: GROUP_ICONS[n % GROUP_ICONS.length], colour: colour ?? GROUP_COLOURS[n % GROUP_COLOURS.length], collapsed: false };
+    this.groups.push(group);
+    return group;
+  }
+
+  setGroupStyle(icon?: string, colour?: number): void {
+    const o = this.overlay;
+    if (o?.kind !== 'groupStyle') return;
+    const g = this.group(o.group);
+    if (!g) return this.closeOverlay();
+    if (icon !== undefined) g.icon = icon;
+    if (colour !== undefined) g.colour = colour;
+    this.dirty();
+  }
+
+  openNewMenu(at: Pos): void {
+    this.overlay = { kind: 'menu', at, actions: [{ kind: 'openProject' }, { kind: 'newGroup' }] };
+    this.dirty();
+  }
+
+  openGroupMenu(at: Pos, g: number): void {
+    const id = this.groups[g]?.id;
+    if (id === undefined) return;
+    this.overlay = {
+      kind: 'menu',
+      at,
+      actions: [{ kind: 'rename', target: { kind: 'group', group: id } }, { kind: 'groupStyle', group: id }, { kind: 'deleteGroup', group: id }],
+    };
     this.dirty();
   }
 
@@ -417,23 +495,35 @@ export class App {
   }
 
   openMenu(at: Pos, target: Target): void {
-    this.overlay = { kind: 'menu', at, target };
+    const actions: MenuAction[] = [{ kind: 'rename', target }];
+    if (target.kind === 'project' && this.groups.length) actions.push({ kind: 'moveToGroup', project: target.project });
+    this.overlay = { kind: 'menu', at, actions };
     this.dirty();
   }
 
   renameLabel(t: Target): string {
-    return t.kind === 'project' ? 'rename project' : t.kind === 'workspace' ? 'rename workspace' : 'rename tab';
+    return RENAME[t.kind].label;
   }
 
   renameHint(t: Target): string {
-    return t.kind === 'project'
-      ? 'leave it empty to use the folder name'
-      : t.kind === 'workspace'
-        ? 'leave it empty to use the branch name'
-        : 'leave it empty to use the program name';
+    return RENAME[t.kind].hint;
   }
 
-  private resolveTarget(t: Target): { p?: Project; w?: Workspace; tab?: Tab } {
+  menuLabel(a: MenuAction): string {
+    if (a.kind === 'rename') return this.renameLabel(a.target);
+    if (a.kind === 'moveToGroup') return 'move to group';
+    if (a.kind === 'setGroup') {
+      const g = a.group === null ? undefined : this.group(a.group);
+      return a.group === null ? 'no group' : g ? `${g.icon} ${g.name}` : '';
+    }
+    if (a.kind === 'groupStyle') return 'icon and colour';
+    if (a.kind === 'deleteGroup') return 'delete group';
+    if (a.kind === 'openProject') return 'open project';
+    if (a.kind === 'newGroup') return 'new group';
+    return a.action;
+  }
+
+  private resolveTarget(t: Exclude<Target, { kind: 'group' }>): { p?: Project; w?: Workspace; tab?: Tab } {
     const p = this.projects.find((x) => x.id === t.project);
     if (t.kind === 'project') return { p };
     const w = p?.workspaces.find((x) => x.id === t.workspace);
@@ -441,21 +531,56 @@ export class App {
     return { p, w, tab: w?.tabs.find((x) => x.id === t.tab) };
   }
 
-  chooseMenu(i: number): void {
-    const o = this.overlay;
-    if (!o) return;
-    if (o.kind === 'menu') {
-      const { p, w, tab } = this.resolveTarget(o.target);
-      const current = o.target.kind === 'project' ? p?.name : o.target.kind === 'workspace' ? w?.name : tab?.name;
-      this.overlay = { kind: 'rename', target: o.target, input: current ?? '' };
-      this.dirty();
+  private currentName(t: Target): string | undefined {
+    if (t.kind === 'group') return this.group(t.group)?.name;
+    const { p, w, tab } = this.resolveTarget(t);
+    return t.kind === 'project' ? p?.name : t.kind === 'workspace' ? w?.name : tab?.name;
+  }
+
+  private rename(t: Target, name: string | undefined): void {
+    if (t.kind === 'group') {
+      const g = this.group(t.group);
+      if (g && name) g.name = name;
       return;
     }
-    if (o.kind !== 'paneMenu') return;
-    const action = o.actions[i];
-    const found = this.findPane(o.pane);
+    const { p, w, tab } = this.resolveTarget(t);
+    if (t.kind === 'project' && p) p.name = name;
+    if (t.kind === 'workspace' && w) w.name = name;
+    if (t.kind === 'tab' && tab) tab.name = name;
+  }
+
+  chooseMenu(i: number): void {
+    const o = this.overlay;
+    if (o?.kind !== 'menu') return;
+    const a = o.actions[i];
     this.overlay = null;
-    if (!found) return this.dirty();
+    if (!a) return this.dirty();
+    if (a.kind === 'rename') {
+      this.overlay = { kind: 'rename', target: a.target, input: this.currentName(a.target) ?? '' };
+    } else if (a.kind === 'moveToGroup') {
+      const current = this.projects.find((x) => x.id === a.project)?.group;
+      const actions: MenuAction[] = this.groups.filter((g) => g.id !== current).map((g) => ({ kind: 'setGroup', project: a.project, group: g.id }));
+      if (current !== undefined) actions.push({ kind: 'setGroup', project: a.project, group: null });
+      this.overlay = { kind: 'menu', at: o.at, actions };
+    } else if (a.kind === 'setGroup') {
+      const p = this.projects.find((x) => x.id === a.project);
+      if (p) p.group = a.group ?? undefined;
+    } else if (a.kind === 'groupStyle') this.overlay = { kind: 'groupStyle', group: a.group };
+    else if (a.kind === 'deleteGroup') {
+      this.groups = this.groups.filter((g) => g.id !== a.group);
+      for (const p of this.projects) if (p.group === a.group) p.group = undefined;
+    } else if (a.kind === 'openProject') return this.openPicker();
+    else if (a.kind === 'newGroup') {
+      this.nav = null;
+      this.overlay = { kind: 'newGroup', input: '' };
+      this.emit('narrate', 'Name the group. Right-click a project to move it in.');
+    } else this.paneAction(a.pane, a.action);
+    this.dirty();
+  }
+
+  private paneAction(id: number, action: PaneAction): void {
+    const found = this.findPane(id);
+    if (!found) return;
     const { p, w, t, pane } = found;
     if (action === 'split right' || action === 'split down') {
       const fresh = this.newPane(p, w);
@@ -465,7 +590,6 @@ export class App {
       this.emit('narrate', 'Split. Drag the divider to resize; inactive panes are dimmed (settings › TUI).');
     } else if (action === 'close pane') this.exitPane(pane.id);
     else pane.rightClicks = !pane.rightClicks;
-    this.dirty();
   }
 
   openPaneMenu(at: Pos, tab: Tab, pane: Pane, area: Rect): void {
@@ -475,7 +599,7 @@ export class App {
     actions.push(pane.rightClicks ? 'use this menu on right-click' : 'send right-clicks to the pane');
     actions.push('close pane');
     tab.active = pane.id;
-    this.overlay = { kind: 'paneMenu', at, pane: pane.id, actions };
+    this.overlay = { kind: 'menu', at, actions: actions.map((action) => ({ kind: 'pane', pane: pane.id, action })) };
     this.dirty();
   }
 
@@ -505,12 +629,16 @@ export class App {
   submitForm(): void {
     const o = this.overlay;
     if (!o) return;
+    if (o.kind === 'groupStyle') return this.closeOverlay();
+    if (o.kind === 'newGroup') {
+      const name = o.input.trim();
+      if (!name) return;
+      this.overlay = { kind: 'groupStyle', group: this.addGroup(name).id };
+      this.dirty();
+      return;
+    }
     if (o.kind === 'rename') {
-      const { p, w, tab } = this.resolveTarget(o.target);
-      const name = o.input.trim() || undefined;
-      if (o.target.kind === 'project' && p) p.name = name;
-      if (o.target.kind === 'workspace' && w) w.name = name;
-      if (o.target.kind === 'tab' && tab) tab.name = name;
+      this.rename(o.target, o.input.trim() || undefined);
       this.overlay = null;
       this.dirty();
       return;
@@ -644,9 +772,13 @@ export class App {
     if (!q) return [];
     const all: (SearchResult & { order: number })[] = [];
     let order = 0;
+    this.groups.forEach((g) => {
+      all.push({ kind: -1, name: `${g.icon} ${g.name}`, context: '', keys: [g.name], go: () => this.gotoGroup(g.id), order: order++ });
+    });
     this.projects.forEach((p, pi) => {
       const project = projectLabel(p);
-      all.push({ kind: 0, name: project, context: '', keys: [project], go: () => this.selectProject(pi), order: order++ });
+      const group = this.group(p.group)?.name ?? '';
+      all.push({ kind: 0, name: project, context: group, keys: [project], go: () => this.selectProject(pi), order: order++ });
       p.workspaces.forEach((w, wi) => {
         const label = workspaceLabel(w);
         const keys = [label, ...(w.branch ? [w.branch] : [])];
@@ -693,6 +825,13 @@ export class App {
       .filter((x) => x.s < 3)
       .sort((a, b) => a.s - b.s || a.r.kind - b.r.kind || a.r.order - b.r.order)
       .map((x) => x.r);
+  }
+
+  private gotoGroup(id: number): void {
+    const g = this.group(id);
+    if (g) g.collapsed = false;
+    const first = this.projects.findIndex((p) => p.group === id);
+    if (first >= 0) this.active = first;
   }
 
   searchGo(i: number): void {
@@ -1511,7 +1650,7 @@ export class App {
   paste(text: string): void {
     const o = this.overlay;
     if (o) {
-      if (o.kind === 'newWorkspace' || o.kind === 'rename') o.input += text.replace(/\s+/g, ' ');
+      if (o.kind === 'newWorkspace' || o.kind === 'rename' || o.kind === 'newGroup') o.input += text.replace(/\s+/g, ' ');
       else if (o.kind === 'search') o.query += text;
       else if (o.kind === 'picker') o.filter += text;
       else if (o.kind === 'settings' && o.edit) o.edit.input += o.edit.token ? text.replace(/\s/g, '') : text;
@@ -1543,11 +1682,15 @@ export class App {
 
   private overlayKey(o: Overlay, k: Key): boolean {
     const ch = this.typed(k);
-    if (o.kind === 'menu' || o.kind === 'paneMenu') {
+    if (o.kind === 'menu') {
       if (k.key === 'Escape') this.closeOverlay();
       return true;
     }
-    if (o.kind === 'newWorkspace' || o.kind === 'rename') {
+    if (o.kind === 'groupStyle') {
+      if (k.key === 'Escape' || k.key === 'Enter') this.closeOverlay();
+      return true;
+    }
+    if (o.kind === 'newWorkspace' || o.kind === 'rename' || o.kind === 'newGroup') {
       if (k.key === 'Escape') this.closeOverlay();
       else if (k.key === 'Enter') this.submitForm();
       else if (o.kind === 'newWorkspace' && o.creating) return true;

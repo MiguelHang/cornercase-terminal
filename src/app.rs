@@ -23,14 +23,14 @@ use crate::launch::{self, Launch, Step};
 use crate::markdown;
 use crate::mouse;
 use crate::picker::Picker;
-use crate::project::{Project, Tab, Workspace, shift_active};
+use crate::project::{Group, Project, Tab, Workspace, shift_active};
 use crate::search::{self, Candidate, Goto, Kind, Search};
 use crate::secrets;
 use crate::settings::{self, Page, Settings, Status};
 use crate::split::{self, Dir};
 use crate::state::{self, IssuesState, PaneState, ProjectState, State, TabState, WorkspaceState};
 use crate::term::{SpawnOptions, Term};
-use crate::ui::{self, FormHit, PickerHit, SidebarHit, WorkspaceHit, WorkspaceRow};
+use crate::ui::{self, FormHit, PickerHit, SidebarHit, SidebarRow, WorkspaceHit, WorkspaceRow};
 use crate::update::{self, Install, Release, Updates};
 use crate::upstream;
 use crate::worktree;
@@ -59,6 +59,7 @@ pub struct Start {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Target {
+    Group(u64),
     Project(u64),
     Workspace(u64, u64),
     Tab(u64, u64, u64),
@@ -67,6 +68,7 @@ enum Target {
 impl Target {
     fn rename_label(self) -> &'static str {
         match self {
+            Self::Group(_) => "rename group",
             Self::Project(_) => "rename project",
             Self::Workspace(..) => "rename workspace",
             Self::Tab(..) => "rename tab",
@@ -75,6 +77,7 @@ impl Target {
 
     fn rename_hint(self) -> &'static str {
         match self {
+            Self::Group(_) => "leave it empty to keep the current name",
             Self::Project(_) => "leave it empty to use the folder name",
             Self::Workspace(..) => "leave it empty to use the branch name",
             Self::Tab(..) => "leave it empty to use the program name",
@@ -102,11 +105,24 @@ impl PaneAction {
     }
 }
 
-const WORKSPACE_SUBMIT: &str = "create";
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuAction {
+    Rename(Target),
+    MoveToGroup(u64),
+    SetGroup(u64, Option<u64>),
+    GroupStyle(u64),
+    DeleteGroup(u64),
+    OpenProject,
+    NewGroup,
+    Pane(u64, PaneAction),
+}
+
+const CREATE_SUBMIT: &str = "create";
 const RENAME_SUBMIT: &str = "rename";
 const REMOVE_SUBMIT: &str = "remove";
 const FORCE_REMOVE_SUBMIT: &str = "remove anyway";
 const PICKER_SUBMIT: &str = "open";
+const NEW_GROUP_HINT: &str = "right-click a project to move it into the group";
 const WORKTREE_TOGGLE: &str = "with its own worktree";
 const WHEEL_ROWS: isize = 3;
 const SYNC_EVERY: Duration = Duration::from_secs(1);
@@ -132,8 +148,9 @@ enum UpdateStep {
 
 #[derive(Debug)]
 enum Overlay {
-    Menu { at: Position, target: Target },
-    PaneMenu { at: Position, pane: u64, actions: Vec<PaneAction> },
+    Menu { at: Position, actions: Vec<MenuAction> },
+    NewGroup { input: String },
+    GroupStyle { group: u64 },
     NewWorkspace { project: u64, input: String, worktree: Option<bool>, error: Option<String>, creating: bool },
     Settings(Box<Settings>),
     Rename { target: Target, input: String },
@@ -154,7 +171,7 @@ impl Overlay {
             Self::Update(UpdateStep::Installed) => RESTART_SUBMIT,
             Self::Update(UpdateStep::Manual(_)) => COPY_COMMAND_SUBMIT,
             Self::Update(_) => UPDATE_SUBMIT,
-            _ => WORKSPACE_SUBMIT,
+            _ => CREATE_SUBMIT,
         }
     }
 
@@ -164,7 +181,7 @@ impl Overlay {
                 *error = None;
                 Some(input)
             }
-            Self::Rename { input, .. } => Some(input),
+            Self::Rename { input, .. } | Self::NewGroup { input } => Some(input),
             _ => None,
         }
     }
@@ -193,6 +210,7 @@ fn wheel(kind: MouseEventKind) -> Option<isize> {
 }
 
 pub struct App {
+    groups: Vec<Group>,
     projects: Vec<Project>,
     active: usize,
     projects_scroll: usize,
@@ -267,6 +285,7 @@ impl App {
     pub fn new(shell: String, theme: HostTheme, config_path: PathBuf, tx: Sender<AppEvent>) -> Self {
         let secrets_path = secrets::path(&config_path);
         Self {
+            groups: Vec::new(),
             projects: Vec::new(),
             active: 0,
             projects_scroll: 0,
@@ -550,8 +569,11 @@ impl App {
         }
         let areas = self.layout(area);
         if focus.project != self.followed.project {
-            let rows = ui::project_rows(areas.list, areas.pitch, self.projects.len(), self.projects_scroll);
-            self.projects_scroll = rows.reveal(self.active);
+            let sidebar = self.sidebar_rows();
+            let rows = ui::project_rows(areas.list, areas.pitch, &sidebar, self.projects_scroll);
+            if let Some(i) = self.active_row(&sidebar) {
+                self.projects_scroll = rows.reveal(i);
+            }
         }
         self.followed = focus;
         let Some(project) = self.project() else { return };
@@ -599,6 +621,32 @@ impl App {
         Some((p, w))
     }
 
+    fn group_index(&self, id: u64) -> Option<usize> {
+        self.groups.iter().position(|g| g.id == id)
+    }
+
+    fn group(&self, id: u64) -> Option<&ui::GroupEntry> {
+        self.groups.iter().find(|g| g.id == id).map(|g| &g.entry)
+    }
+
+    fn group_mut(&mut self, id: u64) -> Option<&mut ui::GroupEntry> {
+        self.groups.iter_mut().find(|g| g.id == id).map(|g| &mut g.entry)
+    }
+
+    fn project_groups(&self) -> Vec<Option<usize>> {
+        self.projects.iter().map(|p| p.group.and_then(|id| self.group_index(id))).collect()
+    }
+
+    fn sidebar_rows(&self) -> Vec<SidebarRow> {
+        let collapsed: Vec<bool> = self.groups.iter().map(|g| g.entry.collapsed).collect();
+        ui::sidebar_rows(&self.project_groups(), &collapsed)
+    }
+
+    fn active_row(&self, sidebar: &[SidebarRow]) -> Option<usize> {
+        let group = self.project().and_then(|p| p.group).and_then(|id| self.group_index(id));
+        ui::active_row(sidebar, self.active, group)
+    }
+
     fn project_label(&self, project: &Project) -> String {
         project.name.clone().unwrap_or_else(|| ui::folder_name(&project.path, self.home.as_deref()))
     }
@@ -607,9 +655,11 @@ impl App {
         let projects = self
             .projects
             .iter()
-            .map(|p| ProjectState {
+            .zip(self.project_groups())
+            .map(|(p, group)| ProjectState {
                 path: p.path.clone(),
                 name: p.name.clone(),
+                group,
                 workspaces: p
                     .workspaces
                     .iter()
@@ -648,7 +698,8 @@ impl App {
             closed: self.issue_closed,
             people: self.issue_people.clone(),
         });
-        State { version: state::VERSION, projects, active: self.active, widths: Some(self.widths), issues }
+        let groups = self.groups.iter().map(|g| g.entry.clone()).collect();
+        State { version: state::VERSION, groups, projects, active: self.active, widths: Some(self.widths), issues }
     }
 
     pub fn restore(&mut self, saved: &State, area: Rect) -> Result<()> {
@@ -658,12 +709,19 @@ impl App {
             self.issue_closed = issues.closed;
             self.issue_people = issues.people.clone();
         }
+        let first_group = self.groups.len();
+        for entry in &saved.groups {
+            let icon = if ui::GROUP_ICONS.contains(&entry.icon) { entry.icon } else { ui::GROUP_ICONS[0] };
+            let id = self.take_id();
+            self.groups.push(Group { id, entry: ui::GroupEntry { icon, ..entry.clone() } });
+        }
         for (i, saved_project) in saved.projects.iter().enumerate() {
             let path = saved_project.path.canonicalize().unwrap_or_else(|_| saved_project.path.clone());
             if !path.is_dir() || self.projects.iter().any(|p| p.path == path) {
                 continue;
             }
             let mut project = Project::new(self.take_id(), path, saved_project.name.clone());
+            project.group = saved_project.group.and_then(|g| self.groups.get(first_group + g)).map(|g| g.id);
             for saved_ws in &saved_project.workspaces {
                 if let Some(workspace) = self.restore_workspace(saved_ws, area)? {
                     project.workspaces.push(workspace);
@@ -756,13 +814,13 @@ impl App {
 
     fn handle_key(&mut self, key: KeyEvent, area: Rect) -> Result<()> {
         match &self.overlay {
-            Some(Overlay::Menu { .. } | Overlay::PaneMenu { .. }) if key.code == KeyCode::Esc => self.overlay = None,
+            Some(Overlay::Menu { .. }) if key.code == KeyCode::Esc => self.overlay = None,
             None if self.nav.is_some() && key.code == KeyCode::Esc => self.nav = None,
             Some(Overlay::Picker(_)) => return self.picker_key(key, area),
             Some(Overlay::Issues(_)) => return self.issues_key(key, area),
             Some(Overlay::Settings(_)) => self.settings_key(key, area),
             Some(Overlay::Search(_)) => self.search_key(key, area),
-            Some(Overlay::Menu { .. } | Overlay::PaneMenu { .. }) | None => self.forward_key(key),
+            Some(Overlay::Menu { .. }) | None => self.forward_key(key),
             Some(_) => return self.form_key(key, area),
         }
         Ok(())
@@ -866,7 +924,7 @@ impl App {
     fn scroll_column(&mut self, areas: &ui::Areas, pos: Position, delta: isize) -> bool {
         let items = if areas.pitch > 1 { delta.signum() } else { delta };
         if areas.sidebar.contains(pos) {
-            let rows = ui::project_rows(areas.list, areas.pitch, self.projects.len(), self.projects_scroll);
+            let rows = ui::project_rows(areas.list, areas.pitch, &self.sidebar_rows(), self.projects_scroll);
             self.projects_scroll = rows.scrolled(items);
             true
         } else if areas.workspaces.contains(pos) {
@@ -989,15 +1047,16 @@ impl App {
     fn open_pane_menu(&mut self, pane: u64, at: Position, area: Rect) {
         let Some(tab) = self.tab() else { return };
         let Some(r) = tab.layout.pane(area, pane) else { return };
-        let mut actions: Vec<PaneAction> =
-            [Dir::Right, Dir::Down].into_iter().filter(|&d| split::fits(r, d)).map(PaneAction::Split).collect();
-        actions.push(if tab.right_clicks_to_pane(pane) {
-            PaneAction::RightClicksToMenu
-        } else {
-            PaneAction::RightClicksToPane
-        });
-        actions.push(PaneAction::Close);
-        self.overlay = Some(Overlay::PaneMenu { at, pane, actions });
+        let right_clicks =
+            if tab.right_clicks_to_pane(pane) { PaneAction::RightClicksToMenu } else { PaneAction::RightClicksToPane };
+        let actions = [Dir::Right, Dir::Down]
+            .into_iter()
+            .filter(|&d| split::fits(r, d))
+            .map(PaneAction::Split)
+            .chain([right_clicks, PaneAction::Close])
+            .map(|a| MenuAction::Pane(pane, a))
+            .collect();
+        self.overlay = Some(Overlay::Menu { at, actions });
     }
 
     fn pane_action(&mut self, pane: u64, action: PaneAction, area: Rect) -> Result<()> {
@@ -1048,15 +1107,19 @@ impl App {
     }
 
     fn click_projects(&mut self, list: Rect, pitch: u16, pos: Position) {
-        match ui::sidebar_hit(list, pitch, self.projects.len(), self.projects_scroll, pos) {
+        match ui::sidebar_hit(list, pitch, &self.sidebar_rows(), self.projects_scroll, pos) {
             Some(SidebarHit::Select(i)) => {
                 self.active = i;
                 self.nav = self.nav.map(|_| ui::Nav::Workspaces);
             }
             Some(SidebarHit::Close(i)) => self.close_project(i),
+            Some(SidebarHit::Group(g)) => {
+                let entry = &mut self.groups[g].entry;
+                entry.collapsed = !entry.collapsed;
+            }
             Some(SidebarHit::New) => {
-                self.nav = None;
-                self.open_picker();
+                self.overlay =
+                    Some(Overlay::Menu { at: pos, actions: vec![MenuAction::OpenProject, MenuAction::NewGroup] });
             }
             None => {}
         }
@@ -1602,22 +1665,32 @@ impl App {
     }
 
     fn search_candidates(&self) -> Vec<Candidate> {
-        let mut candidates = Vec::new();
-        for p in &self.projects {
+        let mut candidates: Vec<Candidate> = self
+            .groups
+            .iter()
+            .map(|g| Candidate {
+                kind: Kind::Group,
+                goto: Goto::Group(g.id),
+                name: g.entry.label(),
+                context: String::new(),
+                keys: vec![g.entry.name.clone()],
+            })
+            .collect();
+        for (p, group) in self.projects.iter().zip(self.project_groups()) {
             let project = self.project_label(p);
-            let goto = Goto { project: p.id, workspace: None, tab: None };
+            let place = |workspace, tab| Goto::Place { project: p.id, workspace, tab };
             candidates.push(Candidate {
                 kind: Kind::Project,
-                goto,
+                goto: place(None, None),
                 name: project.clone(),
-                context: String::new(),
+                context: group.map(|g| self.groups[g].entry.name.clone()).unwrap_or_default(),
                 keys: vec![project.clone()],
             });
             for w in &p.workspaces {
                 let label = w.label();
                 let mut keys = vec![label.clone()];
                 keys.extend(w.name.as_ref().and_then(|_| git::branch(&w.path)));
-                let goto = Goto { workspace: Some(w.id), ..goto };
+                let goto = place(Some(w.id), None);
                 candidates.push(Candidate {
                     kind: Kind::Workspace,
                     goto,
@@ -1629,7 +1702,7 @@ impl App {
                     let name = t.label();
                     candidates.push(Candidate {
                         kind: Kind::Tab,
-                        goto: Goto { tab: Some(t.id), ..goto },
+                        goto: place(Some(w.id), Some(t.id)),
                         context: format!("{project} › {label}"),
                         keys: std::iter::once(name.clone()).chain(keys.iter().cloned()).collect(),
                         name,
@@ -1695,23 +1768,44 @@ impl App {
 
     fn goto(&mut self, goto: Goto) {
         self.nav = None;
-        let Some(p) = self.project_index(goto.project) else { return };
+        let (project, workspace, tab) = match goto {
+            Goto::Group(id) => {
+                if let Some(entry) = self.group_mut(id) {
+                    entry.collapsed = false;
+                }
+                let Some(first) = self.projects.iter().find(|p| p.group == Some(id)) else { return };
+                (first.id, None, None)
+            }
+            Goto::Place { project, workspace, tab } => (project, workspace, tab),
+        };
+        let Some(p) = self.project_index(project) else { return };
         self.active = p;
         let project = &mut self.projects[p];
-        let Some(w) = goto.workspace.and_then(|id| project.workspaces.iter().position(|w| w.id == id)) else { return };
+        let Some(w) = workspace.and_then(|id| project.workspaces.iter().position(|w| w.id == id)) else { return };
         project.active = w;
         let workspace = &mut project.workspaces[w];
-        if let Some(t) = goto.tab.and_then(|id| workspace.tabs.iter().position(|t| t.id == id)) {
+        if let Some(t) = tab.and_then(|id| workspace.tabs.iter().position(|t| t.id == id)) {
             workspace.active = t;
         }
     }
 
     fn open_project_menu(&mut self, list: Rect, pitch: u16, pos: Position) {
-        if let Some(SidebarHit::Select(i) | SidebarHit::Close(i)) =
-            ui::sidebar_hit(list, pitch, self.projects.len(), self.projects_scroll, pos)
-        {
-            self.overlay = Some(Overlay::Menu { at: pos, target: Target::Project(self.projects[i].id) });
-        }
+        let actions = match ui::sidebar_hit(list, pitch, &self.sidebar_rows(), self.projects_scroll, pos) {
+            Some(SidebarHit::Select(i) | SidebarHit::Close(i)) => {
+                let id = self.projects[i].id;
+                let mut actions = vec![MenuAction::Rename(Target::Project(id))];
+                if !self.groups.is_empty() {
+                    actions.push(MenuAction::MoveToGroup(id));
+                }
+                actions
+            }
+            Some(SidebarHit::Group(g)) => {
+                let id = self.groups[g].id;
+                vec![MenuAction::Rename(Target::Group(id)), MenuAction::GroupStyle(id), MenuAction::DeleteGroup(id)]
+            }
+            _ => return,
+        };
+        self.overlay = Some(Overlay::Menu { at: pos, actions });
     }
 
     fn open_workspace_menu(&mut self, list: Rect, pitch: u16, pos: Position) {
@@ -1726,11 +1820,12 @@ impl App {
             }
             _ => return,
         };
-        self.overlay = Some(Overlay::Menu { at: pos, target });
+        self.overlay = Some(Overlay::Menu { at: pos, actions: vec![MenuAction::Rename(target)] });
     }
 
     fn current_name(&self, target: Target) -> Option<String> {
         match target {
+            Target::Group(id) => self.group(id).map(|g| g.name.clone()),
             Target::Project(id) => self.project_index(id).map(|p| self.project_label(&self.projects[p])),
             Target::Workspace(project, workspace) => {
                 self.workspace_index(project, workspace).map(|(p, w)| self.projects[p].workspaces[w].label())
@@ -1744,6 +1839,13 @@ impl App {
 
     fn rename(&mut self, target: Target, name: Option<String>) {
         match target {
+            Target::Group(id) => {
+                if let Some(entry) = self.group_mut(id)
+                    && let Some(name) = name
+                {
+                    entry.name = name;
+                }
+            }
             Target::Project(id) => {
                 if let Some(p) = self.project_index(id) {
                     self.projects[p].name = name;
@@ -1782,27 +1884,22 @@ impl App {
         if matches!(self.overlay, Some(Overlay::Update(_))) {
             return self.update_mouse(ev, pos, area);
         }
+        if let Some(Overlay::GroupStyle { group }) = self.overlay {
+            self.group_style_mouse(group, ev, pos, area);
+            return Ok(());
+        }
         let MouseEventKind::Down(button) = ev.kind else { return Ok(()) };
-        if let Some(Overlay::PaneMenu { at, pane, actions }) = &self.overlay {
-            let (at, pane) = (*at, *pane);
-            let labels: Vec<&str> = actions.iter().map(|a| a.label()).collect();
-            let menu = ui::menu_area(area, at, &labels);
+        if let Some(Overlay::Menu { at, actions }) = &self.overlay {
+            let at = *at;
+            let menu = ui::menu_area(area, at, &self.menu_labels(actions));
             let picked = ui::menu_hit(menu, actions.len(), pos).map(|i| actions[i]);
             self.overlay = None;
             if let (MouseButton::Left, Some(action)) = (button, picked) {
-                return self.pane_action(pane, action, area);
+                return self.menu_action(action, at, area);
             }
             return Ok(());
         }
         let Some(overlay) = &self.overlay else { return Ok(()) };
-        if let Overlay::Menu { at, target } = overlay {
-            let (at, target) = (*at, *target);
-            let menu = ui::menu_area(area, at, &[target.rename_label()]);
-            let picked = button == MouseButton::Left && ui::menu_hit(menu, 1, pos).is_some();
-            self.overlay =
-                picked.then(|| self.current_name(target)).flatten().map(|input| Overlay::Rename { target, input });
-            return Ok(());
-        }
         if button != MouseButton::Left {
             return Ok(());
         }
@@ -1813,6 +1910,94 @@ impl App {
             None => {}
         }
         Ok(())
+    }
+
+    fn menu_labels(&self, actions: &[MenuAction]) -> Vec<String> {
+        actions.iter().map(|&a| self.menu_label(a)).collect()
+    }
+
+    fn menu_label(&self, action: MenuAction) -> String {
+        match action {
+            MenuAction::Rename(target) => target.rename_label().into(),
+            MenuAction::MoveToGroup(_) => "move to group".into(),
+            MenuAction::SetGroup(_, None) => "no group".into(),
+            MenuAction::SetGroup(_, Some(id)) => self.group(id).map(ui::GroupEntry::label).unwrap_or_default(),
+            MenuAction::GroupStyle(_) => "icon and colour".into(),
+            MenuAction::DeleteGroup(_) => "delete group".into(),
+            MenuAction::OpenProject => "open project".into(),
+            MenuAction::NewGroup => "new group".into(),
+            MenuAction::Pane(_, action) => action.label().into(),
+        }
+    }
+
+    fn menu_action(&mut self, action: MenuAction, at: Position, area: Rect) -> Result<()> {
+        match action {
+            MenuAction::Rename(target) => {
+                self.overlay = self.current_name(target).map(|input| Overlay::Rename { target, input });
+            }
+            MenuAction::MoveToGroup(project) => {
+                let Some(p) = self.project_index(project) else { return Ok(()) };
+                let current = self.projects[p].group;
+                let mut actions: Vec<MenuAction> = self
+                    .groups
+                    .iter()
+                    .filter(|g| Some(g.id) != current)
+                    .map(|g| MenuAction::SetGroup(project, Some(g.id)))
+                    .collect();
+                if current.is_some() {
+                    actions.push(MenuAction::SetGroup(project, None));
+                }
+                self.overlay = Some(Overlay::Menu { at, actions });
+            }
+            MenuAction::SetGroup(project, group) => {
+                if let Some(p) = self.project_index(project) {
+                    self.projects[p].group = group;
+                }
+            }
+            MenuAction::GroupStyle(group) => self.overlay = Some(Overlay::GroupStyle { group }),
+            MenuAction::DeleteGroup(id) => {
+                self.groups.retain(|g| g.id != id);
+                for p in self.projects.iter_mut().filter(|p| p.group == Some(id)) {
+                    p.group = None;
+                }
+            }
+            MenuAction::OpenProject => {
+                self.nav = None;
+                self.open_picker();
+            }
+            MenuAction::NewGroup => {
+                self.nav = None;
+                self.overlay = Some(Overlay::NewGroup { input: String::new() });
+            }
+            MenuAction::Pane(pane, action) => return self.pane_action(pane, action, area),
+        }
+        Ok(())
+    }
+
+    fn add_group(&mut self, name: String) -> u64 {
+        let n = self.groups.len();
+        let icon = ui::GROUP_ICONS[n % ui::GROUP_ICONS.len()];
+        let colour = ui::GROUP_COLOURS[n % ui::GROUP_COLOURS.len()];
+        let id = self.take_id();
+        self.groups.push(Group { id, entry: ui::GroupEntry { name, icon, colour, collapsed: false } });
+        id
+    }
+
+    fn group_style_mouse(&mut self, group: u64, ev: MouseEvent, pos: Position, area: Rect) {
+        if ev.kind != MouseEventKind::Down(MouseButton::Left) {
+            return;
+        }
+        let hit = ui::style_hit(area, pos);
+        let Some(entry) = self.group_mut(group) else {
+            self.overlay = None;
+            return;
+        };
+        match hit {
+            Some(ui::StyleHit::Icon(i)) => entry.icon = ui::GROUP_ICONS[i],
+            Some(ui::StyleHit::Colour(i)) => entry.colour = ui::GROUP_COLOURS[i],
+            Some(ui::StyleHit::Done) => self.overlay = None,
+            None => {}
+        }
     }
 
     fn toggle_worktree(&mut self) {
@@ -1860,6 +2045,11 @@ impl App {
                 self.rename(target, (!name.is_empty()).then(|| name.to_string()));
                 None
             }
+            Overlay::NewGroup { input } if input.trim().is_empty() => Some(Overlay::NewGroup { input }),
+            Overlay::NewGroup { input } => {
+                Some(Overlay::GroupStyle { group: self.add_group(input.trim().to_string()) })
+            }
+            Overlay::GroupStyle { .. } => None,
             Overlay::RemoveWorkspace { project, workspace, force, removing: false, .. } => {
                 self.remove_worktree(project, workspace, force)
             }
@@ -2294,8 +2484,10 @@ impl App {
         let projects = self
             .projects
             .iter()
-            .map(|p| ui::ProjectEntry { name: self.project_label(p), workspaces: p.workspaces.len() })
+            .zip(self.project_groups())
+            .map(|(p, group)| ui::ProjectEntry { name: self.project_label(p), workspaces: p.workspaces.len(), group })
             .collect();
+        let groups = self.groups.iter().map(|g| g.entry.clone()).collect();
         let (has_project, workspaces, active_workspace, active_tab) = match self.project() {
             Some(p) => (
                 true,
@@ -2313,7 +2505,7 @@ impl App {
             None => (false, Vec::new(), 0, None),
         };
         let area = f.area();
-        let overlay = self.overlay.as_ref().map(|o| self.overlay_view(o, area));
+        let overlay = self.overlay.as_ref().and_then(|o| self.overlay_view(o, area));
         let dim_inactive = self.config.dim_inactive_panes;
         let dragging = self.divider_drag.clone();
         let tab = self.tab_mut().and_then(|tab| {
@@ -2324,6 +2516,7 @@ impl App {
         });
         self.toast = self.toast.filter(|(_, at)| at.elapsed() < TOAST_FOR);
         let view = ui::View {
+            groups,
             projects,
             active: self.active,
             projects_scroll: self.projects_scroll,
@@ -2346,14 +2539,21 @@ impl App {
         ui::draw(f, &view);
     }
 
-    fn overlay_view(&self, overlay: &Overlay, area: Rect) -> ui::Overlay {
+    fn overlay_view(&self, overlay: &Overlay, area: Rect) -> Option<ui::Overlay> {
         let home = self.home.as_deref();
         let note = |error: &Option<String>| error.clone().map(ui::Note::Error);
-        match overlay {
-            Overlay::Menu { at, target } => ui::Overlay::Menu { at: *at, items: vec![target.rename_label()] },
-            Overlay::PaneMenu { at, actions, .. } => {
-                ui::Overlay::Menu { at: *at, items: actions.iter().map(|a| a.label()).collect() }
-            }
+        Some(match overlay {
+            Overlay::Menu { at, actions } => ui::Overlay::Menu { at: *at, items: self.menu_labels(actions) },
+            Overlay::GroupStyle { group } => ui::Overlay::GroupStyle(self.group(*group)?.clone()),
+            Overlay::NewGroup { input } => ui::Overlay::Form(ui::Form {
+                title: "new group",
+                label: "name",
+                value: input.clone(),
+                hint: NEW_GROUP_HINT.into(),
+                toggle: None,
+                note: None,
+                submit: CREATE_SUBMIT,
+            }),
             Overlay::NewWorkspace { project, input, worktree, error, creating } => {
                 let repo = self.project_index(*project).map(|p| self.projects[p].path.clone()).unwrap_or_default();
                 let path = if *worktree == Some(true) {
@@ -2368,7 +2568,7 @@ impl App {
                     hint: format!("in {}", ui::display_path(&path, home)),
                     toggle: worktree.map(|on| ui::Toggle { label: WORKTREE_TOGGLE, on }),
                     note: if *creating { Some(ui::Note::Busy("creating…")) } else { note(error) },
-                    submit: WORKSPACE_SUBMIT,
+                    submit: CREATE_SUBMIT,
                 })
             }
             Overlay::Settings(s) => s.view(),
@@ -2402,7 +2602,7 @@ impl App {
             Overlay::Issues(b) => b.view(area, issues::now()),
             Overlay::Search(search) => self.search_view(search),
             Overlay::Update(step) => self.update_view(step, area),
-        }
+        })
     }
 
     fn search_view(&self, search: &Search) -> ui::Overlay {
@@ -2622,14 +2822,34 @@ mod tests {
         ui::form_buttons(ui::form_area(AREA), submit)[which].as_position()
     }
 
-    fn menu_labels(app: &App) -> Vec<&'static str> {
-        let Some(Overlay::Menu { target, .. }) = &app.overlay else { panic!("the menu is not open") };
-        vec![target.rename_label()]
+    fn menu_labels(app: &App) -> Vec<String> {
+        let Some(Overlay::Menu { actions, .. }) = &app.overlay else { panic!("the menu is not open") };
+        app.menu_labels(actions)
     }
 
-    fn menu_item_pos(app: &App) -> Position {
+    fn menu_item_at(app: &App, i: usize) -> Position {
         let Some(Overlay::Menu { at, .. }) = &app.overlay else { panic!("the menu is not open") };
-        ui::menu_item(ui::menu_area(AREA, *at, &menu_labels(app)), 0).as_position()
+        ui::menu_item(ui::menu_area(AREA, *at, &menu_labels(app)), i).as_position()
+    }
+
+    fn pick(app: &mut App, label: &str) {
+        let i = menu_labels(app).iter().position(|l| l == label).expect("the menu has the item");
+        let pos = menu_item_at(app, i);
+        click(app, pos);
+    }
+
+    fn plain(projects: usize) -> Vec<SidebarRow> {
+        ui::sidebar_rows(&vec![None; projects], &[])
+    }
+
+    fn new_project_pos(app: &App) -> Position {
+        ui::new_project_button(list(), 1, &app.sidebar_rows()).as_position()
+    }
+
+    fn click_new_project(app: &mut App) {
+        let new = new_project_pos(app);
+        click(app, new);
+        pick(app, "open project");
     }
 
     fn workspace_labels(app: &App) -> Vec<String> {
@@ -2704,13 +2924,297 @@ mod tests {
         }
     }
 
+    mod groups {
+        use rstest::rstest;
+
+        use super::*;
+
+        fn sidebar_pos(app: &App, row: SidebarRow) -> Position {
+            let r = ui::entry_row(list(), 1, &app.sidebar_rows(), app.projects_scroll, row);
+            Position::new(r.x + 3, r.y)
+        }
+
+        fn click_sidebar(app: &mut App, row: SidebarRow) {
+            let pos = sidebar_pos(app, row);
+            click(app, pos);
+        }
+
+        fn right_click_sidebar(app: &mut App, row: SidebarRow) {
+            let pos = sidebar_pos(app, row);
+            right_click(app, pos);
+        }
+
+        fn new_group(app: &mut App, name: &str) {
+            let new = new_project_pos(app);
+            click(app, new);
+            pick(app, "new group");
+            submit_text(app, name);
+            if matches!(app.overlay, Some(Overlay::GroupStyle { .. })) {
+                send_key(app, KeyCode::Enter, KeyModifiers::NONE);
+            }
+        }
+
+        fn open_style(app: &mut App) {
+            right_click_sidebar(app, SidebarRow::Group(0));
+            pick(app, "icon and colour");
+        }
+
+        fn move_to(app: &mut App, p: usize, group: &str) {
+            right_click_sidebar(app, SidebarRow::Project(p));
+            pick(app, "move to group");
+            pick(app, group);
+        }
+
+        fn group_label(app: &App, g: usize) -> String {
+            app.groups[g].entry.label()
+        }
+
+        fn names(app: &App) -> Vec<&str> {
+            app.groups.iter().map(|g| g.entry.name.as_str()).collect()
+        }
+
+        #[test]
+        fn the_new_button_offers_a_project_or_a_group() {
+            let (mut app, _rx) = app();
+            click(&mut app, ui::new_project_button(list(), 1, &plain(1)).as_position());
+            assert_eq!(menu_labels(&app), ["open project", "new group"]);
+        }
+
+        #[test]
+        fn a_group_is_created_with_the_typed_name() {
+            let (mut app, _rx) = app();
+            new_group(&mut app, "work");
+            assert_eq!((names(&app), app.overlay.is_none()), (vec!["work"], true));
+        }
+
+        #[test]
+        fn a_new_group_opens_its_icon_and_colour() {
+            let (mut app, _rx) = app();
+            let new = new_project_pos(&app);
+            click(&mut app, new);
+            pick(&mut app, "new group");
+
+            submit_text(&mut app, "work");
+
+            assert!(matches!(app.overlay, Some(Overlay::GroupStyle { group }) if group == app.groups[0].id));
+        }
+
+        #[test]
+        fn the_group_menu_offers_rename_icon_and_colour_and_delete() {
+            let (mut app, _rx) = app();
+            new_group(&mut app, "work");
+            right_click_sidebar(&mut app, SidebarRow::Group(0));
+            assert_eq!(menu_labels(&app), ["rename group", "icon and colour", "delete group"]);
+        }
+
+        #[test]
+        fn clicks_in_the_modal_set_the_icon_and_the_colour() {
+            let (mut app, _rx) = app();
+            new_group(&mut app, "work");
+            open_style(&mut app);
+
+            click(&mut app, ui::style_icon(AREA, 7).as_position());
+            click(&mut app, ui::style_colour(AREA, 12).as_position());
+
+            assert_eq!(
+                (app.groups[0].entry.icon, app.groups[0].entry.colour),
+                (ui::GROUP_ICONS[7], ui::GROUP_COLOURS[12])
+            );
+        }
+
+        #[rstest]
+        #[case::done(None)]
+        #[case::enter(Some(KeyCode::Enter))]
+        #[case::esc(Some(KeyCode::Esc))]
+        fn the_modal_closes_keeping_the_choice(#[case] key: Option<KeyCode>) {
+            let (mut app, _rx) = app();
+            new_group(&mut app, "work");
+            open_style(&mut app);
+            click(&mut app, ui::style_icon(AREA, 3).as_position());
+
+            match key {
+                Some(code) => send_key(&mut app, code, KeyModifiers::NONE),
+                None => click(&mut app, ui::style_done(AREA).as_position()),
+            }
+
+            assert_eq!((app.overlay.is_none(), app.groups[0].entry.icon), (true, ui::GROUP_ICONS[3]));
+        }
+
+        #[test]
+        fn an_empty_name_keeps_the_form_open() {
+            let (mut app, _rx) = app();
+            new_group(&mut app, "  ");
+            assert_eq!((app.groups.len(), matches!(app.overlay, Some(Overlay::NewGroup { .. }))), (0, true));
+        }
+
+        #[test]
+        fn each_new_group_gets_the_next_icon_and_colour() {
+            let (mut app, _rx) = app();
+            new_group(&mut app, "work");
+            new_group(&mut app, "oss");
+            let styles: Vec<(char, u8)> = app.groups.iter().map(|g| (g.entry.icon, g.entry.colour)).collect();
+            assert_eq!(
+                styles,
+                [(ui::GROUP_ICONS[0], ui::GROUP_COLOURS[0]), (ui::GROUP_ICONS[1], ui::GROUP_COLOURS[1])]
+            );
+        }
+
+        #[test]
+        fn the_project_menu_offers_moving_only_once_there_are_groups() {
+            let (mut app, _rx) = app();
+            right_click_sidebar(&mut app, SidebarRow::Project(0));
+            let before = menu_labels(&app);
+            send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            new_group(&mut app, "work");
+            right_click_sidebar(&mut app, SidebarRow::Project(0));
+            assert_eq!(
+                (before, menu_labels(&app)),
+                (vec!["rename project".to_string()], vec!["rename project".to_string(), "move to group".to_string()])
+            );
+        }
+
+        #[test]
+        fn a_moved_project_shows_below_its_group() {
+            let (mut app, _rx, _dirs) = app_with(2);
+            new_group(&mut app, "work");
+            let label = group_label(&app, 0);
+
+            move_to(&mut app, 0, &label);
+
+            assert_eq!(
+                app.sidebar_rows(),
+                [SidebarRow::Project(1), SidebarRow::Gap, SidebarRow::Group(0), SidebarRow::Project(0)]
+            );
+        }
+
+        #[test]
+        fn the_move_menu_lists_the_other_groups_and_no_group() {
+            let (mut app, _rx) = app();
+            new_group(&mut app, "work");
+            new_group(&mut app, "oss");
+            let (work, oss) = (group_label(&app, 0), group_label(&app, 1));
+            move_to(&mut app, 0, &work);
+
+            right_click_sidebar(&mut app, SidebarRow::Project(0));
+            pick(&mut app, "move to group");
+
+            assert_eq!(menu_labels(&app), [oss, "no group".to_string()]);
+        }
+
+        #[test]
+        fn no_group_takes_the_project_out() {
+            let (mut app, _rx) = app();
+            new_group(&mut app, "work");
+            let work = group_label(&app, 0);
+            move_to(&mut app, 0, &work);
+
+            move_to(&mut app, 0, "no group");
+
+            assert_eq!(app.projects[0].group, None);
+        }
+
+        #[test]
+        fn clicking_the_header_collapses_and_expands_the_group() {
+            let (mut app, _rx) = app();
+            new_group(&mut app, "work");
+            let work = group_label(&app, 0);
+            move_to(&mut app, 0, &work);
+
+            click_sidebar(&mut app, SidebarRow::Group(0));
+            let collapsed = app.sidebar_rows();
+            click_sidebar(&mut app, SidebarRow::Group(0));
+
+            assert_eq!(
+                (collapsed, app.sidebar_rows()),
+                (vec![SidebarRow::Group(0)], vec![SidebarRow::Group(0), SidebarRow::Project(0)])
+            );
+        }
+
+        #[test]
+        fn the_group_menu_renames_it() {
+            let (mut app, _rx) = app();
+            new_group(&mut app, "work");
+            right_click_sidebar(&mut app, SidebarRow::Group(0));
+            pick(&mut app, "rename group");
+            clear_input(&mut app);
+
+            submit_text(&mut app, "clients");
+
+            assert_eq!(names(&app), ["clients"]);
+        }
+
+        #[test]
+        fn an_empty_rename_keeps_the_group_name() {
+            let (mut app, _rx) = app();
+            new_group(&mut app, "work");
+            right_click_sidebar(&mut app, SidebarRow::Group(0));
+            pick(&mut app, "rename group");
+            clear_input(&mut app);
+
+            send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+            assert_eq!(names(&app), ["work"]);
+        }
+
+        #[test]
+        fn deleting_a_group_keeps_its_projects_open_and_ungrouped() {
+            let (mut app, _rx) = app();
+            new_group(&mut app, "work");
+            let work = group_label(&app, 0);
+            move_to(&mut app, 0, &work);
+
+            right_click_sidebar(&mut app, SidebarRow::Group(0));
+            pick(&mut app, "delete group");
+
+            assert_eq!((app.groups.len(), app.projects.len(), app.projects[0].group), (0, 1, None));
+        }
+
+        #[test]
+        fn the_scroll_reveals_the_header_of_a_collapsed_group_holding_the_active_project() {
+            let (mut app, _rx, _dirs) = app_with(1);
+            for name in ["a", "b", "c", "d", "e", "f"] {
+                new_group(&mut app, name);
+            }
+            let last = group_label(&app, 5);
+            move_to(&mut app, 0, &last);
+            app.groups[5].entry.collapsed = true;
+            app.projects_scroll = 0;
+            app.followed = Focus::default();
+
+            app.follow(AREA);
+
+            assert!(
+                !ui::entry_row(list(), 1, &app.sidebar_rows(), app.projects_scroll, SidebarRow::Group(5)).is_empty()
+            );
+        }
+
+        #[test]
+        fn groups_survive_a_restore() {
+            let (mut app, _rx, dirs) = app_with(2);
+            new_group(&mut app, "work");
+            new_group(&mut app, "oss");
+            let oss = group_label(&app, 1);
+            move_to(&mut app, 1, &oss);
+            app.groups[1].entry.collapsed = true;
+            let saved = app.state();
+
+            let (mut restored, _rx2) = empty_app();
+            restored.restore(&saved, AREA).expect("restore");
+
+            let groups: Vec<&ui::GroupEntry> = restored.groups.iter().map(|g| &g.entry).collect();
+            let expected: Vec<&ui::GroupEntry> = app.groups.iter().map(|g| &g.entry).collect();
+            assert_eq!((groups, restored.sidebar_rows(), restored.state()), (expected, app.sidebar_rows(), saved));
+            drop(dirs);
+        }
+    }
+
     mod sidebar_clicks {
         use super::*;
 
         #[test]
         fn new_button_opens_the_folder_picker() {
             let (mut app, _rx) = app();
-            click(&mut app, ui::new_project_button(list(), 1, 1).as_position());
+            click_new_project(&mut app);
             assert_eq!((matches!(app.overlay, Some(Overlay::Picker(_))), app.projects.len()), (true, 1));
         }
 
@@ -2726,7 +3230,7 @@ mod tests {
             let (mut app, rx, _dirs) = app_with(3);
             let second = app.projects[1].id;
 
-            click(&mut app, ui::close_button(list(), 1, 2, 0, 1).as_position());
+            click(&mut app, ui::close_button(list(), 1, &plain(2), 0, 1).as_position());
 
             pump_until(&mut app, &rx, "second project closes", |a| a.projects.iter().all(|p| p.id != second));
         }
@@ -2734,7 +3238,7 @@ mod tests {
         #[test]
         fn closing_the_active_one_activates_the_previous() {
             let (mut app, rx, _dirs) = app_with(2);
-            click(&mut app, ui::close_button(list(), 1, 2, 0, 1).as_position());
+            click(&mut app, ui::close_button(list(), 1, &plain(2), 0, 1).as_position());
             pump_until(&mut app, &rx, "second project closes", |a| a.projects.len() == 1);
             assert_eq!(app.active, 0);
         }
@@ -2751,10 +3255,10 @@ mod tests {
             let (mut app, rx) = app();
             let home = TempDir::new();
             app.home = Some(home.path().to_path_buf());
-            click(&mut app, ui::close_button(list(), 1, 2, 0, 0).as_position());
+            click(&mut app, ui::close_button(list(), 1, &plain(2), 0, 0).as_position());
             pump_until(&mut app, &rx, "the project closes", App::is_empty);
 
-            click(&mut app, ui::new_project_button(list(), 1, 0).as_position());
+            click_new_project(&mut app);
             send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
             assert_eq!((app.projects.len(), app.active, app.projects[0].path.clone()), (1, 0, canonical(&home)));
@@ -2910,7 +3414,7 @@ mod tests {
             open_form(&mut app);
             type_text(&mut app, "feat/login");
 
-            click(&mut app, form_button(WORKSPACE_SUBMIT, 0));
+            click(&mut app, form_button(CREATE_SUBMIT, 0));
 
             pump_until(&mut app, &rx, "the workspace opens", |a| a.projects[0].workspaces.len() == 2);
             let repo_name = repo.path().file_name().expect("repo name");
@@ -3164,7 +3668,7 @@ mod tests {
             let (mut app, _rx, _dirs) = app_with(1);
             right_click(&mut app, entry_pos());
 
-            click(&mut app, ui::new_project_button(list(), 1, 1).as_position());
+            click(&mut app, ui::new_project_button(list(), 1, &plain(1)).as_position());
 
             assert_eq!((app.overlay.is_none(), app.projects.len()), (true, 1));
         }
@@ -3185,7 +3689,7 @@ mod tests {
 
         fn open_rename(app: &mut App, at: Position) {
             right_click(app, at);
-            let item = menu_item_pos(app);
+            let item = menu_item_at(app, 0);
             click(app, item);
         }
 
@@ -3280,11 +3784,11 @@ mod tests {
         }
 
         fn project(path: &Path, workspaces: Vec<WorkspaceState>) -> ProjectState {
-            ProjectState { path: path.to_path_buf(), name: None, workspaces, active: 0 }
+            ProjectState { path: path.to_path_buf(), name: None, group: None, workspaces, active: 0 }
         }
 
         fn saved(projects: Vec<ProjectState>, active: usize) -> State {
-            State { version: state::VERSION, projects, active, widths: None, issues: None }
+            State { version: state::VERSION, groups: Vec::new(), projects, active, widths: None, issues: None }
         }
 
         #[test]
@@ -3407,7 +3911,7 @@ mod tests {
                 std::fs::create_dir_all(root.join(folder)).expect("create folder");
             }
             let (mut app, rx) = app_in(&root.join("active"), no_config());
-            click(&mut app, ui::new_project_button(list(), 1, 1).as_position());
+            click_new_project(&mut app);
             Setup { app, _rx: rx, root, _tmp: tmp }
         }
 
@@ -3439,7 +3943,7 @@ mod tests {
             let home = TempDir::new();
             app.home = Some(home.path().to_path_buf());
 
-            click(&mut app, ui::new_project_button(list(), 1, 0).as_position());
+            click_new_project(&mut app);
 
             assert_eq!(picker(&app).dir(), home.path());
         }
@@ -3619,7 +4123,9 @@ mod tests {
             let (mut app, _rx, _dirs) = app_with(2);
             open_menu(&mut app);
             press(&mut app, small().back.as_position());
-            let first = ui::entry_row(small().list, small().pitch, 2, app.projects_scroll, 0).as_position();
+            let first =
+                ui::entry_row(small().list, small().pitch, &plain(2), app.projects_scroll, SidebarRow::Project(0))
+                    .as_position();
             press(&mut app, first);
             assert_eq!((app.active, app.nav), (0, Some(ui::Nav::Workspaces)));
         }
@@ -3717,7 +4223,10 @@ mod tests {
         fn the_active_project_is_scrolled_into_view() {
             let (mut app, _rx, _dirs) = app_with(4);
             app.follow(SHORT);
-            assert!(!ui::entry_row(short().list, short().pitch, 4, app.projects_scroll, 3).is_empty());
+            assert!(
+                !ui::entry_row(short().list, short().pitch, &plain(4), app.projects_scroll, SidebarRow::Project(3))
+                    .is_empty()
+            );
         }
 
         #[test]
@@ -3849,6 +4358,50 @@ mod tests {
             assert_eq!(active(&app), (0, 0, 0));
         }
 
+        fn with_group(app: &mut App, collapsed: bool) {
+            let id = app.add_group("clients".into());
+            app.groups[0].entry.collapsed = collapsed;
+            app.projects[0].group = Some(id);
+        }
+
+        #[test]
+        fn a_group_is_found_before_its_projects() {
+            let (mut app, _rx, _dirs) = named();
+            with_group(&mut app, false);
+            app.projects[1].name = Some("clients-api".into());
+            let found: Vec<(Kind, String)> =
+                app.search_results("clients").into_iter().map(|c| (c.kind, c.name)).collect();
+            let group = format!("{} clients", ui::GROUP_ICONS[0]);
+            assert_eq!(found, [(Kind::Group, group), (Kind::Project, "clients-api".into())]);
+        }
+
+        #[test]
+        fn a_project_shows_its_group_as_context() {
+            let (mut app, _rx, _dirs) = named();
+            with_group(&mut app, false);
+            let contexts: Vec<String> = app.search_results("alpha").into_iter().map(|c| c.context).collect();
+            assert_eq!(contexts, ["clients"]);
+        }
+
+        #[test]
+        fn going_to_a_group_expands_it_and_opens_its_first_project() {
+            let (mut app, _rx, _dirs) = named();
+            with_group(&mut app, true);
+            open_search(&mut app);
+            submit_text(&mut app, "clients");
+            assert_eq!((app.active, app.groups[0].entry.collapsed, query(&app)), (0, false, None));
+        }
+
+        #[test]
+        fn going_to_an_empty_group_expands_it_and_keeps_the_project() {
+            let (mut app, _rx, _dirs) = named();
+            app.add_group("empty".into());
+            app.groups[0].entry.collapsed = true;
+            open_search(&mut app);
+            submit_text(&mut app, "empty");
+            assert_eq!((app.active, app.groups[0].entry.collapsed), (1, false));
+        }
+
         #[test]
         fn enter_with_no_match_keeps_it_open() {
             let (mut app, _rx, _dirs) = named();
@@ -3880,8 +4433,9 @@ mod tests {
         fn clicking_outside_closes_it_without_acting() {
             let (mut app, _rx, _dirs) = named();
             open_search(&mut app);
-            click(&mut app, ui::new_project_button(list(), 1, 2).as_position());
-            assert!(app.overlay.is_none(), "the search is still open or the picker opened");
+            let new = new_project_pos(&app);
+            click(&mut app, new);
+            assert!(app.overlay.is_none(), "the search is still open or the new menu opened");
         }
 
         #[test]
@@ -4273,19 +4827,6 @@ mod tests {
             tab(app).layout.panes(pane()).into_iter().map(|(_, r)| r).collect()
         }
 
-        fn pane_menu(app: &App) -> Vec<&'static str> {
-            let Some(Overlay::PaneMenu { actions, .. }) = &app.overlay else { panic!("the pane menu is not open") };
-            actions.iter().map(|a| a.label()).collect()
-        }
-
-        fn pick(app: &mut App, label: &str) {
-            let Some(Overlay::PaneMenu { at, .. }) = &app.overlay else { panic!("the pane menu is not open") };
-            let labels = pane_menu(app);
-            let i = labels.iter().position(|l| *l == label).expect("the item is in the menu");
-            let item = ui::menu_item(ui::menu_area(AREA, *at, &labels), i).as_position();
-            click(app, item);
-        }
-
         fn split(app: &mut App, at: Position, label: &str) {
             right_click(app, at);
             pick(app, label);
@@ -4311,7 +4852,7 @@ mod tests {
         fn a_right_click_in_a_pane_opens_its_menu() {
             let (mut app, _rx) = app();
             right_click(&mut app, inside(pane()));
-            assert_eq!(pane_menu(&app), ["split right", "split down", "send right-clicks to the pane", "close pane"]);
+            assert_eq!(menu_labels(&app), ["split right", "split down", "send right-clicks to the pane", "close pane"]);
         }
 
         #[test]
@@ -4364,7 +4905,7 @@ mod tests {
             let (mut app, _rx) = split_right();
             let at = inside(rects(&app)[1]);
             right_click(&mut app, at);
-            assert_eq!(pane_menu(&app), ["split down", "send right-clicks to the pane", "close pane"]);
+            assert_eq!(menu_labels(&app), ["split down", "send right-clicks to the pane", "close pane"]);
         }
 
         #[test]
@@ -4416,7 +4957,7 @@ mod tests {
             let (mut app, _rx) = app();
             app.term_mut().expect("a pane").feed(b"\x1b[?1000h");
             right_click(&mut app, inside(pane()));
-            assert!(matches!(app.overlay, Some(Overlay::PaneMenu { .. })));
+            assert_eq!(menu_labels(&app).last().map(String::as_str), Some(PaneAction::Close.label()));
         }
 
         #[test]
@@ -4439,7 +4980,7 @@ mod tests {
 
             right_click(&mut app, inside(pane()));
 
-            assert!(pane_menu(&app).contains(&"use this menu on right-click"));
+            assert!(menu_labels(&app).iter().any(|l| l == "use this menu on right-click"));
         }
 
         #[test]
@@ -4540,10 +5081,21 @@ mod tests {
                 tabs: vec![tab],
                 active: 0,
             };
-            let project =
-                ProjectState { path: dir.path().to_path_buf(), name: None, workspaces: vec![workspace], active: 0 };
-            let saved =
-                State { version: state::VERSION, projects: vec![project], active: 0, widths: None, issues: None };
+            let project = ProjectState {
+                path: dir.path().to_path_buf(),
+                name: None,
+                group: None,
+                workspaces: vec![workspace],
+                active: 0,
+            };
+            let saved = State {
+                version: state::VERSION,
+                groups: Vec::new(),
+                projects: vec![project],
+                active: 0,
+                widths: None,
+                issues: None,
+            };
 
             app.restore(&saved, AREA).expect("restore");
 
@@ -4683,8 +5235,10 @@ mod tests {
             let dir = TempDir::new();
             let (mut app, _rx) = empty_app();
             let widths = ui::Widths { projects: 40, workspaces: 20 };
-            let project = ProjectState { path: dir.path().to_path_buf(), name: None, workspaces: vec![], active: 0 };
+            let project =
+                ProjectState { path: dir.path().to_path_buf(), name: None, group: None, workspaces: vec![], active: 0 };
             let saved = State {
+                groups: Vec::new(),
                 version: state::VERSION,
                 projects: vec![project],
                 active: 0,

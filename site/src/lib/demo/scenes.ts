@@ -160,7 +160,7 @@ export const SCENES: Record<string, Scene> = {
   },
   projects: {
     cols: 104,
-    rows: 15,
+    rows: 18,
     build: (app) => {
       world(app);
       return rect(0, 0, 32, app.rows);
@@ -168,7 +168,7 @@ export const SCENES: Record<string, Scene> = {
   },
   projectsLight: {
     cols: 104,
-    rows: 15,
+    rows: 18,
     light: true,
     build: (app) => {
       world(app);

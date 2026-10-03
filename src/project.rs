@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::split::{self, Dir, Node};
 use crate::term::Term;
+use crate::ui::GroupEntry;
 
 pub struct Tab {
     pub id: u64,
@@ -141,10 +142,16 @@ impl Workspace {
     }
 }
 
+pub struct Group {
+    pub id: u64,
+    pub entry: GroupEntry,
+}
+
 pub struct Project {
     pub id: u64,
     pub path: PathBuf,
     pub name: Option<String>,
+    pub group: Option<u64>,
     pub workspaces: Vec<Workspace>,
     pub active: usize,
     pub closing: bool,
@@ -152,7 +159,7 @@ pub struct Project {
 
 impl Project {
     pub fn new(id: u64, path: PathBuf, name: Option<String>) -> Self {
-        Self { id, path, name, workspaces: Vec::new(), active: 0, closing: false }
+        Self { id, path, name, group: None, workspaces: Vec::new(), active: 0, closing: false }
     }
 
     pub fn workspace(&self) -> Option<&Workspace> {

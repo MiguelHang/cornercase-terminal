@@ -33,9 +33,18 @@ export interface Workspace {
   behind?: number;
 }
 
+export interface Group {
+  id: number;
+  name: string;
+  icon: string;
+  colour: number;
+  collapsed: boolean;
+}
+
 export interface Project {
   id: number;
   name?: string;
+  group?: number;
   folder: string;
   root: string;
   repo: boolean;
@@ -45,11 +54,22 @@ export interface Project {
 }
 
 export type Target =
+  | { kind: 'group'; group: number }
   | { kind: 'project'; project: number }
   | { kind: 'workspace'; project: number; workspace: number }
   | { kind: 'tab'; project: number; workspace: number; tab: number };
 
 export type PaneAction = 'split right' | 'split down' | 'send right-clicks to the pane' | 'use this menu on right-click' | 'close pane';
+
+export type MenuAction =
+  | { kind: 'rename'; target: Target }
+  | { kind: 'moveToGroup'; project: number }
+  | { kind: 'setGroup'; project: number; group: number | null }
+  | { kind: 'groupStyle'; group: number }
+  | { kind: 'deleteGroup'; group: number }
+  | { kind: 'openProject' }
+  | { kind: 'newGroup' }
+  | { kind: 'pane'; pane: number; action: PaneAction };
 
 export interface PickItem {
   value: string;
@@ -88,8 +108,9 @@ export interface IssuesOverlay {
 }
 
 export type Overlay =
-  | { kind: 'menu'; at: Pos; target: Target }
-  | { kind: 'paneMenu'; at: Pos; pane: number; actions: PaneAction[] }
+  | { kind: 'menu'; at: Pos; actions: MenuAction[] }
+  | { kind: 'newGroup'; input: string }
+  | { kind: 'groupStyle'; group: number }
   | { kind: 'newWorkspace'; project: number; input: string; worktree: boolean | null; error?: string; creating?: boolean }
   | { kind: 'rename'; target: Target; input: string }
   | { kind: 'remove'; project: number; workspace: number; removing?: boolean }

@@ -1,6 +1,6 @@
 # cornercase
 
-A terminal multiplexer TUI in Rust. A sidebar of **projects** (folders), a column with the active project's **workspaces** (lines of work, optionally each in its own git worktree) and their **tabs** (one or more shells, split like Ghostty), and the active tab's panes. Everything is driven by mouse buttons. An issues modal (GitHub, Shortcut, Linear) reads an issue and starts a coding agent on it in its own worktree. A background server owns the shells, so closing the UI leaves them running and the next `cornercase` reattaches.
+A terminal multiplexer TUI in Rust. A sidebar of **projects** (folders, optionally in **groups** with an icon and a colour), a column with the active project's **workspaces** (lines of work, optionally each in its own git worktree) and their **tabs** (one or more shells, split like Ghostty), and the active tab's panes. Everything is driven by mouse buttons. An issues modal (GitHub, Shortcut, Linear) reads an issue and starts a coding agent on it in its own worktree. A background server owns the shells, so closing the UI leaves them running and the next `cornercase` reattaches.
 
 ## Commands
 
@@ -60,7 +60,7 @@ src/upstream.rs   `git fetch` and commits to pull per workspace (`↓n`)
 src/search.rs     global search: candidates, ranking, state
 src/picker.rs     folder picker state
 src/process.rs    a pid's cwd, name and arguments: /proc on Linux, libproc and sysctl on macOS
-src/project.rs    Project > Workspace > Tab > panes, labels, removal
+src/project.rs    Group, Project > Workspace > Tab > panes, labels, removal
 src/split.rs      a tab's split tree: rects, dividers, splitting, removing, ratios
 src/app.rs        App state; turns AppEvents into actions; builds the View
 src/term.rs       a shell in a PTY, its Emulator, and the reader thread
@@ -94,16 +94,18 @@ src/error.rs      library error type
 - **Compact mode** below 90 columns (`ui::compact_layout`): a top bar (` ≡ `, `project › workspace › tab`, ` ⌕ `) and a full-screen menu showing one column at a time. Every clickable item is a 3-row band (`Areas::pitch`). Both columns' areas share one rect and `Areas::shown(nav)` blanks the hidden one, so drawing and hit testing reuse the wide-mode code.
 
 **Hierarchy (`project.rs`)**
-- Project (a canonicalized folder) > workspace (the project folder, or its own git worktree) > tab > panes. Every level has an id from one counter; menus, forms and background jobs refer to ids, never indices.
+- Optional group > project (a canonicalized folder) > workspace (the project folder, or its own git worktree) > tab > panes. Every level has an id from one counter; menus, forms and background jobs refer to ids, never indices.
 - Labels: custom name, else folder name (project), branch or `default` (workspace), foreground program (tab).
 - Closing kills processes; removal waits for `Exited`, never synchronous. Closing the last tab keeps the workspace; closing the last workspace keeps the project.
+- **Groups**: one level, no nesting, in creation order. A project holds `group: Option<u64>`; the projects column is `ui::sidebar_rows` (loose projects first, then per group a gap, the header and, unless collapsed, its projects), which drawing, hit testing and `App::follow` share. A collapsed group holding the active project gets the `▌` on its header. Deleting a group only ungroups its projects. Icons are a fixed set of one-cell symbols (`ui::GROUP_ICONS`, no emoji or Nerd Font glyphs, whose width varies); colours are palette indices (`ui::GROUP_COLOURS`, no greys, black or white, which vanish on some themes). A new group gets the next icon and colour, then opens the icon and colour modal, whose clicks apply at once.
+- Menus are one `Overlay::Menu { actions: Vec<MenuAction> }`, labels from `App::menu_label`; a submenu (move to group) replaces the menu at the same spot. `+ new project` opens a menu (open project / new group).
 
 **Splits (`split.rs`)**
 - A binary tree (`Leaf` / `Split { dir, ratio, first, second }`). Right-click in a pane opens split/close/right-click-passthrough; this works even when the program captured the mouse, since almost no program uses the right button.
 - A vertical divider is followed by a blank column so text does not touch it. Inactive panes are dimmed (configurable). A left click on an inactive pane only focuses it. Dividers drag like column borders.
 
 **Search (`search.rs`)**
-- One global search across projects, workspaces (label and branch) and tabs (label and their workspace's keys). Ranking: exact, prefix, substring; ties by kind then sidebar order. Results are recomputed on every key and draw; the query is never kept after closing.
+- One global search across groups, projects, workspaces (label and branch) and tabs (label and their workspace's keys). Ranking: exact, prefix, substring; ties by kind (group, project, workspace, tab) then sidebar order. A group result expands it and activates its first project. Results are recomputed on every key and draw; the query is never kept after closing.
 
 **Folder picker (`picker.rs`)**
 - Starts in the parent of the active project. `Enter` goes into the selected folder, or opens the current one when nothing is selected. Typing a path walks it; a paste goes through the same path (e2e opens projects this way). Folders are read on the main thread.
@@ -156,9 +158,9 @@ src/error.rs      library error type
 - The running server keeps the old code. ` restart now ` saves the session, sends `ServerMessage::Restart(path)`, and each client `exec`s the new binary, which starts a new server that restores the session. A new client rejected by an older server asks `[y/N]` on the plain terminal before running `kill-server`.
 
 **Saved session (`state.rs`)**
-- Projects, workspaces, tabs, panes (cwd), split layouts, custom names, active children and column widths, in `$XDG_STATE_HOME/cornercase/session.json` (or next to the socket). Processes are not restored; each pane gets a new shell in its folder.
+- Groups (name, icon, colour, collapsed), projects (with their group's index), workspaces, tabs, panes (cwd), split layouts, custom names, active children and column widths, in `$XDG_STATE_HOME/cornercase/session.json` (or next to the socket). Processes are not restored; each pane gets a new shell in its folder.
 - Saved only once the state is stable for 2 s, so the burst of `Exited` events at logout does not save an empty session.
-- Only a fresh server restores, on its first client's `Hello`. Missing folders are skipped. `VERSION` is 3; older versions are migrated.
+- Only a fresh server restores, on its first client's `Hello`. Missing folders are skipped. `VERSION` is 4; older versions are migrated (a version 3 file is read as is, every project ungrouped).
 
 ## Tests
 
