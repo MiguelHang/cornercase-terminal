@@ -1,0 +1,8 @@
+{
+  "path": ["src", "tests"],
+  "format": ["rust"],
+  "minTokens": 50,
+  "threshold": 1,
+  "reporters": ["console"],
+  "gitignore": true
+}

@@ -1,0 +1,4948 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
+
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::Frame;
+use ratatui::layout::{Position, Rect};
+
+use crate::agents;
+use crate::clipboard;
+use crate::config::{self, Config};
+use crate::error::Result;
+use crate::git;
+use crate::host_theme::HostTheme;
+use crate::issues::browser::{self, Action, Browser, Connection, Place, Screen, Tab as IssueTab};
+use crate::issues::cache::{Cache as IssueCache, Key as CacheKey};
+use crate::issues::{
+    self, Account, Client, Detail, Issue, Listed, People, Person, Query, Secret, Source, linear, shortcut,
+};
+use crate::launch::{self, Launch, Step};
+use crate::markdown;
+use crate::mouse;
+use crate::picker::Picker;
+use crate::project::{Project, Tab, Workspace, shift_active};
+use crate::search::{self, Candidate, Goto, Kind, Search};
+use crate::secrets;
+use crate::settings::{self, Page, Settings, Status};
+use crate::split::{self, Dir};
+use crate::state::{self, IssuesState, PaneState, ProjectState, State, TabState, WorkspaceState};
+use crate::term::{SpawnOptions, Term};
+use crate::ui::{self, FormHit, PickerHit, SidebarHit, WorkspaceHit, WorkspaceRow};
+use crate::worktree;
+
+#[derive(Debug)]
+pub enum AppEvent {
+    Input(Event),
+    Output(u64, Vec<u8>),
+    Exited(u64),
+    WorktreeCreated { project: u64, result: Result<PathBuf>, start: Option<Start> },
+    WorktreeRemoved { project: u64, workspace: u64, result: Result<()> },
+    IssuesLoaded { project: u64, source: Source, query: Query, result: Result<Listed> },
+    IssueRead { source: Source, key: String, result: Result<Detail> },
+    TokenChecked { source: Source, token: Secret, result: Result<Account> },
+    PeopleLoaded { project: u64, source: Source, result: Result<Vec<Person>> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Start {
+    name: String,
+    spec: launch::Spec,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    Project(u64),
+    Workspace(u64, u64),
+    Tab(u64, u64, u64),
+}
+
+impl Target {
+    fn rename_label(self) -> &'static str {
+        match self {
+            Self::Project(_) => "rename project",
+            Self::Workspace(..) => "rename workspace",
+            Self::Tab(..) => "rename tab",
+        }
+    }
+
+    fn rename_hint(self) -> &'static str {
+        match self {
+            Self::Project(_) => "leave it empty to use the folder name",
+            Self::Workspace(..) => "leave it empty to use the branch name",
+            Self::Tab(..) => "leave it empty to use the program name",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneAction {
+    Split(Dir),
+    RightClicksToPane,
+    RightClicksToMenu,
+    Close,
+}
+
+impl PaneAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Split(Dir::Right) => "split right",
+            Self::Split(Dir::Down) => "split down",
+            Self::RightClicksToPane => "send right-clicks to the pane",
+            Self::RightClicksToMenu => "use this menu on right-click",
+            Self::Close => "close pane",
+        }
+    }
+}
+
+const WORKSPACE_SUBMIT: &str = "create";
+const RENAME_SUBMIT: &str = "rename";
+const REMOVE_SUBMIT: &str = "remove";
+const FORCE_REMOVE_SUBMIT: &str = "remove anyway";
+const PICKER_SUBMIT: &str = "open";
+const WORKTREE_TOGGLE: &str = "with its own worktree";
+const WHEEL_ROWS: isize = 3;
+const SYNC_EVERY: Duration = Duration::from_secs(1);
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+const TOAST_FOR: Duration = Duration::from_secs(2);
+const COPIED: &str = "copied to clipboard";
+
+#[derive(Debug)]
+enum Overlay {
+    Menu { at: Position, target: Target },
+    PaneMenu { at: Position, pane: u64, actions: Vec<PaneAction> },
+    NewWorkspace { project: u64, input: String, worktree: Option<bool>, error: Option<String>, creating: bool },
+    Settings(Box<Settings>),
+    Rename { target: Target, input: String },
+    RemoveWorkspace { project: u64, workspace: u64, error: Option<String>, force: bool, removing: bool },
+    Picker(Picker),
+    Issues(Box<Browser>),
+    Search(Search),
+}
+
+impl Overlay {
+    fn submit_label(&self) -> &'static str {
+        match self {
+            Self::Rename { .. } => RENAME_SUBMIT,
+            Self::RemoveWorkspace { force: true, .. } => FORCE_REMOVE_SUBMIT,
+            Self::RemoveWorkspace { .. } => REMOVE_SUBMIT,
+            _ => WORKSPACE_SUBMIT,
+        }
+    }
+
+    fn input(&mut self) -> Option<&mut String> {
+        match self {
+            Self::NewWorkspace { input, error, creating: false, .. } => {
+                *error = None;
+                Some(input)
+            }
+            Self::Rename { input, .. } => Some(input),
+            _ => None,
+        }
+    }
+
+    fn busy(&self) -> bool {
+        matches!(self, Self::NewWorkspace { creating: true, .. } | Self::RemoveWorkspace { removing: true, .. })
+            || matches!(self, Self::Issues(b) if b.starting)
+            || matches!(self, Self::Settings(s) if s.busy())
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Focus {
+    project: Option<u64>,
+    workspace: Option<u64>,
+    tab: Option<u64>,
+}
+
+fn wheel(kind: MouseEventKind) -> Option<isize> {
+    match kind {
+        MouseEventKind::ScrollUp => Some(-WHEEL_ROWS),
+        MouseEventKind::ScrollDown => Some(WHEEL_ROWS),
+        _ => None,
+    }
+}
+
+pub struct App {
+    projects: Vec<Project>,
+    active: usize,
+    projects_scroll: usize,
+    workspaces_scroll: usize,
+    followed: Focus,
+    nav: Option<ui::Nav>,
+    next_id: u64,
+    detach: bool,
+    hover: Option<Position>,
+    widths: ui::Widths,
+    resizing: Option<ui::Border>,
+    border_click: Option<(ui::Border, Instant)>,
+    divider_drag: Option<(u64, Vec<bool>)>,
+    divider_click: Option<(u64, Vec<bool>, Instant)>,
+    selecting: Option<u64>,
+    toast: Option<(&'static str, Instant)>,
+    overlay: Option<Overlay>,
+    config: Config,
+    config_path: PathBuf,
+    shell: String,
+    home: Option<PathBuf>,
+    theme: HostTheme,
+    tx: Sender<AppEvent>,
+    synced: Option<Instant>,
+    issue_cache: IssueCache,
+    issue_closed: bool,
+    issue_people: People,
+    people_cache: HashMap<(Source, Option<u64>), Vec<Person>>,
+    host_writes: Vec<Vec<u8>>,
+    accounts: HashMap<Source, Account>,
+    issue_tab: Option<IssueTab>,
+    settings_page: Page,
+    apis: Apis,
+    env_tokens: HashMap<Source, String>,
+    secrets_path: PathBuf,
+    launches: Vec<Launch>,
+}
+
+struct Apis {
+    shortcut: String,
+    linear: String,
+}
+
+impl Apis {
+    fn from_env() -> Self {
+        let var = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.into());
+        Self {
+            shortcut: var(shortcut::API_ENV, shortcut::DEFAULT_API),
+            linear: var(linear::API_ENV, linear::DEFAULT_API),
+        }
+    }
+}
+
+fn env_tokens() -> HashMap<Source, String> {
+    Source::REMOTE
+        .into_iter()
+        .filter_map(|source| {
+            let token = std::env::var(source.token_env()?).ok()?;
+            let token = token.trim();
+            (!token.is_empty()).then(|| (source, token.to_string()))
+        })
+        .collect()
+}
+
+impl App {
+    pub fn new(shell: String, theme: HostTheme, config_path: PathBuf, tx: Sender<AppEvent>) -> Self {
+        let secrets_path = secrets::path(&config_path);
+        Self {
+            projects: Vec::new(),
+            active: 0,
+            projects_scroll: 0,
+            workspaces_scroll: 0,
+            followed: Focus::default(),
+            nav: None,
+            next_id: 1,
+            detach: false,
+            hover: None,
+            widths: ui::Widths::default(),
+            resizing: None,
+            border_click: None,
+            divider_drag: None,
+            divider_click: None,
+            selecting: None,
+            toast: None,
+            overlay: None,
+            config: config::load(&config_path),
+            config_path,
+            shell,
+            home: std::env::var_os("HOME").map(PathBuf::from),
+            theme,
+            tx,
+            synced: None,
+            issue_cache: IssueCache::new(None),
+            issue_closed: false,
+            issue_people: People::default(),
+            people_cache: HashMap::new(),
+            host_writes: Vec::new(),
+            accounts: HashMap::new(),
+            issue_tab: None,
+            settings_page: Page::default(),
+            apis: Apis::from_env(),
+            env_tokens: env_tokens(),
+            secrets_path,
+            launches: Vec::new(),
+        }
+    }
+
+    pub fn take_detach(&mut self) -> bool {
+        std::mem::take(&mut self.detach)
+    }
+
+    pub fn set_theme(&mut self, theme: HostTheme) {
+        self.theme = theme;
+    }
+
+    fn layout(&self, area: Rect) -> ui::Areas {
+        ui::layout(area, self.widths)
+    }
+
+    fn pane_size(&self, area: Rect) -> (u16, u16) {
+        let pane = self.layout(area).pane;
+        (pane.height.max(1), pane.width.max(1))
+    }
+
+    pub fn resize(&mut self, area: Rect) {
+        let pane = self.layout(area).pane;
+        let tabs = self.projects.iter_mut().flat_map(|p| &mut p.workspaces).flat_map(|w| &mut w.tabs);
+        for tab in tabs {
+            for (id, r) in tab.layout.panes(pane) {
+                if let Some(term) = tab.panes.iter_mut().find(|t| t.id == id) {
+                    term.resize(r.height.max(1), r.width.max(1));
+                }
+            }
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.projects.is_empty()
+    }
+
+    pub fn open_here(&mut self, area: Rect) -> Result<()> {
+        let here = std::env::current_dir().ok().or_else(|| self.home.clone()).unwrap_or_else(|| PathBuf::from("/"));
+        self.open_project(here, area)
+    }
+
+    pub fn refresh(&mut self, now: Instant) {
+        self.drive_launches(now);
+        if self.synced.is_some_and(|at| now.duration_since(at) < SYNC_EVERY) {
+            return;
+        }
+        self.synced = Some(now);
+        self.sync_worktrees();
+    }
+
+    fn drive_launches(&mut self, now: Instant) {
+        if self.launches.is_empty() {
+            return;
+        }
+        let config = &self.config;
+        let trust = |screen: &str| agents::trust_prompt(config, screen);
+        let mut finished = Vec::new();
+        for (i, launch) in self.launches.iter_mut().enumerate() {
+            let Some(term) = self.projects.iter_mut().flat_map(Project::terms_mut).find(|t| t.id == launch.term) else {
+                finished.push(i);
+                continue;
+            };
+            let shell_in_foreground = term.shell_in_foreground();
+            let bracketed_paste = term.emulator.bracketed_paste();
+            let application_cursor = term.emulator.application_cursor();
+            let emulator = &mut term.emulator;
+            let mut screen = || emulator.snapshot().map(|s| s.contents()).unwrap_or_default();
+            let mut seen = launch::Seen {
+                shell_in_foreground,
+                bracketed_paste,
+                application_cursor,
+                screen: &mut screen,
+                trust_prompt: &trust,
+            };
+            match launch.step(now, &mut seen) {
+                Step::Wait => {}
+                Step::Write(bytes) => term.write(&bytes),
+                Step::Done(bytes) => {
+                    term.write(&bytes);
+                    finished.push(i);
+                }
+                Step::Abandon => {
+                    eprintln!("cornercase server: the agent did not start in terminal {}", launch.term);
+                    finished.push(i);
+                }
+            }
+        }
+        for i in finished.into_iter().rev() {
+            self.launches.remove(i);
+        }
+    }
+
+    fn sync_worktrees(&mut self) {
+        for p in 0..self.projects.len() {
+            let project = &mut self.projects[p];
+            if !git::is_repo_root(&project.path) {
+                continue;
+            }
+            let linked = git::linked_worktrees(&project.path);
+            let gone: Vec<usize> = (0..project.workspaces.len())
+                .rev()
+                .filter(|&w| {
+                    let ws = &project.workspaces[w];
+                    ws.worktree && ws.tabs.is_empty() && !ws.path.is_dir()
+                })
+                .collect();
+            for w in gone {
+                project.remove_workspace(w);
+            }
+            let missing: Vec<PathBuf> =
+                linked.into_iter().filter(|path| project.workspaces.iter().all(|w| &w.path != path)).collect();
+            for path in missing {
+                let id = self.take_id();
+                self.projects[p].workspaces.push(Workspace::new(id, path, None, true));
+            }
+        }
+    }
+
+    fn take_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    fn spawn(&mut self, area: Rect, cwd: PathBuf) -> Result<Term> {
+        let (rows, cols) = self.pane_size(area);
+        let id = self.take_id();
+        let opts = SpawnOptions { id, shell: &self.shell, rows, cols, cwd: Some(cwd), theme: &self.theme };
+        Term::spawn(opts, self.tx.clone())
+    }
+
+    fn new_tab(&mut self, area: Rect, cwd: PathBuf, name: Option<String>) -> Result<Tab> {
+        let term = self.spawn(area, cwd)?;
+        Ok(Tab::new(self.take_id(), name, term))
+    }
+
+    fn new_workspace(&mut self, area: Rect, path: PathBuf, name: Option<String>, worktree: bool) -> Result<Workspace> {
+        let tab = self.new_tab(area, path.clone(), None)?;
+        let mut workspace = Workspace::new(self.take_id(), path, name, worktree);
+        workspace.tabs.push(tab);
+        Ok(workspace)
+    }
+
+    fn open_project(&mut self, dir: PathBuf, area: Rect) -> Result<()> {
+        let path = dir.canonicalize().unwrap_or(dir);
+        if let Some(i) = self.projects.iter().position(|p| p.path == path) {
+            self.active = i;
+            return Ok(());
+        }
+        let workspace = self.new_workspace(area, path.clone(), None, false)?;
+        let mut project = Project::new(self.take_id(), path, None);
+        project.workspaces.push(workspace);
+        self.projects.push(project);
+        self.active = self.projects.len() - 1;
+        self.sync_worktrees();
+        Ok(())
+    }
+
+    fn project(&self) -> Option<&Project> {
+        self.projects.get(self.active)
+    }
+
+    fn project_mut(&mut self) -> Option<&mut Project> {
+        self.projects.get_mut(self.active)
+    }
+
+    fn tab(&self) -> Option<&Tab> {
+        self.project().and_then(Project::workspace).and_then(Workspace::tab)
+    }
+
+    fn focus(&self) -> Focus {
+        let project = self.project();
+        let workspace = project.and_then(Project::workspace);
+        Focus {
+            project: project.map(|p| p.id),
+            workspace: workspace.map(|w| w.id),
+            tab: workspace.and_then(Workspace::tab).map(|t| t.id),
+        }
+    }
+
+    fn follow(&mut self, area: Rect) {
+        let focus = self.focus();
+        if focus == self.followed {
+            return;
+        }
+        let areas = self.layout(area);
+        if focus.project != self.followed.project {
+            let rows = ui::project_rows(areas.list, areas.pitch, self.projects.len(), self.projects_scroll);
+            self.projects_scroll = rows.reveal(self.active);
+        }
+        self.followed = focus;
+        let Some(project) = self.project() else { return };
+        let w = project.active;
+        let mut shown = vec![WorkspaceRow::Workspace(w)];
+        if let Some(workspace) = project.workspace().filter(|w| !w.tabs.is_empty()) {
+            shown.push(WorkspaceRow::Tab(w, workspace.active));
+        }
+        let tabs = self.tab_counts();
+        let rows = ui::workspace_rows(&tabs);
+        for row in shown {
+            if let Some(i) = rows.iter().position(|r| *r == row) {
+                let layout = ui::workspace_layout(areas.workspaces_list, areas.pitch, &tabs, self.workspaces_scroll);
+                self.workspaces_scroll = layout.reveal(i);
+            }
+        }
+    }
+
+    fn tab_mut(&mut self) -> Option<&mut Tab> {
+        self.project_mut().and_then(Project::workspace_mut).and_then(Workspace::tab_mut)
+    }
+
+    fn term(&self) -> Option<&Term> {
+        self.tab().and_then(Tab::pane)
+    }
+
+    fn term_mut(&mut self) -> Option<&mut Term> {
+        self.tab_mut().and_then(Tab::pane_mut)
+    }
+
+    fn tab_with_pane(&mut self, pane: u64) -> Option<(&Path, &mut Tab)> {
+        self.projects.iter_mut().flat_map(|p| &mut p.workspaces).find_map(|w| {
+            let tab = w.tabs.iter_mut().find(|t| t.panes.iter().any(|term| term.id == pane))?;
+            Some((w.path.as_path(), tab))
+        })
+    }
+
+    fn project_index(&self, id: u64) -> Option<usize> {
+        self.projects.iter().position(|p| p.id == id)
+    }
+
+    fn workspace_index(&self, project: u64, workspace: u64) -> Option<(usize, usize)> {
+        let p = self.project_index(project)?;
+        let w = self.projects[p].workspaces.iter().position(|w| w.id == workspace)?;
+        Some((p, w))
+    }
+
+    fn project_label(&self, project: &Project) -> String {
+        project.name.clone().unwrap_or_else(|| ui::folder_name(&project.path, self.home.as_deref()))
+    }
+
+    pub fn state(&self) -> State {
+        let projects = self
+            .projects
+            .iter()
+            .map(|p| ProjectState {
+                path: p.path.clone(),
+                name: p.name.clone(),
+                workspaces: p
+                    .workspaces
+                    .iter()
+                    .map(|w| WorkspaceState {
+                        path: w.path.clone(),
+                        name: w.name.clone(),
+                        worktree: w.worktree,
+                        tabs: w
+                            .tabs
+                            .iter()
+                            .map(|t| TabState {
+                                name: t.name.clone(),
+                                panes: t
+                                    .panes
+                                    .iter()
+                                    .map(|term| PaneState {
+                                        cwd: term.cwd(),
+                                        right_clicks: t.right_clicks_to_pane(term.id),
+                                    })
+                                    .collect(),
+                                active: t.active,
+                                layout: (t.panes.len() > 1)
+                                    .then(|| t.layout.map(&|id| t.panes.iter().position(|term| term.id == id)))
+                                    .flatten(),
+                            })
+                            .collect(),
+                        active: w.active,
+                    })
+                    .collect(),
+                active: p.active,
+            })
+            .collect();
+        let chosen = self.issue_tab.is_some() || self.issue_closed || self.issue_people != People::default();
+        let issues = chosen.then(|| IssuesState {
+            tab: self.issue_tab.map(|t| t.id().to_string()),
+            closed: self.issue_closed,
+            people: self.issue_people.clone(),
+        });
+        State { version: state::VERSION, projects, active: self.active, widths: Some(self.widths), issues }
+    }
+
+    pub fn restore(&mut self, saved: &State, area: Rect) -> Result<()> {
+        self.widths = saved.widths.unwrap_or_default();
+        if let Some(issues) = &saved.issues {
+            self.issue_tab = issues.tab.as_deref().and_then(IssueTab::from_id);
+            self.issue_closed = issues.closed;
+            self.issue_people = issues.people.clone();
+        }
+        for (i, saved_project) in saved.projects.iter().enumerate() {
+            let path = saved_project.path.canonicalize().unwrap_or_else(|_| saved_project.path.clone());
+            if !path.is_dir() || self.projects.iter().any(|p| p.path == path) {
+                continue;
+            }
+            let mut project = Project::new(self.take_id(), path, saved_project.name.clone());
+            for saved_ws in &saved_project.workspaces {
+                if let Some(workspace) = self.restore_workspace(saved_ws, area)? {
+                    project.workspaces.push(workspace);
+                }
+            }
+            project.active = saved_project.active.min(project.workspaces.len().saturating_sub(1));
+            if i <= saved.active {
+                self.active = self.projects.len();
+            }
+            self.projects.push(project);
+        }
+        self.sync_worktrees();
+        Ok(())
+    }
+
+    fn restore_workspace(&mut self, saved: &WorkspaceState, area: Rect) -> Result<Option<Workspace>> {
+        let path = saved.path.canonicalize().unwrap_or_else(|_| saved.path.clone());
+        if !path.is_dir() {
+            return Ok(None);
+        }
+        let mut workspace = Workspace::new(self.take_id(), path.clone(), saved.name.clone(), saved.worktree);
+        for saved_tab in saved.tabs.iter().filter(|t| !t.panes.is_empty()) {
+            let mut panes = Vec::new();
+            for pane in &saved_tab.panes {
+                let cwd = pane.cwd.clone().filter(|dir| dir.is_dir()).unwrap_or_else(|| path.clone());
+                panes.push(self.spawn(area, cwd)?);
+            }
+            let mut tab = Tab::restored(self.take_id(), saved_tab.name.clone(), panes, saved_tab.layout.as_ref());
+            tab.active = saved_tab.active.min(tab.panes.len() - 1);
+            tab.right_clicks =
+                saved_tab.panes.iter().zip(&tab.panes).filter(|(s, _)| s.right_clicks).map(|(_, t)| t.id).collect();
+            workspace.tabs.push(tab);
+        }
+        workspace.active = saved.active.min(workspace.tabs.len().saturating_sub(1));
+        Ok(Some(workspace))
+    }
+
+    fn remove(&mut self, id: u64) {
+        let Some(p) = self.projects.iter_mut().position(|p| p.remove_term(id)) else { return };
+        if self.projects[p].closing && !self.projects[p].has_terms() {
+            self.remove_project(p);
+        }
+    }
+
+    fn remove_project(&mut self, p: usize) {
+        self.projects.remove(p);
+        shift_active(&mut self.active, p);
+    }
+
+    pub fn handle_event(&mut self, ev: AppEvent, area: Rect) -> Result<()> {
+        match ev {
+            AppEvent::Input(Event::Key(key)) if key.kind == KeyEventKind::Press => self.handle_key(key, area)?,
+            AppEvent::Input(Event::Mouse(ev)) => self.handle_mouse(ev, area)?,
+            AppEvent::Input(Event::Paste(text)) => self.handle_paste(&text),
+            AppEvent::Exited(id) => self.remove(id),
+            AppEvent::WorktreeCreated { project, result, start } => {
+                self.worktree_created(project, result, start, area)?;
+            }
+            AppEvent::WorktreeRemoved { project, workspace, result } => {
+                self.worktree_removed(project, workspace, result);
+            }
+            AppEvent::IssuesLoaded { project, source, query, result } => {
+                self.issues_loaded(project, source, &query, result);
+            }
+            AppEvent::IssueRead { source, key, result } => {
+                if let Some(Overlay::Issues(b)) = &mut self.overlay {
+                    b.read_done(source, &key, result.map_err(|e| e.to_string()));
+                }
+            }
+            AppEvent::TokenChecked { source, token, result } => self.token_checked(source, &token, result, area)?,
+            AppEvent::PeopleLoaded { project, source, result } => self.people_loaded(project, source, result),
+            AppEvent::Output(id, bytes) => {
+                if let Some(launch) = self.launches.iter_mut().find(|l| l.term == id) {
+                    launch.output(Instant::now());
+                }
+                if let Some(t) = self.projects.iter_mut().flat_map(Project::terms_mut).find(|t| t.id == id) {
+                    t.feed(&bytes);
+                    for text in t.emulator.take_copied() {
+                        copy(&mut self.host_writes, &mut self.toast, &text);
+                    }
+                }
+            }
+            AppEvent::Input(_) => {}
+        }
+        Ok(())
+    }
+
+    fn handle_key(&mut self, key: KeyEvent, area: Rect) -> Result<()> {
+        match &self.overlay {
+            Some(Overlay::Menu { .. } | Overlay::PaneMenu { .. }) if key.code == KeyCode::Esc => self.overlay = None,
+            None if self.nav.is_some() && key.code == KeyCode::Esc => self.nav = None,
+            Some(Overlay::Picker(_)) => return self.picker_key(key, area),
+            Some(Overlay::Issues(_)) => return self.issues_key(key, area),
+            Some(Overlay::Settings(_)) => self.settings_key(key, area),
+            Some(Overlay::Search(_)) => self.search_key(key, area),
+            Some(Overlay::Menu { .. } | Overlay::PaneMenu { .. }) | None => self.forward_key(key),
+            Some(_) => return self.form_key(key, area),
+        }
+        Ok(())
+    }
+
+    fn forward_key(&mut self, key: KeyEvent) {
+        let Some(term) = self.term_mut() else { return };
+        let bytes = term.emulator.encode_key(key);
+        if !bytes.is_empty() {
+            term.write(&bytes);
+        }
+    }
+
+    fn handle_mouse(&mut self, ev: MouseEvent, area: Rect) -> Result<()> {
+        let areas = self.layout(area).shown(self.nav);
+        let pos = Position::new(ev.column, ev.row);
+        self.hover = Some(pos);
+
+        if let Some(border) = self.resizing {
+            self.drag_border(border, ev, area);
+            return Ok(());
+        }
+        if self.divider_drag.is_some() {
+            self.drag_divider(ev, areas.pane);
+            return Ok(());
+        }
+        if let Some(term) = self.selecting {
+            let pane = self.tab().and_then(|t| t.layout.pane(areas.pane, term)).unwrap_or(areas.pane);
+            self.drag_selection(term, ev, pane);
+            return Ok(());
+        }
+        if self.overlay.is_some() {
+            return self.overlay_mouse(ev, pos, area);
+        }
+        if let Some(delta) = wheel(ev.kind)
+            && self.scroll_column(&areas, pos, delta)
+        {
+            return Ok(());
+        }
+
+        let left = ev.kind == MouseEventKind::Down(MouseButton::Left);
+        let right = ev.kind == MouseEventKind::Down(MouseButton::Right);
+        if let Some(border) = areas.border_hit(pos) {
+            if left {
+                self.press_border(border, Instant::now());
+            }
+            return Ok(());
+        }
+        if areas.search_button.contains(pos) {
+            if left {
+                self.overlay = Some(Overlay::Search(Search::default()));
+            }
+            return Ok(());
+        }
+        if areas.bar.contains(pos) {
+            if left {
+                self.toggle_nav();
+            }
+            return Ok(());
+        }
+        if areas.back.contains(pos) {
+            if left {
+                self.nav = Some(ui::Nav::Projects);
+            }
+            return Ok(());
+        }
+        if areas.quit.contains(pos) {
+            if left {
+                self.detach = true;
+                self.nav = None;
+            }
+            return Ok(());
+        }
+        if areas.settings.contains(pos) {
+            if left {
+                self.nav = None;
+                self.open_settings();
+            }
+            return Ok(());
+        }
+        if areas.list.contains(pos) {
+            if left {
+                self.click_projects(areas.list, areas.pitch, pos);
+            } else if right {
+                self.open_project_menu(areas.list, areas.pitch, pos);
+            }
+            return Ok(());
+        }
+        if areas.issues.contains(pos) {
+            if left && self.issues_available() {
+                self.nav = None;
+                return self.open_issues(area);
+            }
+            return Ok(());
+        }
+        if areas.workspaces.contains(pos) {
+            if left && areas.workspaces_list.contains(pos) {
+                return self.click_workspaces(areas.workspaces_list, areas.pitch, pos, area);
+            }
+            if right && areas.workspaces_list.contains(pos) {
+                self.open_workspace_menu(areas.workspaces_list, areas.pitch, pos);
+            }
+            return Ok(());
+        }
+        if self.nav.is_some() && areas.compact() {
+            return Ok(());
+        }
+        self.pane_mouse(ev, pos, areas.pane);
+        Ok(())
+    }
+
+    fn scroll_column(&mut self, areas: &ui::Areas, pos: Position, delta: isize) -> bool {
+        let items = if areas.pitch > 1 { delta.signum() } else { delta };
+        if areas.sidebar.contains(pos) {
+            let rows = ui::project_rows(areas.list, areas.pitch, self.projects.len(), self.projects_scroll);
+            self.projects_scroll = rows.scrolled(items);
+            true
+        } else if areas.workspaces.contains(pos) {
+            let tabs = self.tab_counts();
+            let layout = ui::workspace_layout(areas.workspaces_list, areas.pitch, &tabs, self.workspaces_scroll);
+            self.workspaces_scroll = layout.scrolled(items);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn toggle_nav(&mut self) {
+        self.nav = match self.nav {
+            Some(_) => None,
+            None if self.project().is_some() => Some(ui::Nav::Workspaces),
+            None => Some(ui::Nav::Projects),
+        };
+        self.followed = Focus::default();
+    }
+
+    fn pane_mouse(&mut self, ev: MouseEvent, pos: Position, area: Rect) {
+        let left = ev.kind == MouseEventKind::Down(MouseButton::Left);
+        let right = ev.kind == MouseEventKind::Down(MouseButton::Right);
+        let Some(tab) = self.tab() else { return };
+        let (tab_id, layout) = (tab.id, &tab.layout);
+        let continues_inside = matches!(ev.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_));
+        if !continues_inside && let Some(divider) = layout.divider_at(area, pos) {
+            if left {
+                self.press_divider(tab_id, divider.path, Instant::now());
+            }
+            return;
+        }
+        let Some(active) = tab.pane().map(|t| t.id) else { return };
+        let under = layout.pane_at(area, pos);
+        if !continues_inside {
+            let Some(id) = under else { return };
+            let program_takes_right = tab.right_clicks_to_pane(id)
+                && tab.panes.iter().any(|t| t.id == id && t.emulator.mouse_mode() != mouse::MouseMode::None);
+            if right && !program_takes_right {
+                self.open_pane_menu(id, pos, area);
+                return;
+            }
+            if id != active {
+                if (left || right)
+                    && let Some(t) = self.tab_mut()
+                {
+                    t.focus(id);
+                }
+                if !right {
+                    return;
+                }
+            }
+        }
+        let Some(tab) = self.tab() else { return };
+        let Some(pane) = tab.pane().and_then(|t| tab.layout.pane(area, t.id)) else { return };
+        let at = pane_cell(pane, ev);
+
+        let Some(term) = self.term_mut() else { return };
+        let mode = term.emulator.mouse_mode();
+        if mode == mouse::MouseMode::None && left {
+            let id = term.id;
+            if term.emulator.start_selection(at).is_ok() {
+                self.selecting = Some(id);
+            }
+            return;
+        }
+        let bytes = mouse::encode(&ev, at.x, at.y, mode, term.emulator.mouse_encoding());
+        if let Some(bytes) = bytes {
+            term.write(&bytes);
+        }
+    }
+
+    fn drag_selection(&mut self, id: u64, ev: MouseEvent, pane: Rect) {
+        let Some(term) = self.projects.iter_mut().flat_map(Project::terms_mut).find(|t| t.id == id) else {
+            self.selecting = None;
+            return;
+        };
+        if ev.kind == MouseEventKind::Drag(MouseButton::Left) {
+            if term.emulator.extend_selection(pane_cell(pane, ev)).is_err() {
+                self.selecting = None;
+            }
+            return;
+        }
+        self.selecting = None;
+        if let Ok(Some(text)) = term.emulator.finish_selection() {
+            copy(&mut self.host_writes, &mut self.toast, &text);
+        }
+    }
+
+    fn press_divider(&mut self, tab: u64, path: Vec<bool>, now: Instant) {
+        let double = self
+            .divider_click
+            .as_ref()
+            .is_some_and(|(t, p, at)| *t == tab && *p == path && now.duration_since(*at) < DOUBLE_CLICK);
+        if double {
+            if let Some(t) = self.tab_mut().filter(|t| t.id == tab) {
+                t.layout.set_ratio(&path, split::HALF);
+            }
+            self.divider_click = None;
+        } else {
+            self.divider_click = Some((tab, path.clone(), now));
+            self.divider_drag = Some((tab, path));
+        }
+    }
+
+    fn drag_divider(&mut self, ev: MouseEvent, pane: Rect) {
+        let Some((tab, path)) = self.divider_drag.clone() else { return };
+        if ev.kind != MouseEventKind::Drag(MouseButton::Left) {
+            self.divider_drag = None;
+            return;
+        }
+        self.divider_click = None;
+        let Some(t) = self.tab_mut().filter(|t| t.id == tab) else { return };
+        if let Some(divider) = t.layout.dividers(pane).into_iter().find(|d| d.path == path) {
+            t.layout.set_ratio(&path, split::ratio_at(&divider, Position::new(ev.column, ev.row)));
+        }
+    }
+
+    fn open_pane_menu(&mut self, pane: u64, at: Position, area: Rect) {
+        let Some(tab) = self.tab() else { return };
+        let Some(r) = tab.layout.pane(area, pane) else { return };
+        let mut actions: Vec<PaneAction> =
+            [Dir::Right, Dir::Down].into_iter().filter(|&d| split::fits(r, d)).map(PaneAction::Split).collect();
+        actions.push(if tab.right_clicks_to_pane(pane) {
+            PaneAction::RightClicksToMenu
+        } else {
+            PaneAction::RightClicksToPane
+        });
+        actions.push(PaneAction::Close);
+        self.overlay = Some(Overlay::PaneMenu { at, pane, actions });
+    }
+
+    fn pane_action(&mut self, pane: u64, action: PaneAction, area: Rect) -> Result<()> {
+        let Some((path, tab)) = self.tab_with_pane(pane) else { return Ok(()) };
+        match action {
+            PaneAction::Split(dir) => {
+                let cwd = tab
+                    .panes
+                    .iter()
+                    .find(|t| t.id == pane)
+                    .and_then(Term::cwd)
+                    .filter(|dir| dir.is_dir())
+                    .unwrap_or_else(|| path.to_path_buf());
+                let term = self.spawn(area, cwd)?;
+                if let Some((_, tab)) = self.tab_with_pane(pane) {
+                    tab.split(pane, dir, term);
+                }
+                self.resize(area);
+            }
+            PaneAction::RightClicksToPane | PaneAction::RightClicksToMenu => tab.toggle_right_clicks(pane),
+            PaneAction::Close => {
+                if let Some(term) = tab.panes.iter_mut().find(|t| t.id == pane) {
+                    term.kill();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn press_border(&mut self, border: ui::Border, now: Instant) {
+        let double = self.border_click.is_some_and(|(b, at)| b == border && now.duration_since(at) < DOUBLE_CLICK);
+        if double {
+            self.widths = self.widths.reset(border);
+            self.border_click = None;
+        } else {
+            self.border_click = Some((border, now));
+            self.resizing = Some(border);
+        }
+    }
+
+    fn drag_border(&mut self, border: ui::Border, ev: MouseEvent, area: Rect) {
+        if ev.kind == MouseEventKind::Drag(MouseButton::Left) {
+            self.widths = self.widths.dragged(border, ev.column, area.width);
+            self.border_click = None;
+        } else {
+            self.resizing = None;
+        }
+    }
+
+    fn click_projects(&mut self, list: Rect, pitch: u16, pos: Position) {
+        match ui::sidebar_hit(list, pitch, self.projects.len(), self.projects_scroll, pos) {
+            Some(SidebarHit::Select(i)) => {
+                self.active = i;
+                self.nav = self.nav.map(|_| ui::Nav::Workspaces);
+            }
+            Some(SidebarHit::Close(i)) => self.close_project(i),
+            Some(SidebarHit::New) => {
+                self.nav = None;
+                self.open_picker();
+            }
+            None => {}
+        }
+    }
+
+    fn close_project(&mut self, p: usize) {
+        let project = &mut self.projects[p];
+        project.closing = true;
+        project.kill();
+        if !project.has_terms() {
+            self.remove_project(p);
+        }
+    }
+
+    fn tab_counts(&self) -> Vec<usize> {
+        self.project().map(|p| p.workspaces.iter().map(|w| w.tabs.len()).collect()).unwrap_or_default()
+    }
+
+    fn click_workspaces(&mut self, list: Rect, pitch: u16, pos: Position, area: Rect) -> Result<()> {
+        if self.project().is_none() {
+            return Ok(());
+        }
+        let hit = ui::workspace_hit(list, pitch, &self.tab_counts(), self.workspaces_scroll, pos);
+        if !matches!(hit, None | Some(WorkspaceHit::CloseWorkspace(_) | WorkspaceHit::CloseTab(..))) {
+            self.nav = None;
+        }
+        let p = self.active;
+        match hit {
+            Some(WorkspaceHit::Workspace(w)) => self.projects[p].active = w,
+            Some(WorkspaceHit::CloseWorkspace(w)) => self.close_workspace(p, w),
+            Some(WorkspaceHit::Tab(w, t)) => {
+                self.projects[p].active = w;
+                self.projects[p].workspaces[w].active = t;
+            }
+            Some(WorkspaceHit::CloseTab(w, t)) => {
+                for term in &mut self.projects[p].workspaces[w].tabs[t].panes {
+                    term.kill();
+                }
+            }
+            Some(WorkspaceHit::NewTab(w)) => self.add_tab(p, w, area)?,
+            Some(WorkspaceHit::NewWorkspace) => {
+                let project = &self.projects[p];
+                let worktree = git::is_repo_root(&project.path).then_some(true);
+                self.overlay = Some(Overlay::NewWorkspace {
+                    project: project.id,
+                    input: String::new(),
+                    worktree,
+                    error: None,
+                    creating: false,
+                });
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
+    fn close_workspace(&mut self, p: usize, w: usize) {
+        let project = &mut self.projects[p];
+        let workspace = &mut project.workspaces[w];
+        if workspace.worktree {
+            self.overlay = Some(Overlay::RemoveWorkspace {
+                project: project.id,
+                workspace: workspace.id,
+                error: None,
+                force: false,
+                removing: false,
+            });
+            return;
+        }
+        workspace.closing = true;
+        workspace.kill();
+        if workspace.tabs.is_empty() {
+            project.remove_workspace(w);
+        }
+    }
+
+    fn add_tab(&mut self, p: usize, w: usize, area: Rect) -> Result<()> {
+        let path = self.projects[p].workspaces[w].path.clone();
+        let tab = self.new_tab(area, path, None)?;
+        let project = &mut self.projects[p];
+        let workspace = &mut project.workspaces[w];
+        workspace.tabs.push(tab);
+        workspace.active = workspace.tabs.len() - 1;
+        project.active = w;
+        Ok(())
+    }
+
+    fn open_picker(&mut self) {
+        let home = self.home.as_deref();
+        let near_active = self.project().and_then(|p| p.path.parent().map(Path::to_path_buf));
+        let picker = near_active
+            .and_then(|dir| Picker::open(&dir, home).ok())
+            .or_else(|| home.and_then(|dir| Picker::open(dir, home).ok()))
+            .or_else(|| Picker::open(Path::new("/"), home).ok());
+        self.overlay = picker.map(Overlay::Picker);
+    }
+
+    fn picker_rows(area: Rect) -> usize {
+        usize::from(ui::picker_list(ui::picker_area(area)).height)
+    }
+
+    fn picker_key(&mut self, key: KeyEvent, area: Rect) -> Result<()> {
+        let Some(Overlay::Picker(picker)) = &mut self.overlay else { return Ok(()) };
+        let rows = Self::picker_rows(area);
+        match key.code {
+            KeyCode::Esc => self.overlay = None,
+            KeyCode::Enter => {
+                if let Some(dir) = picker.submit() {
+                    self.overlay = None;
+                    return self.open_project(dir, area);
+                }
+            }
+            KeyCode::Backspace => picker.pop(),
+            KeyCode::Left => picker.up(),
+            KeyCode::Right | KeyCode::Tab => picker.enter_selected(),
+            KeyCode::Up => picker.move_selection(-1, rows),
+            KeyCode::Down => picker.move_selection(1, rows),
+            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => picker.push(c),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn picker_mouse(&mut self, ev: MouseEvent, pos: Position, area: Rect) -> Result<()> {
+        let Some(Overlay::Picker(picker)) = &mut self.overlay else { return Ok(()) };
+        let rows = Self::picker_rows(area);
+        match ev.kind {
+            MouseEventKind::ScrollUp => picker.scroll_by(-WHEEL_ROWS, rows),
+            MouseEventKind::ScrollDown => picker.scroll_by(WHEEL_ROWS, rows),
+            MouseEventKind::Down(MouseButton::Left) => {
+                match ui::picker_hit(area, PICKER_SUBMIT, picker.items().len(), picker.scroll(), pos) {
+                    Some(PickerHit::Item(i)) => picker.enter(i),
+                    Some(PickerHit::Submit) => {
+                        let dir = picker.dir().to_path_buf();
+                        self.overlay = None;
+                        return self.open_project(dir, area);
+                    }
+                    Some(PickerHit::Cancel) => self.overlay = None,
+                    None => {}
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn issues_available(&self) -> bool {
+        self.project().is_some()
+    }
+
+    fn token(&self, source: Source) -> Option<(String, bool)> {
+        if let Some(token) = self.env_tokens.get(&source) {
+            return Some((token.clone(), true));
+        }
+        source.secret_key().and_then(|key| secrets::read(&self.secrets_path, key)).map(|token| (token, false))
+    }
+
+    fn client(&self, source: Source, project: u64) -> Option<Client> {
+        match source {
+            Source::Github => {
+                let dir = self.projects.get(self.project_index(project)?)?.path.clone();
+                Some(Client::Github { gh: self.config.gh(self.home.as_deref()), dir })
+            }
+            Source::Shortcut => {
+                Some(Client::Shortcut { base: self.apis.shortcut.clone(), token: self.token(source)?.0 })
+            }
+            Source::Linear => Some(Client::Linear { url: self.apis.linear.clone(), token: self.token(source)?.0 }),
+        }
+    }
+
+    fn places(&self) -> (Vec<Place>, usize) {
+        let mut places = Vec::new();
+        let mut here = 0;
+        for (p, project) in self.projects.iter().enumerate().filter(|(_, p)| !p.closing) {
+            let name = self.project_label(project);
+            if git::is_repo_root(&project.path) {
+                if p == self.active {
+                    here = places.len();
+                }
+                places.push(Place { project: project.id, workspace: None, label: name, worktree: true });
+                continue;
+            }
+            for (w, workspace) in project.workspaces.iter().enumerate().filter(|(_, w)| !w.closing) {
+                if p == self.active && w == project.active {
+                    here = places.len();
+                }
+                let label = format!("{name} › {}", workspace.label());
+                places.push(Place { project: project.id, workspace: Some(workspace.id), label, worktree: false });
+            }
+        }
+        (places, here)
+    }
+
+    fn open_issues(&mut self, area: Rect) -> Result<()> {
+        let (places, here) = self.places();
+        let Some(project) = self.project() else { return Ok(()) };
+        let connections = Source::REMOTE
+            .into_iter()
+            .filter_map(|source| {
+                let (_, from_env) = self.token(source)?;
+                Some((source, Connection { from_env, account: self.accounts.get(&source).cloned() }))
+            })
+            .collect();
+        let mut browser = Browser {
+            project: project.id,
+            project_name: self.project_label(project),
+            github: git::branch(&project.path).is_some(),
+            worktrees: git::is_repo_root(&project.path),
+            tabs: browser::tabs(&self.config.issue_tabs),
+            tab: 0,
+            closed: self.issue_closed,
+            people: self.issue_people.clone(),
+            search: Search::default(),
+            lists: HashMap::new(),
+            connections,
+            forms: HashMap::new(),
+            screen: Screen::List,
+            starting: false,
+            error: None,
+            notice: None,
+            secrets_path: ui::display_path(&self.secrets_path, self.home.as_deref()),
+            agents: self.agent_choices(),
+            picker: None,
+            places,
+            here,
+            place: None,
+            filtering: None,
+            members: self
+                .people_cache
+                .iter()
+                .filter(|((_, p), _)| p.is_none_or(|p| p == project.id))
+                .map(|((s, _), m)| (*s, Ok(m.clone())))
+                .collect(),
+        };
+        if let Some(tab) = self.issue_tab {
+            browser.tab_to(tab);
+        }
+        let action = browser.needs_load();
+        self.overlay = Some(Overlay::Issues(Box::new(browser)));
+        self.act(action, area)
+    }
+
+    fn agent_choices(&self) -> browser::Agents {
+        let config = &self.config;
+        let running = self.term().and_then(|t| agents::detect(config, &t.foreground_args()));
+        let kinds = agents::kinds(config);
+        let starts = kinds
+            .iter()
+            .map(|kind| {
+                let mode = agents::mode_of(&agents::args(config, kind), &agents::modes(config, kind));
+                (kind.clone(), browser::AgentStart { command: agents::command_line(config, kind), mode })
+            })
+            .collect();
+        browser::Agents {
+            kinds,
+            default: agents::resolve(config, None, None),
+            running,
+            chosen: None,
+            starts,
+            prompt: config.prompt.clone(),
+            submit: config.submit,
+        }
+    }
+
+    fn act(&mut self, action: Action, area: Rect) -> Result<()> {
+        if let Some(Overlay::Issues(b)) = &self.overlay {
+            self.issue_tab = Some(b.current());
+            self.issue_closed = b.closed;
+            self.issue_people = b.people.clone();
+        }
+        match action {
+            Action::None => {}
+            Action::Close => self.overlay = None,
+            Action::Load(sources) => {
+                for source in sources {
+                    self.load_issues(source);
+                }
+            }
+            Action::Read(issue) => self.read_issue(issue),
+            Action::Start(issue, agent, place) => return self.start_issue(&issue, &agent, place, area),
+            Action::LoadPeople(sources) => {
+                for source in sources {
+                    self.load_people(source);
+                }
+            }
+            Action::SetDefaultAgent(kind) => {
+                let config = Config { agent: kind.clone(), ..self.config.clone() };
+                let saved = config::save(&self.config_path, &config);
+                let Some(Overlay::Issues(b)) = &mut self.overlay else { return Ok(()) };
+                match saved {
+                    Ok(()) => {
+                        self.config = config;
+                        b.default_agent_set(kind);
+                    }
+                    Err(e) => b.error = Some(format!("failed to save the settings: {e}")),
+                }
+            }
+            Action::CheckToken(source, token) => self.check_token(source, token),
+            Action::Disconnect(source) => self.disconnect(source),
+            Action::Copy(url) => {
+                self.host_writes.push(clipboard::osc52(&url));
+                if let Some(Overlay::Issues(b)) = &mut self.overlay {
+                    b.notice = Some(format!("copied {url}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn set_issue_cache(&mut self, path: PathBuf) {
+        self.issue_cache = IssueCache::new(Some(path));
+    }
+
+    pub fn take_host_writes(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.host_writes)
+    }
+
+    fn cache_key(&self, source: Source, project: u64, query: &Query) -> CacheKey {
+        let project = (source == Source::Github)
+            .then(|| self.project_index(project).map(|p| self.projects[p].path.clone()))
+            .flatten();
+        CacheKey { source, project, query: query.clone() }
+    }
+
+    fn browser_project(&self) -> Option<u64> {
+        match &self.overlay {
+            Some(Overlay::Issues(b)) => Some(b.project),
+            _ => None,
+        }
+    }
+
+    fn load_people(&mut self, source: Source) {
+        let Some(project) = self.browser_project() else { return };
+        let Some(client) = self.client(source, project) else { return };
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = client.people();
+            let _ = tx.send(AppEvent::PeopleLoaded { project, source, result });
+        });
+    }
+
+    fn people_loaded(&mut self, project: u64, source: Source, result: Result<Vec<Person>>) {
+        if let Ok(people) = &result {
+            self.people_cache.insert((source, (source == Source::Github).then_some(project)), people.clone());
+        }
+        if let Some(Overlay::Issues(b)) = &mut self.overlay
+            && b.project == project
+        {
+            b.people_loaded(source, result.map_err(|e| e.to_string()));
+        }
+    }
+
+    fn load_issues(&mut self, source: Source) {
+        let Some(Overlay::Issues(b)) = &self.overlay else { return };
+        let (project, query) = (b.project, b.query(source));
+        let client = self.client(source, project);
+        let key = self.cache_key(source, project, &query);
+        let cached = self.issue_cache.get(&key);
+        let Some(Overlay::Issues(b)) = &mut self.overlay else { return };
+        let listing = b.lists.entry(source).or_default();
+        listing.loading = true;
+        listing.error = None;
+        if let Some(cached) = cached {
+            listing.issues = cached;
+        }
+        let Some(client) = client else {
+            b.loaded(source, &query, Err(format!("{} is not connected", source.name())));
+            return;
+        };
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = client.list(&query);
+            let _ = tx.send(AppEvent::IssuesLoaded { project, source, query, result });
+        });
+    }
+
+    fn issues_loaded(&mut self, project: u64, source: Source, query: &Query, result: Result<Listed>) {
+        if let Ok(listed) = &result {
+            let key = self.cache_key(source, project, query);
+            self.issue_cache.put(key, listed.issues.clone());
+            if let Some(account) = &listed.account {
+                self.accounts.insert(source, account.clone());
+            }
+        }
+        let Some(Overlay::Issues(b)) = &mut self.overlay else { return };
+        if b.project != project {
+            return;
+        }
+        if let (Ok(Listed { account: Some(account), .. }), Some(connection)) = (&result, b.connections.get_mut(&source))
+        {
+            connection.account = Some(account.clone());
+        }
+        b.loaded(source, query, result.map(|listed| listed.issues).map_err(|e| e.to_string()));
+    }
+
+    fn read_issue(&mut self, issue: Issue) {
+        let Some(project) = self.browser_project() else { return };
+        let Some(client) = self.client(issue.source, project) else {
+            if let Some(Overlay::Issues(b)) = &mut self.overlay {
+                b.read_done(issue.source, &issue.key, Err(format!("{} is not connected", issue.source.name())));
+            }
+            return;
+        };
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = client.read(&issue);
+            if let Ok(detail) = &result {
+                std::iter::once(&detail.body).chain(detail.comments.iter().map(|c| &c.body)).for_each(|body| {
+                    markdown::warm(body);
+                });
+            }
+            let _ = tx.send(AppEvent::IssueRead { source: issue.source, key: issue.key, result });
+        });
+    }
+
+    fn check_token(&mut self, source: Source, token: Secret) {
+        let client = match source {
+            Source::Github => return,
+            Source::Shortcut => Client::Shortcut { base: self.apis.shortcut.clone(), token: token.0.clone() },
+            Source::Linear => Client::Linear { url: self.apis.linear.clone(), token: token.0.clone() },
+        };
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = client.whoami();
+            let _ = tx.send(AppEvent::TokenChecked { source, token, result });
+        });
+    }
+
+    fn token_checked(&mut self, source: Source, token: &Secret, result: Result<Account>, area: Rect) -> Result<()> {
+        let saved = result.and_then(|account| {
+            let key = source.secret_key().ok_or_else(|| crate::error::Error::Api("nothing to save".into()))?;
+            secrets::write(&self.secrets_path, key, &token.0)
+                .map_err(|e| crate::error::Error::Api(format!("failed to save the {}: {e}", source.token_name())))?;
+            Ok(account)
+        });
+        if let Some(Overlay::Settings(s)) = &mut self.overlay {
+            if let Ok(account) = &saved {
+                self.accounts.insert(source, account.clone());
+            }
+            s.checked(source, saved.map_err(|e| e.to_string()));
+            return Ok(());
+        }
+        let Some(Overlay::Issues(b)) = &mut self.overlay else { return Ok(()) };
+        match saved {
+            Ok(account) => {
+                self.accounts.insert(source, account.clone());
+                b.connected(source, Connection { from_env: false, account: Some(account) });
+                let action = b.needs_load();
+                self.act(action, area)
+            }
+            Err(e) => {
+                b.token_rejected(source, e.to_string());
+                Ok(())
+            }
+        }
+    }
+
+    fn disconnect(&mut self, source: Source) {
+        let removed = source.secret_key().map(|key| secrets::remove(&self.secrets_path, key));
+        let Some(Overlay::Issues(b)) = &mut self.overlay else { return };
+        if let Some(Err(e)) = removed {
+            b.error = Some(format!("failed to remove the {}: {e}", source.token_name()));
+            return;
+        }
+        self.accounts.remove(&source);
+        self.issue_cache.forget(source);
+        b.disconnected(source);
+    }
+
+    fn issues_key(&mut self, key: KeyEvent, area: Rect) -> Result<()> {
+        let Some(Overlay::Issues(b)) = &mut self.overlay else { return Ok(()) };
+        let action = b.key(key, area);
+        self.act(action, area)
+    }
+
+    fn issues_mouse(&mut self, ev: MouseEvent, pos: Position, area: Rect) -> Result<()> {
+        let Some(Overlay::Issues(b)) = &mut self.overlay else { return Ok(()) };
+        let action = b.mouse(ev, pos, area);
+        self.act(action, area)
+    }
+
+    fn start_issue(&mut self, issue: &Issue, agent: &str, place: Option<Place>, area: Rect) -> Result<()> {
+        let Some(browsing) = self.browser_project() else { return Ok(()) };
+        let project = place.as_ref().map_or(browsing, |place| place.project);
+        let Some(p) = self.project_index(project) else {
+            self.overlay = None;
+            return Ok(());
+        };
+        let branch = issues::branch(issue);
+        let start = Start {
+            name: issues::workspace_name(issue),
+            spec: launch::Spec {
+                command: agents::command_line(&self.config, agent),
+                prompt: issues::prompt(&self.config.prompt, issue, &branch),
+                submit: self.config.submit,
+            },
+        };
+        let in_a_tab = match &place {
+            Some(place) => !place.worktree,
+            None => !git::is_repo_root(&self.projects[p].path),
+        };
+        if in_a_tab {
+            self.overlay = None;
+            let workspace = place.and_then(|place| place.workspace);
+            let w = workspace.and_then(|id| self.projects[p].workspaces.iter().position(|w| w.id == id));
+            return self.open_tab_with(p, w, start, area);
+        }
+        let open = self.projects[p].workspaces.iter().position(|w| git::branch(&w.path).as_deref() == Some(&branch));
+        if let Some(w) = open {
+            self.overlay = None;
+            return self.open_workspace(p, w, Some(start), area);
+        }
+        let repo = self.projects[p].path.clone();
+        let path = worktree::checkout_path(&self.config.worktrees_dir(self.home.as_deref()), &repo, &branch);
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = worktree::create(&repo, &branch, &path).map(|()| path);
+            let _ = tx.send(AppEvent::WorktreeCreated { project, result, start: Some(start) });
+        });
+        if let Some(Overlay::Issues(b)) = &mut self.overlay {
+            b.starting = true;
+            b.error = None;
+        }
+        Ok(())
+    }
+
+    fn open_tab_with(&mut self, p: usize, w: Option<usize>, start: Start, area: Rect) -> Result<()> {
+        if self.projects[p].workspaces.is_empty() {
+            let id = self.take_id();
+            let path = self.projects[p].path.clone();
+            self.projects[p].workspaces.push(Workspace::new(id, path, None, false));
+        }
+        let w = w.unwrap_or(self.projects[p].active).min(self.projects[p].workspaces.len() - 1);
+        self.add_tab(p, w, area)?;
+        if let Some(tab) = self.projects[p].workspaces[w].tab_mut() {
+            tab.name = Some(start.name);
+            if let Some(term) = tab.pane() {
+                self.launches.push(Launch::new(term.id, start.spec, Instant::now()));
+            }
+        }
+        self.active = p;
+        Ok(())
+    }
+
+    fn search_candidates(&self) -> Vec<Candidate> {
+        let mut candidates = Vec::new();
+        for p in &self.projects {
+            let project = self.project_label(p);
+            let goto = Goto { project: p.id, workspace: None, tab: None };
+            candidates.push(Candidate {
+                kind: Kind::Project,
+                goto,
+                name: project.clone(),
+                context: String::new(),
+                keys: vec![project.clone()],
+            });
+            for w in &p.workspaces {
+                let label = w.label();
+                let mut keys = vec![label.clone()];
+                keys.extend(w.name.as_ref().and_then(|_| git::branch(&w.path)));
+                let goto = Goto { workspace: Some(w.id), ..goto };
+                candidates.push(Candidate {
+                    kind: Kind::Workspace,
+                    goto,
+                    name: label.clone(),
+                    context: project.clone(),
+                    keys: keys.clone(),
+                });
+                for t in &w.tabs {
+                    let name = t.label();
+                    candidates.push(Candidate {
+                        kind: Kind::Tab,
+                        goto: Goto { tab: Some(t.id), ..goto },
+                        context: format!("{project} › {label}"),
+                        keys: std::iter::once(name.clone()).chain(keys.iter().cloned()).collect(),
+                        name,
+                    });
+                }
+            }
+        }
+        candidates
+    }
+
+    fn search_results(&self, query: &str) -> Vec<Candidate> {
+        search::rank(self.search_candidates(), query)
+    }
+
+    fn search_rows(&self, area: Rect) -> usize {
+        usize::from(ui::results_list(self.layout(area).results).height)
+    }
+
+    fn search_key(&mut self, key: KeyEvent, area: Rect) {
+        let rows = self.search_rows(area);
+        let Some(Overlay::Search(search)) = &self.overlay else { return };
+        let results = self.search_results(search.query());
+        let empty = search.query().trim().is_empty();
+        let Some(Overlay::Search(search)) = &mut self.overlay else { return };
+        match key.code {
+            KeyCode::Esc => self.overlay = None,
+            KeyCode::Enter if empty => self.overlay = None,
+            KeyCode::Enter => {
+                if let Some(goto) = results.get(search.selected()).map(|c| c.goto) {
+                    self.overlay = None;
+                    self.goto(goto);
+                }
+            }
+            KeyCode::Backspace => search.pop(),
+            KeyCode::Up => search.move_selection(-1, results.len(), rows),
+            KeyCode::Down => search.move_selection(1, results.len(), rows),
+            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => search.push(c),
+            _ => {}
+        }
+    }
+
+    fn search_mouse(&mut self, ev: MouseEvent, pos: Position, area: Rect) {
+        let Some(Overlay::Search(search)) = &self.overlay else { return };
+        let areas = self.layout(area);
+        let results = self.search_results(search.query());
+        let showing = !search.query().trim().is_empty();
+        let rows = self.search_rows(area);
+        let Some(Overlay::Search(search)) = &mut self.overlay else { return };
+        match ev.kind {
+            MouseEventKind::ScrollUp if showing => search.scroll_by(-WHEEL_ROWS, results.len(), rows),
+            MouseEventKind::ScrollDown if showing => search.scroll_by(WHEEL_ROWS, results.len(), rows),
+            MouseEventKind::Down(button) if !areas.search.contains(pos) => {
+                let hit = ui::result_hit(areas.results, results.len(), search.scroll(), pos)
+                    .filter(|_| showing && button == MouseButton::Left);
+                self.overlay = None;
+                if let Some(i) = hit {
+                    self.goto(results[i].goto);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn goto(&mut self, goto: Goto) {
+        self.nav = None;
+        let Some(p) = self.project_index(goto.project) else { return };
+        self.active = p;
+        let project = &mut self.projects[p];
+        let Some(w) = goto.workspace.and_then(|id| project.workspaces.iter().position(|w| w.id == id)) else { return };
+        project.active = w;
+        let workspace = &mut project.workspaces[w];
+        if let Some(t) = goto.tab.and_then(|id| workspace.tabs.iter().position(|t| t.id == id)) {
+            workspace.active = t;
+        }
+    }
+
+    fn open_project_menu(&mut self, list: Rect, pitch: u16, pos: Position) {
+        if let Some(SidebarHit::Select(i) | SidebarHit::Close(i)) =
+            ui::sidebar_hit(list, pitch, self.projects.len(), self.projects_scroll, pos)
+        {
+            self.overlay = Some(Overlay::Menu { at: pos, target: Target::Project(self.projects[i].id) });
+        }
+    }
+
+    fn open_workspace_menu(&mut self, list: Rect, pitch: u16, pos: Position) {
+        let Some(project) = self.project() else { return };
+        let target = match ui::workspace_hit(list, pitch, &self.tab_counts(), self.workspaces_scroll, pos) {
+            Some(WorkspaceHit::Workspace(w) | WorkspaceHit::CloseWorkspace(w)) => {
+                Target::Workspace(project.id, project.workspaces[w].id)
+            }
+            Some(WorkspaceHit::Tab(w, t) | WorkspaceHit::CloseTab(w, t)) => {
+                let workspace = &project.workspaces[w];
+                Target::Tab(project.id, workspace.id, workspace.tabs[t].id)
+            }
+            _ => return,
+        };
+        self.overlay = Some(Overlay::Menu { at: pos, target });
+    }
+
+    fn current_name(&self, target: Target) -> Option<String> {
+        match target {
+            Target::Project(id) => self.project_index(id).map(|p| self.project_label(&self.projects[p])),
+            Target::Workspace(project, workspace) => {
+                self.workspace_index(project, workspace).map(|(p, w)| self.projects[p].workspaces[w].label())
+            }
+            Target::Tab(project, workspace, tab) => {
+                let (p, w) = self.workspace_index(project, workspace)?;
+                self.projects[p].workspaces[w].tabs.iter().find(|t| t.id == tab).map(Tab::label)
+            }
+        }
+    }
+
+    fn rename(&mut self, target: Target, name: Option<String>) {
+        match target {
+            Target::Project(id) => {
+                if let Some(p) = self.project_index(id) {
+                    self.projects[p].name = name;
+                }
+            }
+            Target::Workspace(project, workspace) => {
+                if let Some((p, w)) = self.workspace_index(project, workspace) {
+                    self.projects[p].workspaces[w].name = name;
+                }
+            }
+            Target::Tab(project, workspace, tab) => {
+                if let Some((p, w)) = self.workspace_index(project, workspace)
+                    && let Some(t) = self.projects[p].workspaces[w].tabs.iter_mut().find(|t| t.id == tab)
+                {
+                    t.name = name;
+                }
+            }
+        }
+    }
+
+    fn overlay_mouse(&mut self, ev: MouseEvent, pos: Position, area: Rect) -> Result<()> {
+        if matches!(self.overlay, Some(Overlay::Picker(_))) {
+            return self.picker_mouse(ev, pos, area);
+        }
+        if matches!(self.overlay, Some(Overlay::Search(_))) {
+            self.search_mouse(ev, pos, area);
+            return Ok(());
+        }
+        if matches!(self.overlay, Some(Overlay::Issues(_))) {
+            return self.issues_mouse(ev, pos, area);
+        }
+        if matches!(self.overlay, Some(Overlay::Settings(_))) {
+            self.settings_mouse(ev, pos, area);
+            return Ok(());
+        }
+        let MouseEventKind::Down(button) = ev.kind else { return Ok(()) };
+        if let Some(Overlay::PaneMenu { at, pane, actions }) = &self.overlay {
+            let (at, pane) = (*at, *pane);
+            let labels: Vec<&str> = actions.iter().map(|a| a.label()).collect();
+            let menu = ui::menu_area(area, at, &labels);
+            let picked = ui::menu_hit(menu, actions.len(), pos).map(|i| actions[i]);
+            self.overlay = None;
+            if let (MouseButton::Left, Some(action)) = (button, picked) {
+                return self.pane_action(pane, action, area);
+            }
+            return Ok(());
+        }
+        let Some(overlay) = &self.overlay else { return Ok(()) };
+        if let Overlay::Menu { at, target } = overlay {
+            let (at, target) = (*at, *target);
+            let menu = ui::menu_area(area, at, &[target.rename_label()]);
+            let picked = button == MouseButton::Left && ui::menu_hit(menu, 1, pos).is_some();
+            self.overlay =
+                picked.then(|| self.current_name(target)).flatten().map(|input| Overlay::Rename { target, input });
+            return Ok(());
+        }
+        if button != MouseButton::Left {
+            return Ok(());
+        }
+        match ui::form_hit(area, overlay.submit_label(), pos) {
+            Some(FormHit::Submit) => self.submit_form(area)?,
+            Some(FormHit::Cancel) => self.cancel_form(),
+            Some(FormHit::Toggle) => self.toggle_worktree(),
+            None => {}
+        }
+        Ok(())
+    }
+
+    fn toggle_worktree(&mut self) {
+        if let Some(Overlay::NewWorkspace { worktree: Some(on), creating: false, .. }) = &mut self.overlay {
+            *on = !*on;
+        }
+    }
+
+    fn form_key(&mut self, key: KeyEvent, area: Rect) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => self.cancel_form(),
+            KeyCode::Enter => self.submit_form(area)?,
+            KeyCode::Tab => self.toggle_worktree(),
+            KeyCode::Backspace => {
+                if let Some(input) = self.overlay.as_mut().and_then(Overlay::input) {
+                    input.pop();
+                }
+            }
+            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                if let Some(input) = self.overlay.as_mut().and_then(Overlay::input) {
+                    input.push(c);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn cancel_form(&mut self) {
+        if !self.overlay.as_ref().is_some_and(Overlay::busy) {
+            self.overlay = None;
+        }
+    }
+
+    fn submit_form(&mut self, area: Rect) -> Result<()> {
+        let Some(overlay) = self.overlay.take() else { return Ok(()) };
+        self.overlay = match overlay {
+            Overlay::NewWorkspace { project, input, worktree, creating: false, .. } => {
+                return self.create_workspace(project, input, worktree, area);
+            }
+            Overlay::Rename { target, input } => {
+                let name = input.trim();
+                self.rename(target, (!name.is_empty()).then(|| name.to_string()));
+                None
+            }
+            Overlay::RemoveWorkspace { project, workspace, force, removing: false, .. } => {
+                self.remove_worktree(project, workspace, force)
+            }
+            busy => Some(busy),
+        };
+        Ok(())
+    }
+
+    fn open_settings(&mut self) {
+        let tokens = Source::REMOTE
+            .into_iter()
+            .map(|source| {
+                let status = match self.token(source) {
+                    None => Status::Missing,
+                    Some((_, true)) => Status::Env,
+                    Some((_, false)) => Status::Saved(self.accounts.get(&source).cloned()),
+                };
+                (source, status)
+            })
+            .collect();
+        let settings = Settings::new(self.config.clone(), self.home.clone(), tokens, self.settings_page);
+        self.overlay = Some(Overlay::Settings(Box::new(settings)));
+    }
+
+    fn settings_pick_rows(area: Rect) -> usize {
+        usize::from(ui::settings_pick_list(ui::settings_area(area)).height)
+    }
+
+    fn settings_key(&mut self, key: KeyEvent, area: Rect) {
+        let Some(Overlay::Settings(s)) = &mut self.overlay else { return };
+        let action = s.key(key, Self::settings_pick_rows(area));
+        self.settings_page = s.page;
+        self.settings_act(action);
+    }
+
+    fn settings_mouse(&mut self, ev: MouseEvent, pos: Position, area: Rect) {
+        let rows = Self::settings_pick_rows(area);
+        let Some(Overlay::Settings(s)) = &mut self.overlay else { return };
+        if s.busy() {
+            return;
+        }
+        if let (Some(pick), Some(delta)) = (&mut s.pick, wheel(ev.kind)) {
+            pick.search.scroll_by(delta, pick.items.len(), rows);
+            return;
+        }
+        match ev.kind {
+            MouseEventKind::ScrollUp => s.select(s.cursor.saturating_sub(1)),
+            MouseEventKind::ScrollDown => s.select(s.cursor + 1),
+            _ => {}
+        }
+        let MouseEventKind::Down(MouseButton::Left) = ev.kind else { return };
+        let rows_now = s.rows();
+        let sections: Vec<&'static str> = rows_now.iter().map(settings::Row::section).collect();
+        let removable: Vec<bool> = (0..rows_now.len()).map(|i| s.removable(i).is_some()).collect();
+        let movable: Vec<bool> = rows_now.iter().map(|r| matches!(r, settings::Row::Tab(_))).collect();
+        let pick = s.pick.as_ref().map(|p| (s.pick_choices().len(), p.search.scroll()));
+        let tabs = Page::ALL.map(Page::name);
+        let layout = ui::SettingsLayout {
+            tabs: &tabs,
+            sections: &sections,
+            removable: &removable,
+            movable: &movable,
+            cursor: s.cursor,
+            pick,
+        };
+        let action = match ui::settings_hit(area, &layout, pos) {
+            Some(ui::SettingsHit::Done) => settings::Action::Close,
+            Some(ui::SettingsHit::Tab(i)) => {
+                s.open_page(Page::ALL[i]);
+                settings::Action::None
+            }
+            Some(ui::SettingsHit::Pick(i)) => s.choose(Some(i)),
+            Some(ui::SettingsHit::Remove(i)) => {
+                s.removable(i).map_or(settings::Action::None, settings::Action::RemoveToken)
+            }
+            Some(ui::SettingsHit::MoveUp(i)) => s.move_tab(i, settings::Move::Up),
+            Some(ui::SettingsHit::MoveDown(i)) => s.move_tab(i, settings::Move::Down),
+            Some(ui::SettingsHit::Row(i)) => {
+                s.edit = None;
+                s.select(i);
+                s.activate()
+            }
+            None => settings::Action::None,
+        };
+        self.settings_page = s.page;
+        self.settings_act(action);
+    }
+
+    fn settings_act(&mut self, action: settings::Action) {
+        match action {
+            settings::Action::None => {}
+            settings::Action::Close => self.overlay = None,
+            settings::Action::Save(config) => {
+                if let Err(e) = config::save(&self.config_path, &config) {
+                    if let Some(Overlay::Settings(s)) = &mut self.overlay {
+                        s.notice = Some(format!("failed to save the settings: {e}"));
+                    }
+                    return;
+                }
+                self.config = *config;
+            }
+            settings::Action::CheckToken(source, token) => self.check_token(source, token),
+            settings::Action::RemoveToken(source) => {
+                let removed = source.secret_key().map(|key| secrets::remove(&self.secrets_path, key));
+                let Some(Overlay::Settings(s)) = &mut self.overlay else { return };
+                if let Some(Err(e)) = removed {
+                    s.notice = Some(format!("failed to remove the {}: {e}", source.token_name()));
+                    return;
+                }
+                self.accounts.remove(&source);
+                self.issue_cache.forget(source);
+                s.removed(source);
+            }
+        }
+    }
+
+    fn create_workspace(&mut self, project: u64, input: String, worktree: Option<bool>, area: Rect) -> Result<()> {
+        let name = input.trim().to_string();
+        let Some(p) = self.project_index(project) else { return Ok(()) };
+        if name.is_empty() {
+            let error = Some("the name is required".into());
+            self.overlay = Some(Overlay::NewWorkspace { project, input, worktree, error, creating: false });
+            return Ok(());
+        }
+        let repo = self.projects[p].path.clone();
+        if worktree == Some(true) {
+            let path = worktree::checkout_path(&self.config.worktrees_dir(self.home.as_deref()), &repo, &name);
+            let tx = self.tx.clone();
+            std::thread::spawn(move || {
+                let result = worktree::create(&repo, &name, &path).map(|()| path);
+                let _ = tx.send(AppEvent::WorktreeCreated { project, result, start: None });
+            });
+            self.overlay = Some(Overlay::NewWorkspace { project, input, worktree, error: None, creating: true });
+            return Ok(());
+        }
+        let workspace = self.new_workspace(area, repo, Some(name), false)?;
+        let project = &mut self.projects[p];
+        project.workspaces.push(workspace);
+        project.active = project.workspaces.len() - 1;
+        Ok(())
+    }
+
+    fn worktree_created(
+        &mut self,
+        project: u64,
+        result: Result<PathBuf>,
+        start: Option<Start>,
+        area: Rect,
+    ) -> Result<()> {
+        let path = match result {
+            Ok(path) => path.canonicalize().unwrap_or(path),
+            Err(e) => {
+                match &mut self.overlay {
+                    Some(Overlay::NewWorkspace { error, creating, .. }) => {
+                        *error = Some(e.to_string());
+                        *creating = false;
+                    }
+                    Some(Overlay::Issues(b)) => {
+                        b.error = Some(e.to_string());
+                        b.starting = false;
+                    }
+                    _ => {}
+                }
+                return Ok(());
+            }
+        };
+        if matches!(self.overlay, Some(Overlay::NewWorkspace { .. } | Overlay::Issues(_))) {
+            self.overlay = None;
+        }
+        let Some(p) = self.project_index(project) else { return Ok(()) };
+        let w = if let Some(w) = self.projects[p].workspaces.iter().position(|w| w.path == path) {
+            w
+        } else {
+            let id = self.take_id();
+            self.projects[p].workspaces.push(Workspace::new(id, path, None, true));
+            self.projects[p].workspaces.len() - 1
+        };
+        self.open_workspace(p, w, start, area)
+    }
+
+    fn open_workspace(&mut self, p: usize, w: usize, start: Option<Start>, area: Rect) -> Result<()> {
+        let workspace = &mut self.projects[p].workspaces[w];
+        if let Some(start) = &start
+            && workspace.name.is_none()
+        {
+            workspace.name = Some(start.name.clone());
+        }
+        if workspace.tabs.is_empty() {
+            self.add_tab(p, w, area)?;
+            let term = self.projects[p].workspaces[w].tab().and_then(Tab::pane).map(|t| t.id);
+            if let (Some(term), Some(start)) = (term, start) {
+                self.launches.push(Launch::new(term, start.spec, Instant::now()));
+            }
+        }
+        self.projects[p].active = w;
+        self.active = p;
+        Ok(())
+    }
+
+    fn remove_worktree(&mut self, project: u64, workspace: u64, force: bool) -> Option<Overlay> {
+        let (p, w) = self.workspace_index(project, workspace)?;
+        let repo = self.projects[p].path.clone();
+        let path = self.projects[p].workspaces[w].path.clone();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let result = worktree::remove(&repo, &path, force);
+            let _ = tx.send(AppEvent::WorktreeRemoved { project, workspace, result });
+        });
+        Some(Overlay::RemoveWorkspace { project, workspace, error: None, force, removing: true })
+    }
+
+    fn worktree_removed(&mut self, project: u64, workspace: u64, result: Result<()>) {
+        if let Err(e) = result {
+            if let Some(Overlay::RemoveWorkspace { error, force, removing, .. }) = &mut self.overlay {
+                *error = Some(e.to_string());
+                *force = true;
+                *removing = false;
+            }
+            return;
+        }
+        if matches!(self.overlay, Some(Overlay::RemoveWorkspace { .. })) {
+            self.overlay = None;
+        }
+        let Some((p, w)) = self.workspace_index(project, workspace) else { return };
+        let workspace = &mut self.projects[p].workspaces[w];
+        workspace.closing = true;
+        workspace.kill();
+        if workspace.tabs.is_empty() {
+            self.projects[p].remove_workspace(w);
+        }
+    }
+
+    fn handle_paste(&mut self, text: &str) {
+        if let Some(Overlay::Picker(picker)) = &mut self.overlay {
+            text.chars().filter(|c| !c.is_control()).for_each(|c| picker.push(c));
+            return;
+        }
+        if let Some(Overlay::Search(search)) = &mut self.overlay {
+            text.chars().filter(|c| !c.is_control()).for_each(|c| search.push(c));
+            return;
+        }
+        if let Some(Overlay::Issues(b)) = &mut self.overlay {
+            b.paste(text);
+            return;
+        }
+        if let Some(Overlay::Settings(s)) = &mut self.overlay {
+            s.paste(text);
+            return;
+        }
+        if let Some(overlay) = &mut self.overlay {
+            if let Some(input) = overlay.input() {
+                input.extend(text.chars().filter(|c| !c.is_control()));
+            }
+            return;
+        }
+        let Some(term) = self.term_mut() else { return };
+        let bracketed = term.emulator.bracketed_paste();
+        if bracketed {
+            term.write(format!("\x1b[200~{text}\x1b[201~").as_bytes());
+        } else {
+            term.write(text.as_bytes());
+        }
+    }
+
+    pub fn draw(&mut self, f: &mut Frame) {
+        if !self.layout(f.area()).compact() {
+            self.nav = None;
+        }
+        self.follow(f.area());
+        let projects = self
+            .projects
+            .iter()
+            .map(|p| ui::ProjectEntry { name: self.project_label(p), workspaces: p.workspaces.len() })
+            .collect();
+        let (has_project, workspaces, active_workspace, active_tab) = match self.project() {
+            Some(p) => (
+                true,
+                p.workspaces
+                    .iter()
+                    .map(|w| ui::WorkspaceEntry { name: w.label(), tabs: w.tabs.iter().map(Tab::label).collect() })
+                    .collect(),
+                p.active,
+                p.workspace().filter(|w| !w.tabs.is_empty()).map(|w| w.active),
+            ),
+            None => (false, Vec::new(), 0, None),
+        };
+        let area = f.area();
+        let overlay = self.overlay.as_ref().map(|o| self.overlay_view(o, area));
+        let dim_inactive = self.config.dim_inactive_panes;
+        let dragging = self.divider_drag.clone();
+        let tab = self.tab_mut().and_then(|tab| {
+            let layout = tab.layout.map(&|id| tab.panes.iter().position(|t| t.id == id))?;
+            let screens = tab.panes.iter_mut().map(|t| t.emulator.snapshot().unwrap_or_default()).collect();
+            let dragging = dragging.filter(|(id, _)| *id == tab.id).map(|(_, path)| path);
+            Some(ui::TabView { layout, screens, active: tab.active, dim_inactive, dragging })
+        });
+        self.toast = self.toast.filter(|(_, at)| at.elapsed() < TOAST_FOR);
+        let view = ui::View {
+            projects,
+            active: self.active,
+            projects_scroll: self.projects_scroll,
+            has_project,
+            workspaces,
+            active_workspace,
+            active_tab,
+            workspaces_scroll: self.workspaces_scroll,
+            issues: self.issues_available(),
+            hover: self.hover,
+            widths: self.widths,
+            resizing: self.resizing,
+            light: self.theme.is_light() == Some(true),
+            tab,
+            overlay,
+            toast: self.toast.map(|(message, _)| message),
+            nav: self.nav,
+        };
+        ui::draw(f, &view);
+    }
+
+    fn overlay_view(&self, overlay: &Overlay, area: Rect) -> ui::Overlay {
+        let home = self.home.as_deref();
+        let note = |error: &Option<String>| error.clone().map(ui::Note::Error);
+        match overlay {
+            Overlay::Menu { at, target } => ui::Overlay::Menu { at: *at, items: vec![target.rename_label()] },
+            Overlay::PaneMenu { at, actions, .. } => {
+                ui::Overlay::Menu { at: *at, items: actions.iter().map(|a| a.label()).collect() }
+            }
+            Overlay::NewWorkspace { project, input, worktree, error, creating } => {
+                let repo = self.project_index(*project).map(|p| self.projects[p].path.clone()).unwrap_or_default();
+                let path = if *worktree == Some(true) {
+                    worktree::checkout_path(&self.config.worktrees_dir(home), &repo, input.trim())
+                } else {
+                    repo
+                };
+                ui::Overlay::Form(ui::Form {
+                    title: "new workspace",
+                    label: "name",
+                    value: input.clone(),
+                    hint: format!("in {}", ui::display_path(&path, home)),
+                    toggle: worktree.map(|on| ui::Toggle { label: WORKTREE_TOGGLE, on }),
+                    note: if *creating { Some(ui::Note::Busy("creating…")) } else { note(error) },
+                    submit: WORKSPACE_SUBMIT,
+                })
+            }
+            Overlay::Settings(s) => s.view(),
+            Overlay::Rename { target, input } => ui::Overlay::Form(ui::Form {
+                title: target.rename_label(),
+                label: "name",
+                value: input.clone(),
+                hint: target.rename_hint().into(),
+                toggle: None,
+                note: None,
+                submit: RENAME_SUBMIT,
+            }),
+            Overlay::RemoveWorkspace { project, workspace, error, removing, .. } => {
+                let (label, path) = self
+                    .workspace_index(*project, *workspace)
+                    .map(|(p, w)| {
+                        let ws = &self.projects[p].workspaces[w];
+                        (ws.label(), ui::display_path(&ws.path, home))
+                    })
+                    .unwrap_or_default();
+                ui::Overlay::Confirm(ui::Confirm {
+                    title: "remove workspace",
+                    message: format!(
+                        "Remove the workspace {label} and delete its worktree folder {path}? The branch is kept."
+                    ),
+                    note: if *removing { Some(ui::Note::Busy("removing…")) } else { note(error) },
+                    submit: overlay.submit_label(),
+                })
+            }
+            Overlay::Picker(picker) => Self::picker_view(picker, home),
+            Overlay::Issues(b) => b.view(area, issues::now()),
+            Overlay::Search(search) => self.search_view(search),
+        }
+    }
+
+    fn search_view(&self, search: &Search) -> ui::Overlay {
+        let results = self.search_results(search.query());
+        let hint = results.get(search.selected()).map(|c| format!("enter goes to {}", c.name)).unwrap_or_default();
+        ui::Overlay::Search(ui::Search {
+            query: search.query().to_string(),
+            results: results.into_iter().map(|c| ui::ResultRow { name: c.name, context: c.context }).collect(),
+            selected: search.selected(),
+            scroll: search.scroll(),
+            hint,
+        })
+    }
+
+    fn picker_view(picker: &Picker, home: Option<&Path>) -> ui::Overlay {
+        let items = picker.items();
+        let dir = ui::display_path(picker.dir(), home);
+        let hint = match picker.selected().and_then(|i| items.get(i)) {
+            Some(item) if item.name == ".." => "enter goes up".into(),
+            Some(item) => format!("enter goes into {}", item.name),
+            None if picker.filter().is_empty() => format!("enter opens {dir}"),
+            None => String::new(),
+        };
+        ui::Overlay::Picker(ui::Picker {
+            title: "new project",
+            path: if dir.ends_with('/') { dir } else { format!("{dir}/") },
+            filter: picker.filter().to_string(),
+            items: items
+                .iter()
+                .map(|item| ui::Entry { name: item.name.clone(), branch: item.branch.clone() })
+                .collect(),
+            selected: picker.selected(),
+            scroll: picker.scroll(),
+            hint,
+            error: picker.error().map(str::to_string),
+            submit: PICKER_SUBMIT,
+        })
+    }
+}
+
+fn copy(host_writes: &mut Vec<Vec<u8>>, toast: &mut Option<(&'static str, Instant)>, text: &str) {
+    host_writes.push(clipboard::osc52(text));
+    *toast = Some((COPIED, Instant::now()));
+}
+
+fn pane_cell(pane: Rect, ev: MouseEvent) -> Position {
+    Position::new(ev.column.clamp(pane.x, pane.right() - 1) - pane.x, ev.row.clamp(pane.y, pane.bottom() - 1) - pane.y)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::{self, Receiver};
+
+    use super::*;
+    use crate::test_util::{TempDir, git_repo, is_sh, wait_until};
+    use crate::ui::WorkspaceRow;
+
+    const AREA: Rect = Rect { x: 0, y: 0, width: 100, height: 20 };
+
+    fn areas() -> ui::Areas {
+        ui::layout(AREA, ui::Widths::default())
+    }
+
+    fn no_config() -> PathBuf {
+        std::env::temp_dir().join("cornercase-test-no-config").join("config.json")
+    }
+
+    fn empty_app() -> (App, Receiver<AppEvent>) {
+        let (tx, rx) = mpsc::channel();
+        (App::new("/bin/sh".into(), HostTheme::default(), no_config(), tx), rx)
+    }
+
+    fn app() -> (App, Receiver<AppEvent>) {
+        let (mut app, rx) = empty_app();
+        app.open_here(AREA).expect("open the first project");
+        (app, rx)
+    }
+
+    fn app_with(n: usize) -> (App, Receiver<AppEvent>, Vec<TempDir>) {
+        let dirs: Vec<TempDir> = (0..n).map(|_| TempDir::new()).collect();
+        let (mut app, rx) = empty_app();
+        for dir in &dirs {
+            app.open_project(dir.path().to_path_buf(), AREA).expect("open project");
+        }
+        (app, rx, dirs)
+    }
+
+    fn app_in(dir: &Path, config_path: PathBuf) -> (App, Receiver<AppEvent>) {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new("/bin/sh".into(), HostTheme::default(), config_path, tx);
+        app.open_project(dir.to_path_buf(), AREA).expect("open project");
+        (app, rx)
+    }
+
+    fn term(app: &App, p: usize) -> &Term {
+        app.projects[p].workspace().and_then(Workspace::tab).and_then(Tab::pane).expect("the project has a pane")
+    }
+
+    fn tab_term(app: &App, w: usize, t: usize) -> &Term {
+        app.projects[app.active].workspaces[w].tabs[t].pane().expect("the tab has a pane")
+    }
+
+    fn canonical(dir: &TempDir) -> PathBuf {
+        dir.path().canonicalize().expect("canonicalize")
+    }
+
+    fn pump_until(app: &mut App, rx: &Receiver<AppEvent>, what: &str, cond: impl Fn(&App) -> bool) {
+        wait_until(what, || {
+            while let Ok(ev) = rx.try_recv() {
+                app.handle_event(ev, AREA).expect("handle event");
+            }
+            cond(app)
+        });
+    }
+
+    fn send_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+        app.handle_event(AppEvent::Input(Event::Key(KeyEvent::new(code, mods))), AREA).expect("handle key");
+    }
+
+    fn mouse(app: &mut App, kind: MouseEventKind, pos: Position) {
+        mouse_in(app, kind, pos, AREA);
+    }
+
+    fn mouse_in(app: &mut App, kind: MouseEventKind, pos: Position, area: Rect) {
+        let ev = MouseEvent { kind, column: pos.x, row: pos.y, modifiers: KeyModifiers::NONE };
+        app.handle_event(AppEvent::Input(Event::Mouse(ev)), area).expect("handle mouse");
+    }
+
+    fn mouse_down(app: &mut App, button: MouseButton, pos: Position) {
+        mouse(app, MouseEventKind::Down(button), pos);
+    }
+
+    fn click(app: &mut App, pos: Position) {
+        mouse_down(app, MouseButton::Left, pos);
+    }
+
+    fn right_click(app: &mut App, pos: Position) {
+        mouse_down(app, MouseButton::Right, pos);
+    }
+
+    fn type_line(app: &mut App, line: &str) {
+        app.handle_event(AppEvent::Input(Event::Paste(format!("{line}\r"))), AREA).expect("handle paste");
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            send_key(app, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+    }
+
+    fn submit_text(app: &mut App, text: &str) {
+        type_text(app, text);
+        send_key(app, KeyCode::Enter, KeyModifiers::NONE);
+    }
+
+    fn list() -> Rect {
+        areas().list
+    }
+
+    fn entry_pos() -> Position {
+        Position::new(list().x + 3, list().y)
+    }
+
+    fn row_rect(app: &App, row: WorkspaceRow) -> Rect {
+        ui::workspace_row(areas().workspaces_list, areas().pitch, &app.tab_counts(), app.workspaces_scroll, row)
+    }
+
+    fn row_pos(app: &App, row: WorkspaceRow) -> Position {
+        let r = row_rect(app, row);
+        Position::new(r.x + 3, r.y)
+    }
+
+    fn row_close(app: &App, row: WorkspaceRow) -> Position {
+        ui::row_close_button(row_rect(app, row)).as_position()
+    }
+
+    fn click_row(app: &mut App, row: WorkspaceRow) {
+        let pos = row_pos(app, row);
+        click(app, pos);
+    }
+
+    fn click_close(app: &mut App, row: WorkspaceRow) {
+        let pos = row_close(app, row);
+        click(app, pos);
+    }
+
+    fn right_click_row(app: &mut App, row: WorkspaceRow) {
+        let pos = row_pos(app, row);
+        right_click(app, pos);
+    }
+
+    fn new_workspace_pos(app: &App) -> Position {
+        ui::new_workspace_button(areas().workspaces_list, areas().pitch, &app.tab_counts()).as_position()
+    }
+
+    fn form_value(app: &App) -> Option<&str> {
+        match &app.overlay {
+            Some(Overlay::NewWorkspace { input, .. } | Overlay::Rename { input, .. }) => Some(input),
+            _ => None,
+        }
+    }
+
+    fn form_error(app: &App) -> Option<&str> {
+        match &app.overlay {
+            Some(Overlay::NewWorkspace { error, .. } | Overlay::RemoveWorkspace { error, .. }) => error.as_deref(),
+            _ => None,
+        }
+    }
+
+    fn clear_input(app: &mut App) {
+        while form_value(app).is_some_and(|v| !v.is_empty()) {
+            send_key(app, KeyCode::Backspace, KeyModifiers::NONE);
+        }
+    }
+
+    fn form_button(submit: &str, which: usize) -> Position {
+        ui::form_buttons(ui::form_area(AREA), submit)[which].as_position()
+    }
+
+    fn menu_labels(app: &App) -> Vec<&'static str> {
+        let Some(Overlay::Menu { target, .. }) = &app.overlay else { panic!("the menu is not open") };
+        vec![target.rename_label()]
+    }
+
+    fn menu_item_pos(app: &App) -> Position {
+        let Some(Overlay::Menu { at, .. }) = &app.overlay else { panic!("the menu is not open") };
+        ui::menu_item(ui::menu_area(AREA, *at, &menu_labels(app)), 0).as_position()
+    }
+
+    fn workspace_labels(app: &App) -> Vec<String> {
+        app.projects[app.active].workspaces.iter().map(Workspace::label).collect()
+    }
+
+    fn with_worktrees_config() -> (TempDir, TempDir, PathBuf) {
+        let (worktrees, config) = (TempDir::new(), TempDir::new());
+        let config_path = config.path().join("config.json");
+        let worktrees_dir = worktrees.path().display().to_string();
+        config::save(&config_path, &Config { worktrees_dir, ..Config::default() }).expect("write config");
+        (worktrees, config, config_path)
+    }
+
+    mod keys {
+        use super::*;
+
+        #[test]
+        fn plain_keys_go_to_the_shell() {
+            let (mut app, _rx) = app();
+            send_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE);
+            assert_eq!(app.projects.len(), 1);
+        }
+
+        #[test]
+        fn ctrl_b_has_no_special_meaning() {
+            let (mut app, _rx) = app();
+            send_key(&mut app, KeyCode::Char('b'), KeyModifiers::CONTROL);
+            send_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE);
+            assert_eq!(app.projects.len(), 1);
+        }
+    }
+
+    mod projects {
+        use super::*;
+
+        #[test]
+        fn the_first_one_opens_in_the_server_folder() {
+            let (app, _rx) = app();
+            let here = std::env::current_dir().and_then(|d| d.canonicalize()).expect("current dir");
+            assert_eq!(app.projects[0].path, here);
+        }
+
+        #[test]
+        fn a_new_one_has_one_workspace_with_one_tab_in_its_folder() {
+            let (app, _rx, dirs) = app_with(1);
+            let workspace = &app.projects[0].workspaces[0];
+            assert_eq!(
+                (workspace.path.clone(), workspace.worktree, workspace.tabs.len()),
+                (canonical(&dirs[0]), false, 1)
+            );
+        }
+
+        #[test]
+        fn opening_an_open_folder_switches_to_it() {
+            let (mut app, _rx, dirs) = app_with(2);
+
+            app.open_project(dirs[0].path().to_path_buf(), AREA).expect("open project");
+
+            assert_eq!((app.projects.len(), app.active), (2, 0));
+        }
+
+        #[test]
+        fn the_name_does_not_follow_cd() {
+            let (mut app, rx, dirs) = app_with(1);
+
+            type_line(&mut app, "cd /");
+            pump_until(&mut app, &rx, "shell changes dir", |a| term(a, 0).cwd().as_deref() == Some(Path::new("/")));
+
+            let folder = dirs[0].path().file_name().and_then(|n| n.to_str()).expect("folder name");
+            assert_eq!(app.project_label(&app.projects[0]), folder);
+        }
+    }
+
+    mod sidebar_clicks {
+        use super::*;
+
+        #[test]
+        fn new_button_opens_the_folder_picker() {
+            let (mut app, _rx) = app();
+            click(&mut app, ui::new_project_button(list(), 1, 1).as_position());
+            assert_eq!((matches!(app.overlay, Some(Overlay::Picker(_))), app.projects.len()), (true, 1));
+        }
+
+        #[test]
+        fn entry_click_selects_it() {
+            let (mut app, _rx, _dirs) = app_with(2);
+            click(&mut app, Position::new(list().x + 2, list().y));
+            assert_eq!(app.active, 0);
+        }
+
+        #[test]
+        fn close_button_closes_that_project() {
+            let (mut app, rx, _dirs) = app_with(3);
+            let second = app.projects[1].id;
+
+            click(&mut app, ui::close_button(list(), 1, 2, 0, 1).as_position());
+
+            pump_until(&mut app, &rx, "second project closes", |a| a.projects.iter().all(|p| p.id != second));
+        }
+
+        #[test]
+        fn closing_the_active_one_activates_the_previous() {
+            let (mut app, rx, _dirs) = app_with(2);
+            click(&mut app, ui::close_button(list(), 1, 2, 0, 1).as_position());
+            pump_until(&mut app, &rx, "second project closes", |a| a.projects.len() == 1);
+            assert_eq!(app.active, 0);
+        }
+
+        #[test]
+        fn quit_button_asks_to_detach_once() {
+            let (mut app, _rx, _dirs) = app_with(2);
+            click(&mut app, areas().quit.as_position());
+            assert_eq!((app.take_detach(), app.take_detach(), app.projects.len()), (true, false, 2));
+        }
+
+        #[test]
+        fn new_project_button_works_with_no_projects() {
+            let (mut app, rx) = app();
+            let home = TempDir::new();
+            app.home = Some(home.path().to_path_buf());
+            click(&mut app, ui::close_button(list(), 1, 2, 0, 0).as_position());
+            pump_until(&mut app, &rx, "the project closes", App::is_empty);
+
+            click(&mut app, ui::new_project_button(list(), 1, 0).as_position());
+            send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+            assert_eq!((app.projects.len(), app.active, app.projects[0].path.clone()), (1, 0, canonical(&home)));
+        }
+    }
+
+    mod tabs {
+        use super::*;
+
+        #[test]
+        fn plus_tab_opens_one_in_the_workspace_folder() {
+            let (mut app, _rx, dirs) = app_with(1);
+
+            click_row(&mut app, WorkspaceRow::NewTab(0));
+
+            let workspace = &app.projects[0].workspaces[0];
+            assert_eq!((workspace.tabs.len(), workspace.active), (2, 1));
+            wait_until("tab starts in the folder", || tab_term(&app, 0, 1).cwd() == Some(canonical(&dirs[0])));
+        }
+
+        #[test]
+        fn clicking_a_tab_selects_it() {
+            let (mut app, _rx, _dirs) = app_with(1);
+            click_row(&mut app, WorkspaceRow::NewTab(0));
+
+            click_row(&mut app, WorkspaceRow::Tab(0, 0));
+
+            assert_eq!(app.projects[0].workspaces[0].active, 0);
+        }
+
+        #[test]
+        fn keys_go_to_the_active_tab() {
+            let (mut app, rx, _dirs) = app_with(1);
+            click_row(&mut app, WorkspaceRow::NewTab(0));
+
+            type_line(&mut app, "cd /");
+
+            pump_until(&mut app, &rx, "second tab moves", |a| {
+                tab_term(a, 0, 1).cwd().as_deref() == Some(Path::new("/"))
+            });
+            assert_ne!(tab_term(&app, 0, 0).cwd().as_deref(), Some(Path::new("/")));
+        }
+
+        #[test]
+        fn close_button_closes_that_tab() {
+            let (mut app, rx, _dirs) = app_with(1);
+            click_row(&mut app, WorkspaceRow::NewTab(0));
+
+            click_close(&mut app, WorkspaceRow::Tab(0, 1));
+
+            pump_until(&mut app, &rx, "second tab closes", |a| a.projects[0].workspaces[0].tabs.len() == 1);
+        }
+
+        #[test]
+        fn the_last_one_exiting_keeps_the_workspace() {
+            let (mut app, rx, _dirs) = app_with(1);
+
+            type_line(&mut app, "exit");
+
+            pump_until(&mut app, &rx, "the tab closes", |a| a.projects[0].workspaces[0].tabs.is_empty());
+            assert_eq!((app.projects.len(), app.projects[0].workspaces.len()), (1, 1));
+        }
+
+        #[test]
+        fn plus_tab_works_in_an_empty_workspace() {
+            let (mut app, rx, _dirs) = app_with(1);
+            type_line(&mut app, "exit");
+            pump_until(&mut app, &rx, "the tab closes", |a| a.projects[0].workspaces[0].tabs.is_empty());
+
+            click_row(&mut app, WorkspaceRow::NewTab(0));
+
+            assert_eq!(app.projects[0].workspaces[0].tabs.len(), 1);
+        }
+
+        #[test]
+        fn are_named_after_their_program() {
+            let (app, _rx, _dirs) = app_with(1);
+            wait_until("the shell runs", || is_sh(&app.projects[0].workspaces[0].tabs[0].label()));
+        }
+    }
+
+    mod workspaces {
+        use super::*;
+
+        fn open_form(app: &mut App) {
+            let pos = new_workspace_pos(app);
+            click(app, pos);
+        }
+
+        fn worktree_option(app: &App) -> Option<bool> {
+            let Some(Overlay::NewWorkspace { worktree, .. }) = &app.overlay else { panic!("the form is not open") };
+            *worktree
+        }
+
+        #[test]
+        fn outside_git_the_form_has_no_worktree_option() {
+            let (mut app, _rx, _dirs) = app_with(1);
+            open_form(&mut app);
+            assert_eq!(worktree_option(&app), None);
+        }
+
+        #[test]
+        fn in_a_repo_the_form_offers_a_worktree() {
+            let repo = git_repo(&[]);
+            let (mut app, _rx) = app_in(repo.path(), no_config());
+            open_form(&mut app);
+            assert_eq!(worktree_option(&app), Some(true));
+        }
+
+        #[test]
+        fn the_toggle_switches_the_worktree_option() {
+            let repo = git_repo(&[]);
+            let (mut app, _rx) = app_in(repo.path(), no_config());
+            open_form(&mut app);
+
+            click(&mut app, ui::form_toggle(ui::form_area(AREA)).as_position());
+
+            assert_eq!(worktree_option(&app), Some(false));
+        }
+
+        #[test]
+        fn an_empty_name_is_refused() {
+            let (mut app, _rx, _dirs) = app_with(1);
+            open_form(&mut app);
+
+            send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+            assert_eq!(form_error(&app), Some("the name is required"));
+        }
+
+        #[test]
+        fn a_plain_one_shares_the_project_folder() {
+            let (mut app, _rx, dirs) = app_with(1);
+            open_form(&mut app);
+            type_text(&mut app, "bug-123");
+
+            send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+            let project = &app.projects[0];
+            assert_eq!((app.overlay.is_none(), project.active), (true, 1));
+            assert_eq!(
+                (project.workspaces[1].path.clone(), workspace_labels(&app)[1].as_str()),
+                (canonical(&dirs[0]), "bug-123")
+            );
+            wait_until("its tab starts in the project", || tab_term(&app, 1, 0).cwd() == Some(canonical(&dirs[0])));
+        }
+
+        #[test]
+        fn with_a_worktree_it_opens_in_a_new_checkout() {
+            let repo = git_repo(&[("README", "hi")]);
+            let (worktrees, _config, config_path) = with_worktrees_config();
+            let (mut app, rx) = app_in(repo.path(), config_path);
+            open_form(&mut app);
+            type_text(&mut app, "feat/login");
+
+            click(&mut app, form_button(WORKSPACE_SUBMIT, 0));
+
+            pump_until(&mut app, &rx, "the workspace opens", |a| a.projects[0].workspaces.len() == 2);
+            let repo_name = repo.path().file_name().expect("repo name");
+            let expected = worktrees.path().join(repo_name).join("feat-login").canonicalize().expect("checkout");
+            let workspace = &app.projects[0].workspaces[1];
+            assert_eq!(
+                (workspace.path.clone(), workspace.worktree, workspace.label()),
+                (expected.clone(), true, "feat/login".into())
+            );
+            assert_eq!((app.overlay.is_none(), app.projects[0].active, workspace.tabs.len()), (true, 1, 1));
+            wait_until("its tab starts in the checkout", || tab_term(&app, 1, 0).cwd() == Some(expected.clone()));
+        }
+
+        #[test]
+        fn git_errors_stay_in_the_form() {
+            let repo = git_repo(&[("README", "hi")]);
+            let (_worktrees, _config, config_path) = with_worktrees_config();
+            let (mut app, rx) = app_in(repo.path(), config_path);
+            open_form(&mut app);
+            type_text(&mut app, "not valid");
+
+            send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+            pump_until(&mut app, &rx, "git fails", |a| form_error(a).is_some());
+            assert_eq!(
+                (form_error(&app), app.projects[0].workspaces.len()),
+                (Some("'not valid' is not a valid branch name"), 1)
+            );
+        }
+
+        #[test]
+        fn checkouts_made_outside_show_up() {
+            let repo = git_repo(&[]);
+            let (mut app, _rx) = app_in(repo.path(), no_config());
+            let tmp = TempDir::new();
+            let path = tmp.path().join("hotfix");
+            crate::test_util::git(
+                repo.path(),
+                &["worktree", "add", "--quiet", "-b", "hotfix", &path.display().to_string()],
+            );
+
+            app.sync_worktrees();
+
+            let workspace = &app.projects[0].workspaces[1];
+            assert_eq!((workspace.label(), workspace.worktree, workspace.tabs.len()), ("hotfix".into(), true, 0));
+        }
+
+        #[test]
+        fn checkouts_removed_outside_go_away() {
+            let repo = git_repo(&[]);
+            let (mut app, _rx) = app_in(repo.path(), no_config());
+            let tmp = TempDir::new();
+            let path = tmp.path().join("hotfix");
+            crate::test_util::git(
+                repo.path(),
+                &["worktree", "add", "--quiet", "-b", "hotfix", &path.display().to_string()],
+            );
+            app.sync_worktrees();
+
+            std::fs::remove_dir_all(&path).expect("remove checkout");
+            app.sync_worktrees();
+
+            assert_eq!(app.projects[0].workspaces.len(), 1);
+        }
+
+        #[test]
+        fn clicking_one_selects_it() {
+            let (mut app, _rx, _dirs) = app_with(1);
+            open_form(&mut app);
+            submit_text(&mut app, "other");
+
+            click_row(&mut app, WorkspaceRow::Workspace(0));
+
+            assert_eq!(app.projects[0].active, 0);
+        }
+
+        #[test]
+        fn closing_a_plain_one_closes_its_tabs() {
+            let (mut app, rx, _dirs) = app_with(1);
+            open_form(&mut app);
+            submit_text(&mut app, "other");
+
+            click_close(&mut app, WorkspaceRow::Workspace(1));
+
+            pump_until(&mut app, &rx, "the workspace closes", |a| a.projects[0].workspaces.len() == 1);
+        }
+    }
+
+    mod remove_worktree {
+        use super::*;
+
+        struct Setup {
+            app: App,
+            rx: Receiver<AppEvent>,
+            repo: TempDir,
+            path: PathBuf,
+            _worktrees: TempDir,
+            _config: TempDir,
+        }
+
+        fn with_worktree() -> Setup {
+            let repo = git_repo(&[("README", "hi")]);
+            let (worktrees, config, config_path) = with_worktrees_config();
+            let (mut app, rx) = app_in(repo.path(), config_path);
+            let pos = new_workspace_pos(&app);
+            click(&mut app, pos);
+            submit_text(&mut app, "wt");
+            pump_until(&mut app, &rx, "the workspace opens", |a| a.projects[0].workspaces.len() == 2);
+            let path = app.projects[0].workspaces[1].path.clone();
+            let close = row_close(&app, WorkspaceRow::Workspace(1));
+            click(&mut app, close);
+            Setup { app, rx, repo, path, _worktrees: worktrees, _config: config }
+        }
+
+        fn branch_exists(repo: &Path, branch: &str) -> bool {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+                .status()
+                .expect("run git")
+                .success()
+        }
+
+        #[test]
+        fn asks_first() {
+            let s = with_worktree();
+            assert!(matches!(s.app.overlay, Some(Overlay::RemoveWorkspace { .. })));
+        }
+
+        #[test]
+        fn cancel_keeps_it() {
+            let mut s = with_worktree();
+
+            click(&mut s.app, form_button(REMOVE_SUBMIT, 1));
+
+            assert_eq!((s.app.overlay.is_none(), s.app.projects[0].workspaces.len(), s.path.exists()), (true, 2, true));
+        }
+
+        #[test]
+        fn confirming_deletes_the_checkout_and_keeps_the_branch() {
+            let mut s = with_worktree();
+
+            click(&mut s.app, form_button(REMOVE_SUBMIT, 0));
+
+            pump_until(&mut s.app, &s.rx, "the workspace goes away", |a| a.projects[0].workspaces.len() == 1);
+            assert_eq!(
+                (s.app.overlay.is_none(), s.path.exists(), branch_exists(s.repo.path(), "wt")),
+                (true, false, true)
+            );
+        }
+
+        #[test]
+        fn changes_make_it_offer_remove_anyway() {
+            let mut s = with_worktree();
+            std::fs::write(s.path.join("README"), "changed").expect("edit file");
+
+            send_key(&mut s.app, KeyCode::Enter, KeyModifiers::NONE);
+            pump_until(&mut s.app, &s.rx, "git refuses", |a| form_error(a).is_some());
+            assert_eq!(s.app.overlay.as_ref().map(Overlay::submit_label), Some(FORCE_REMOVE_SUBMIT));
+
+            click(&mut s.app, form_button(FORCE_REMOVE_SUBMIT, 0));
+
+            pump_until(&mut s.app, &s.rx, "the workspace goes away", |a| a.projects[0].workspaces.len() == 1);
+            assert!(!s.path.exists());
+        }
+    }
+
+    mod context_menu {
+        use super::*;
+
+        #[test]
+        fn a_project_offers_rename_project() {
+            let (mut app, _rx, _dirs) = app_with(1);
+            right_click(&mut app, entry_pos());
+            assert_eq!(menu_labels(&app), ["rename project"]);
+        }
+
+        #[test]
+        fn a_workspace_offers_rename_workspace() {
+            let (mut app, _rx, _dirs) = app_with(1);
+            right_click_row(&mut app, WorkspaceRow::Workspace(0));
+            assert_eq!(menu_labels(&app), ["rename workspace"]);
+        }
+
+        #[test]
+        fn a_tab_offers_rename_tab() {
+            let (mut app, _rx, _dirs) = app_with(1);
+            right_click_row(&mut app, WorkspaceRow::Tab(0, 0));
+            assert_eq!(menu_labels(&app), ["rename tab"]);
+        }
+
+        #[test]
+        fn clicking_elsewhere_closes_it_without_acting() {
+            let (mut app, _rx, _dirs) = app_with(1);
+            right_click(&mut app, entry_pos());
+
+            click(&mut app, ui::new_project_button(list(), 1, 1).as_position());
+
+            assert_eq!((app.overlay.is_none(), app.projects.len()), (true, 1));
+        }
+
+        #[test]
+        fn esc_closes_it() {
+            let (mut app, _rx, _dirs) = app_with(1);
+            right_click(&mut app, entry_pos());
+
+            send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+            assert!(app.overlay.is_none());
+        }
+    }
+
+    mod rename {
+        use super::*;
+
+        fn open_rename(app: &mut App, at: Position) {
+            right_click(app, at);
+            let item = menu_item_pos(app);
+            click(app, item);
+        }
+
+        fn folder(dir: &TempDir) -> String {
+            dir.path().file_name().and_then(|n| n.to_str()).expect("folder name").to_string()
+        }
+
+        #[test]
+        fn opens_with_the_current_name() {
+            let (mut app, _rx, dirs) = app_with(1);
+            open_rename(&mut app, entry_pos());
+            assert_eq!(form_value(&app), Some(folder(&dirs[0]).as_str()));
+        }
+
+        #[test]
+        fn renames_the_project() {
+            let (mut app, _rx, _dirs) = app_with(1);
+            open_rename(&mut app, entry_pos());
+            clear_input(&mut app);
+            type_text(&mut app, "  my api  ");
+
+            click(&mut app, form_button(RENAME_SUBMIT, 0));
+
+            assert_eq!((app.overlay.is_none(), app.project_label(&app.projects[0])), (true, "my api".into()));
+        }
+
+        #[test]
+        fn an_empty_name_goes_back_to_the_folder_name() {
+            let (mut app, _rx, dirs) = app_with(1);
+            open_rename(&mut app, entry_pos());
+            submit_text(&mut app, "-x");
+            open_rename(&mut app, entry_pos());
+
+            clear_input(&mut app);
+            send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+            assert_eq!(app.project_label(&app.projects[0]), folder(&dirs[0]));
+        }
+
+        #[test]
+        fn esc_keeps_the_old_name() {
+            let (mut app, _rx, dirs) = app_with(1);
+            open_rename(&mut app, entry_pos());
+            type_text(&mut app, "-changed");
+
+            send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+            assert_eq!((app.overlay.is_none(), app.project_label(&app.projects[0])), (true, folder(&dirs[0])));
+        }
+
+        #[test]
+        fn renames_a_workspace() {
+            let (mut app, _rx, _dirs) = app_with(1);
+            let at = row_pos(&app, WorkspaceRow::Workspace(0));
+            open_rename(&mut app, at);
+            clear_input(&mut app);
+
+            submit_text(&mut app, "main line");
+
+            assert_eq!(workspace_labels(&app), ["main line"]);
+        }
+
+        #[test]
+        fn renames_a_tab_until_it_is_cleared() {
+            let (mut app, _rx, _dirs) = app_with(1);
+            let at = row_pos(&app, WorkspaceRow::Tab(0, 0));
+            open_rename(&mut app, at);
+            clear_input(&mut app);
+            submit_text(&mut app, "server");
+            assert_eq!(app.projects[0].workspaces[0].tabs[0].label(), "server");
+
+            let at = row_pos(&app, WorkspaceRow::Tab(0, 0));
+            open_rename(&mut app, at);
+            clear_input(&mut app);
+            send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+            wait_until("back to the program name", || is_sh(&app.projects[0].workspaces[0].tabs[0].label()));
+        }
+    }
+
+    mod restore {
+        use super::*;
+
+        fn workspace(path: &Path, cwds: Vec<Option<PathBuf>>) -> WorkspaceState {
+            let tabs = cwds.into_iter().map(|cwd| TabState {
+                name: None,
+                panes: vec![PaneState { cwd, right_clicks: false }],
+                active: 0,
+                layout: None,
+            });
+            WorkspaceState { path: path.to_path_buf(), name: None, worktree: false, tabs: tabs.collect(), active: 0 }
+        }
+
+        fn project(path: &Path, workspaces: Vec<WorkspaceState>) -> ProjectState {
+            ProjectState { path: path.to_path_buf(), name: None, workspaces, active: 0 }
+        }
+
+        fn saved(projects: Vec<ProjectState>, active: usize) -> State {
+            State { version: state::VERSION, projects, active, widths: None, issues: None }
+        }
+
+        #[test]
+        fn reopens_projects_workspaces_and_tabs() {
+            let (a, b) = (TempDir::new(), TempDir::new());
+            let (a_path, b_path) = (canonical(&a), canonical(&b));
+            std::fs::create_dir(a_path.join("sub")).expect("create folder");
+            let (mut app, _rx) = empty_app();
+            let mut second = workspace(&a_path, vec![Some(a_path.clone()), Some(a_path.join("sub"))]);
+            second.name = Some("other".into());
+            second.active = 1;
+            let mut first_project = project(&a_path, vec![workspace(&a_path, vec![None]), second]);
+            first_project.active = 1;
+            let state = saved(vec![first_project, project(&b_path, vec![workspace(&b_path, vec![None])])], 0);
+
+            app.restore(&state, AREA).expect("restore");
+
+            assert_eq!((app.projects.len(), app.active, app.projects[0].active), (2, 0, 1));
+            assert_eq!(workspace_labels(&app), ["default", "other"]);
+            wait_until("the active tab starts in its folder", || term(&app, 0).cwd() == Some(a_path.join("sub")));
+        }
+
+        #[test]
+        fn skips_projects_whose_folder_is_gone() {
+            let dir = TempDir::new();
+            let (mut app, _rx) = empty_app();
+            let gone = project(Path::new("/nonexistent/folder"), vec![]);
+
+            app.restore(&saved(vec![gone, project(dir.path(), vec![])], 1), AREA).expect("restore");
+
+            assert_eq!((app.projects.len(), app.active), (1, 0));
+        }
+
+        #[test]
+        fn skips_workspaces_whose_folder_is_gone() {
+            let dir = TempDir::new();
+            let (mut app, _rx) = empty_app();
+            let workspaces =
+                vec![workspace(Path::new("/nonexistent/folder"), vec![None]), workspace(dir.path(), vec![None])];
+
+            app.restore(&saved(vec![project(dir.path(), workspaces)], 0), AREA).expect("restore");
+
+            assert_eq!(app.projects[0].workspaces.len(), 1);
+        }
+
+        #[test]
+        fn a_pane_whose_folder_is_gone_opens_in_the_workspace() {
+            let dir = TempDir::new();
+            let path = canonical(&dir);
+            let (mut app, _rx) = empty_app();
+            let ws = workspace(&path, vec![Some(PathBuf::from("/nonexistent/folder"))]);
+
+            app.restore(&saved(vec![project(&path, vec![ws])], 0), AREA).expect("restore");
+
+            wait_until("the pane starts in the workspace", || term(&app, 0).cwd() == Some(path.clone()));
+        }
+
+        #[test]
+        fn keeps_the_names() {
+            let dir = TempDir::new();
+            let (mut app, _rx) = empty_app();
+            let mut ws = workspace(dir.path(), vec![None]);
+            ws.name = Some("main line".into());
+            ws.tabs[0].name = Some("server".into());
+            let mut p = project(dir.path(), vec![ws]);
+            p.name = Some("api".into());
+
+            app.restore(&saved(vec![p], 0), AREA).expect("restore");
+
+            let labels = (
+                app.project_label(&app.projects[0]),
+                workspace_labels(&app),
+                app.projects[0].workspaces[0].tabs[0].label(),
+            );
+            assert_eq!(labels, ("api".into(), vec!["main line".to_string()], "server".into()));
+        }
+
+        #[test]
+        fn clamps_the_active_project() {
+            let dir = TempDir::new();
+            let (mut app, _rx) = empty_app();
+
+            app.restore(&saved(vec![project(dir.path(), vec![])], 5), AREA).expect("restore");
+
+            assert_eq!(app.active, 0);
+        }
+
+        #[test]
+        fn state_lists_projects_workspaces_and_tabs() {
+            let (mut app, rx, dirs) = app_with(2);
+            click_row(&mut app, WorkspaceRow::NewTab(0));
+            type_line(&mut app, "cd /");
+            pump_until(&mut app, &rx, "the tab moves", |a| tab_term(a, 0, 1).cwd().as_deref() == Some(Path::new("/")));
+
+            let state = app.state();
+
+            let second = &state.projects[1];
+            let tabs = &second.workspaces[0].tabs;
+            assert_eq!(
+                (state.projects.len(), &second.path, tabs.len(), tabs[1].panes[0].cwd.as_deref(), state.active),
+                (2, &canonical(&dirs[1]), 2, Some(Path::new("/")), 1)
+            );
+        }
+    }
+
+    mod picker {
+        use super::*;
+
+        struct Setup {
+            app: App,
+            _rx: Receiver<AppEvent>,
+            root: PathBuf,
+            _tmp: TempDir,
+        }
+
+        fn open_picker() -> Setup {
+            let tmp = TempDir::new();
+            let root = canonical(&tmp);
+            for folder in ["active", "api", "web/src"] {
+                std::fs::create_dir_all(root.join(folder)).expect("create folder");
+            }
+            let (mut app, rx) = app_in(&root.join("active"), no_config());
+            click(&mut app, ui::new_project_button(list(), 1, 1).as_position());
+            Setup { app, _rx: rx, root, _tmp: tmp }
+        }
+
+        fn picker(app: &App) -> &Picker {
+            let Some(Overlay::Picker(picker)) = &app.overlay else { panic!("the picker is not open") };
+            picker
+        }
+
+        fn item_pos(app: &App, name: &str) -> Position {
+            let items = picker(app).items();
+            let i = items.iter().position(|item| item.name == name).expect("item listed");
+            let area = ui::picker_area(AREA);
+            ui::picker_item(area, items.len(), picker(app).scroll(), i).as_position()
+        }
+
+        fn button(which: usize) -> Position {
+            ui::picker_buttons(ui::picker_area(AREA), PICKER_SUBMIT)[which].as_position()
+        }
+
+        #[test]
+        fn starts_next_to_the_active_project() {
+            let s = open_picker();
+            assert_eq!(picker(&s.app).dir(), s.root);
+        }
+
+        #[test]
+        fn starts_at_home_with_no_projects() {
+            let (mut app, _rx) = empty_app();
+            let home = TempDir::new();
+            app.home = Some(home.path().to_path_buf());
+
+            click(&mut app, ui::new_project_button(list(), 1, 0).as_position());
+
+            assert_eq!(picker(&app).dir(), home.path());
+        }
+
+        #[test]
+        fn enter_opens_a_project_in_the_current_folder() {
+            let mut s = open_picker();
+
+            send_key(&mut s.app, KeyCode::Enter, KeyModifiers::NONE);
+
+            assert_eq!((s.app.overlay.is_none(), s.app.projects.len(), s.app.active), (true, 2, 1));
+            wait_until("its tab starts in the folder", || term(&s.app, 1).cwd().as_ref() == Some(&s.root));
+        }
+
+        #[test]
+        fn clicking_a_folder_goes_into_it() {
+            let mut s = open_picker();
+
+            let web = item_pos(&s.app, "web");
+            click(&mut s.app, web);
+
+            assert_eq!(picker(&s.app).dir(), s.root.join("web"));
+        }
+
+        #[test]
+        fn open_button_opens_the_current_folder() {
+            let mut s = open_picker();
+            let web = item_pos(&s.app, "web");
+            click(&mut s.app, web);
+
+            click(&mut s.app, button(0));
+
+            assert_eq!(s.app.projects.get(1).map(|p| p.path.clone()), Some(s.root.join("web")));
+        }
+
+        #[test]
+        fn typing_filters_and_enter_goes_into_the_match() {
+            let mut s = open_picker();
+
+            type_text(&mut s.app, "we");
+            send_key(&mut s.app, KeyCode::Enter, KeyModifiers::NONE);
+
+            assert_eq!((picker(&s.app).dir(), s.app.projects.len()), (s.root.join("web").as_path(), 1));
+        }
+
+        #[test]
+        fn arrows_select_and_tab_goes_into_the_selection() {
+            let mut s = open_picker();
+
+            send_key(&mut s.app, KeyCode::Down, KeyModifiers::NONE);
+            send_key(&mut s.app, KeyCode::Down, KeyModifiers::NONE);
+            send_key(&mut s.app, KeyCode::Tab, KeyModifiers::NONE);
+
+            assert_eq!(picker(&s.app).dir(), s.root.join("active"));
+        }
+
+        #[test]
+        fn left_goes_up() {
+            let mut s = open_picker();
+
+            send_key(&mut s.app, KeyCode::Left, KeyModifiers::NONE);
+
+            assert_eq!(Some(picker(&s.app).dir()), s.root.parent());
+        }
+
+        #[test]
+        fn a_pasted_path_is_walked() {
+            let mut s = open_picker();
+
+            s.app
+                .handle_event(AppEvent::Input(Event::Paste(format!("{}/web/src/", s.root.display()))), AREA)
+                .expect("handle paste");
+
+            assert_eq!(picker(&s.app).dir(), s.root.join("web/src"));
+        }
+
+        #[test]
+        fn esc_cancels() {
+            let mut s = open_picker();
+
+            send_key(&mut s.app, KeyCode::Esc, KeyModifiers::NONE);
+
+            assert_eq!((s.app.overlay.is_none(), s.app.projects.len()), (true, 1));
+        }
+
+        #[test]
+        fn cancel_button_cancels() {
+            let mut s = open_picker();
+
+            click(&mut s.app, button(1));
+
+            assert_eq!((s.app.overlay.is_none(), s.app.projects.len()), (true, 1));
+        }
+
+        #[test]
+        fn the_wheel_scrolls_the_list() {
+            let tmp = TempDir::new();
+            for i in 0..40 {
+                std::fs::create_dir(tmp.path().join(format!("f{i:02}"))).expect("create folder");
+            }
+            let picker = Picker::open(tmp.path(), None).expect("open picker");
+            let (mut app, _rx) = app();
+            app.overlay = Some(Overlay::Picker(picker));
+            let ev =
+                MouseEvent { kind: MouseEventKind::ScrollDown, column: 50, row: 10, modifiers: KeyModifiers::NONE };
+
+            app.handle_event(AppEvent::Input(Event::Mouse(ev)), AREA).expect("handle wheel");
+
+            assert_eq!(self::picker(&app).scroll(), usize::try_from(WHEEL_ROWS).expect("rows"));
+        }
+    }
+
+    mod compact {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        use super::*;
+
+        const SMALL: Rect = Rect { x: 0, y: 0, width: 80, height: 40 };
+
+        fn small() -> ui::Areas {
+            ui::layout(SMALL, ui::Widths::default())
+        }
+
+        fn press(app: &mut App, pos: Position) {
+            mouse_in(app, MouseEventKind::Down(MouseButton::Left), pos, SMALL);
+        }
+
+        fn open_menu(app: &mut App) {
+            press(app, small().bar.as_position());
+        }
+
+        fn row(app: &App, row: WorkspaceRow) -> Position {
+            let r = ui::workspace_row(
+                small().workspaces_list,
+                small().pitch,
+                &app.tab_counts(),
+                app.workspaces_scroll,
+                row,
+            );
+            Position::new(r.x + 3, r.y)
+        }
+
+        #[test]
+        fn the_bar_opens_the_workspaces_of_the_active_project() {
+            let (mut app, _rx) = app();
+            open_menu(&mut app);
+            assert_eq!(app.nav, Some(ui::Nav::Workspaces));
+        }
+
+        #[test]
+        fn the_bar_opens_the_projects_without_a_project() {
+            let (mut app, _rx) = app();
+            app.projects.clear();
+            open_menu(&mut app);
+            assert_eq!(app.nav, Some(ui::Nav::Projects));
+        }
+
+        #[test]
+        fn the_bar_closes_an_open_menu() {
+            let (mut app, _rx) = app();
+            open_menu(&mut app);
+            open_menu(&mut app);
+            assert_eq!(app.nav, None);
+        }
+
+        #[test]
+        fn back_shows_the_projects() {
+            let (mut app, _rx) = app();
+            open_menu(&mut app);
+            press(&mut app, small().back.as_position());
+            assert_eq!(app.nav, Some(ui::Nav::Projects));
+        }
+
+        #[test]
+        fn picking_a_project_shows_its_workspaces() {
+            let (mut app, _rx, _dirs) = app_with(2);
+            open_menu(&mut app);
+            press(&mut app, small().back.as_position());
+            let first = ui::entry_row(small().list, small().pitch, 2, app.projects_scroll, 0).as_position();
+            press(&mut app, first);
+            assert_eq!((app.active, app.nav), (0, Some(ui::Nav::Workspaces)));
+        }
+
+        #[test]
+        fn picking_a_tab_closes_the_menu() {
+            let (mut app, _rx, _dirs) = app_with(1);
+            app.add_tab(0, 0, SMALL).expect("add a tab");
+            open_menu(&mut app);
+            let pos = row(&app, WorkspaceRow::Tab(0, 0));
+            press(&mut app, pos);
+            assert_eq!((app.projects[0].workspaces[0].active, app.nav), (0, None));
+        }
+
+        #[test]
+        fn closing_a_tab_keeps_the_menu_open() {
+            let (mut app, _rx, _dirs) = app_with(1);
+            app.add_tab(0, 0, SMALL).expect("add a tab");
+            open_menu(&mut app);
+            let r = ui::workspace_row(
+                small().workspaces_list,
+                small().pitch,
+                &app.tab_counts(),
+                0,
+                WorkspaceRow::Tab(0, 0),
+            );
+            press(&mut app, ui::row_close_button(r).as_position());
+            assert_eq!(app.nav, Some(ui::Nav::Workspaces));
+        }
+
+        #[test]
+        fn clicks_on_the_menu_never_reach_the_pane() {
+            let (mut app, _rx) = app();
+            open_menu(&mut app);
+            press(&mut app, small().back.as_position());
+            let under_the_title = Position::new(3, small().title.y + 1);
+            mouse_in(&mut app, MouseEventKind::Down(MouseButton::Right), under_the_title, SMALL);
+            assert!(app.overlay.is_none(), "the pane menu opened under the projects menu");
+        }
+
+        #[test]
+        fn escape_closes_the_menu() {
+            let (mut app, _rx) = app();
+            open_menu(&mut app);
+            send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            assert_eq!(app.nav, None);
+        }
+
+        #[test]
+        fn the_search_button_opens_the_search() {
+            let (mut app, _rx) = app();
+            press(&mut app, small().search_button.as_position());
+            assert!(matches!(app.overlay, Some(Overlay::Search(_))));
+        }
+
+        #[test]
+        fn a_wide_terminal_closes_the_menu() {
+            let (mut app, _rx) = app();
+            open_menu(&mut app);
+            let mut t = Terminal::new(TestBackend::new(AREA.width, AREA.height)).expect("test backend");
+            t.draw(|f| app.draw(f)).expect("draw");
+            assert_eq!(app.nav, None);
+        }
+
+        #[test]
+        fn the_pane_takes_the_whole_width() {
+            let (mut app, _rx) = app();
+            app.resize(SMALL);
+            assert_eq!(term(&app, 0).emulator.size().expect("size"), (SMALL.height - ui::COMPACT_PITCH, SMALL.width));
+        }
+    }
+
+    mod sidebar_scroll {
+        use super::*;
+
+        const SHORT: Rect = Rect { x: 0, y: 0, width: 100, height: 14 };
+
+        fn short() -> ui::Areas {
+            ui::layout(SHORT, ui::Widths::default())
+        }
+
+        fn wheel_at(app: &mut App, kind: MouseEventKind, pos: Position) {
+            mouse_in(app, kind, pos, SHORT);
+        }
+
+        fn with_tabs(n: usize) -> (App, Receiver<AppEvent>, Vec<TempDir>) {
+            let (mut app, rx, dirs) = app_with(1);
+            for _ in 1..n {
+                app.add_tab(0, 0, SHORT).expect("add a tab");
+            }
+            (app, rx, dirs)
+        }
+
+        #[test]
+        fn the_active_project_is_scrolled_into_view() {
+            let (mut app, _rx, _dirs) = app_with(4);
+            app.follow(SHORT);
+            assert!(!ui::entry_row(short().list, short().pitch, 4, app.projects_scroll, 3).is_empty());
+        }
+
+        #[test]
+        fn the_wheel_scrolls_the_projects() {
+            let (mut app, _rx, _dirs) = app_with(4);
+            app.active = 0;
+            app.follow(SHORT);
+            wheel_at(&mut app, MouseEventKind::ScrollDown, short().list.as_position());
+            assert_eq!(app.projects_scroll, 2);
+        }
+
+        #[test]
+        fn scrolling_away_does_not_snap_back_to_the_active_project() {
+            let (mut app, _rx, _dirs) = app_with(4);
+            app.follow(SHORT);
+            wheel_at(&mut app, MouseEventKind::ScrollUp, short().list.as_position());
+            app.follow(SHORT);
+            assert_eq!(app.projects_scroll, 0);
+        }
+
+        #[test]
+        fn a_click_on_a_scrolled_entry_selects_that_project() {
+            let (mut app, _rx, _dirs) = app_with(4);
+            app.follow(SHORT);
+            app.active = 0;
+            let pos = Position::new(short().list.x + 3, short().list.y);
+            mouse_in(&mut app, MouseEventKind::Down(MouseButton::Left), pos, SHORT);
+            assert_eq!(app.active, 2);
+        }
+
+        #[test]
+        fn a_new_tab_is_scrolled_into_view() {
+            let (mut app, _rx, _dirs) = with_tabs(4);
+            app.follow(SHORT);
+            let row = ui::workspace_row(
+                short().workspaces_list,
+                short().pitch,
+                &app.tab_counts(),
+                app.workspaces_scroll,
+                WorkspaceRow::Tab(0, 3),
+            );
+            assert!(!row.is_empty());
+        }
+
+        #[test]
+        fn the_wheel_scrolls_the_workspaces() {
+            let (mut app, _rx, _dirs) = with_tabs(4);
+            app.projects[0].workspaces[0].active = 0;
+            app.follow(SHORT);
+            wheel_at(&mut app, MouseEventKind::ScrollDown, short().workspaces_list.as_position());
+            assert_eq!(app.workspaces_scroll, 3);
+        }
+    }
+
+    mod search {
+        use super::*;
+
+        fn named() -> (App, Receiver<AppEvent>, Vec<TempDir>) {
+            let (mut app, rx, dirs) = app_with(2);
+            app.add_tab(0, 0, AREA).expect("add a tab");
+            app.projects[0].name = Some("alpha".into());
+            app.projects[1].name = Some("beta".into());
+            app.projects[0].workspaces[0].name = Some("feat/login".into());
+            app.projects[0].workspaces[0].tabs[0].name = Some("server".into());
+            app.projects[0].workspaces[0].tabs[1].name = Some("editor".into());
+            app.active = 1;
+            (app, rx, dirs)
+        }
+
+        fn open_search(app: &mut App) {
+            click(app, areas().search.as_position());
+        }
+
+        fn query(app: &App) -> Option<&str> {
+            match &app.overlay {
+                Some(Overlay::Search(search)) => Some(search.query()),
+                _ => None,
+            }
+        }
+
+        fn active(app: &App) -> (usize, usize, usize) {
+            let project = &app.projects[app.active];
+            (app.active, project.active, project.workspaces[project.active].active)
+        }
+
+        fn result_pos(app: &App, i: usize) -> Position {
+            let len = app.search_results(query(app).expect("search is open")).len();
+            ui::result_item(areas().results, len, 0, i).as_position()
+        }
+
+        #[test]
+        fn clicking_the_bar_opens_it_and_keys_go_to_it() {
+            let (mut app, _rx, _dirs) = named();
+            open_search(&mut app);
+            type_text(&mut app, "alp");
+            assert_eq!(query(&app), Some("alp"));
+        }
+
+        #[test]
+        fn enter_goes_to_the_best_match() {
+            let (mut app, _rx, _dirs) = named();
+            open_search(&mut app);
+            submit_text(&mut app, "alpha");
+            assert_eq!((app.active, query(&app)), (0, None));
+        }
+
+        #[test]
+        fn a_tab_is_found_in_another_project() {
+            let (mut app, _rx, _dirs) = named();
+            open_search(&mut app);
+            submit_text(&mut app, "editor");
+            assert_eq!(active(&app), (0, 0, 1));
+        }
+
+        #[test]
+        fn tabs_are_found_by_their_workspace() {
+            let (app, _rx, _dirs) = named();
+            let names: Vec<String> = app.search_results("login").into_iter().map(|c| c.name).collect();
+            assert_eq!(names, ["feat/login", "server", "editor"]);
+        }
+
+        #[test]
+        fn down_selects_the_next_result() {
+            let (mut app, _rx, _dirs) = named();
+            open_search(&mut app);
+            type_text(&mut app, "login");
+            send_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+            send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            assert_eq!(active(&app), (0, 0, 0));
+        }
+
+        #[test]
+        fn enter_with_no_match_keeps_it_open() {
+            let (mut app, _rx, _dirs) = named();
+            open_search(&mut app);
+            submit_text(&mut app, "zzz");
+            assert_eq!((app.active, query(&app)), (1, Some("zzz")));
+        }
+
+        #[test]
+        fn esc_closes_it_without_switching() {
+            let (mut app, _rx, _dirs) = named();
+            open_search(&mut app);
+            type_text(&mut app, "alpha");
+            send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            assert_eq!((app.active, query(&app)), (1, None));
+        }
+
+        #[test]
+        fn clicking_a_result_goes_there() {
+            let (mut app, _rx, _dirs) = named();
+            open_search(&mut app);
+            type_text(&mut app, "editor");
+            let pos = result_pos(&app, 0);
+            click(&mut app, pos);
+            assert_eq!((active(&app), query(&app)), ((0, 0, 1), None));
+        }
+
+        #[test]
+        fn clicking_outside_closes_it_without_acting() {
+            let (mut app, _rx, _dirs) = named();
+            open_search(&mut app);
+            click(&mut app, ui::new_project_button(list(), 1, 2).as_position());
+            assert!(app.overlay.is_none(), "the search is still open or the picker opened");
+        }
+
+        #[test]
+        fn a_paste_goes_into_the_query() {
+            let (mut app, _rx, _dirs) = named();
+            open_search(&mut app);
+            app.handle_event(AppEvent::Input(Event::Paste("bet\r".into())), AREA).expect("handle paste");
+            assert_eq!(query(&app), Some("bet"));
+        }
+    }
+
+    mod settings {
+        use super::*;
+        use crate::settings::Row;
+        use crate::test_util::FakeHttp;
+
+        const MEMBER: &str = r#"{"mention_name":"ana","workspace2":{"url_slug":"acme"}}"#;
+
+        struct Setup {
+            app: App,
+            rx: Receiver<AppEvent>,
+            config: TempDir,
+            _dir: TempDir,
+        }
+
+        fn open() -> Setup {
+            let (dir, config) = (TempDir::new(), TempDir::new());
+            let (mut app, rx) = app_in(dir.path(), config.path().join("config.json"));
+            app.env_tokens.clear();
+            click(&mut app, areas().settings.as_position());
+            Setup { app, rx, config, _dir: dir }
+        }
+
+        fn form(app: &App) -> &Settings {
+            let Some(Overlay::Settings(s)) = &app.overlay else { panic!("the settings are not open") };
+            s
+        }
+
+        fn config_path(s: &Setup) -> PathBuf {
+            s.config.path().join("config.json")
+        }
+
+        fn secrets_file(s: &Setup) -> PathBuf {
+            secrets::path(&config_path(s))
+        }
+
+        fn sections(app: &App) -> Vec<&'static str> {
+            form(app).rows().iter().map(Row::section).collect()
+        }
+
+        fn show(app: &mut App, page: Page) {
+            let names = Page::ALL.map(Page::name);
+            let i = Page::ALL.iter().position(|p| *p == page).expect("a page");
+            click(app, ui::settings_tabs(ui::settings_area(AREA), &names)[i].as_position());
+        }
+
+        fn click_row(s: &mut Setup, row: &Row) {
+            show(&mut s.app, row.page());
+            let i = form(&s.app).rows().iter().position(|r| r == row).expect("the row is there");
+            let pos = ui::settings_row(AREA, &sections(&s.app), form(&s.app).cursor, i).as_position();
+            click(&mut s.app, pos);
+        }
+
+        fn enter(s: &mut Setup) {
+            send_key(&mut s.app, KeyCode::Enter, KeyModifiers::NONE);
+        }
+
+        fn shortcut(s: &mut Setup, status: u16) -> FakeHttp {
+            let server = FakeHttp::start(vec![("GET /api/v3/member", status, MEMBER)]);
+            s.app.apis.shortcut = format!("{}/api/v3", server.url());
+            server
+        }
+
+        fn paste_shortcut_token(s: &mut Setup, token: &str) {
+            click_row(s, &Row::Token(Source::Shortcut));
+            type_text(&mut s.app, token);
+            enter(s);
+        }
+
+        fn go_to(s: &mut Setup, row: &Row) {
+            show(&mut s.app, row.page());
+            let i = form(&s.app).rows().iter().position(|r| r == row).expect("the row is there");
+            while form(&s.app).cursor < i {
+                send_key(&mut s.app, KeyCode::Down, KeyModifiers::NONE);
+            }
+        }
+
+        fn pick(s: &mut Setup, row: &Row, value: &str) {
+            go_to(s, row);
+            enter(s);
+            type_text(&mut s.app, value);
+            enter(s);
+        }
+
+        #[test]
+        fn button_opens_them_with_the_current_config() {
+            let s = open();
+            assert_eq!(form(&s.app).config.worktrees_dir, config::DEFAULT_WORKTREES_DIR);
+        }
+
+        #[test]
+        fn the_folder_is_saved_at_once() {
+            let mut s = open();
+            click_row(&mut s, &Row::Folder);
+            while form(&s.app).edit.as_ref().is_some_and(|e| !e.input.is_empty()) {
+                send_key(&mut s.app, KeyCode::Backspace, KeyModifiers::NONE);
+            }
+            type_text(&mut s.app, "/srv/worktrees");
+
+            enter(&mut s);
+
+            assert_eq!(
+                (config::load(&config_path(&s)).worktrees_dir.as_str(), s.app.config.worktrees_dir.as_str()),
+                ("/srv/worktrees", "/srv/worktrees")
+            );
+        }
+
+        #[test]
+        fn a_relative_folder_is_refused() {
+            let mut s = open();
+            click_row(&mut s, &Row::Folder);
+            type_text(&mut s.app, "x");
+            form(&s.app);
+            if let Some(Overlay::Settings(f)) = &mut s.app.overlay {
+                f.edit.as_mut().expect("editing").input = "worktrees".into();
+            }
+
+            enter(&mut s);
+
+            assert_eq!(
+                (form(&s.app).edit.as_ref().and_then(|e| e.error.clone()).is_some(), config_path(&s).exists()),
+                (true, false)
+            );
+        }
+
+        #[test]
+        fn a_click_on_a_tab_shows_its_rows() {
+            let mut s = open();
+            show(&mut s.app, Page::Tui);
+            assert_eq!(form(&s.app).rows(), [Row::DimPanes]);
+        }
+
+        #[test]
+        fn they_open_again_on_the_last_tab() {
+            let mut s = open();
+            send_key(&mut s.app, KeyCode::Tab, KeyModifiers::NONE);
+            send_key(&mut s.app, KeyCode::Esc, KeyModifiers::NONE);
+
+            click(&mut s.app, areas().settings.as_position());
+
+            assert_eq!(form(&s.app).page, Page::Agents);
+        }
+
+        #[test]
+        fn esc_closes_them() {
+            let mut s = open();
+            send_key(&mut s.app, KeyCode::Esc, KeyModifiers::NONE);
+            assert!(s.app.overlay.is_none());
+        }
+
+        #[test]
+        fn a_good_token_is_checked_and_saved() {
+            let mut s = open();
+            let server = shortcut(&mut s, 200);
+
+            paste_shortcut_token(&mut s, "t0k");
+
+            pump_until(&mut s.app, &s.rx, "the check finishes", |a| !form(a).busy());
+            assert_eq!(secrets::read(&secrets_file(&s), "shortcut_token").as_deref(), Some("t0k"));
+            assert!(server.request(0).to_lowercase().contains("shortcut-token: t0k"));
+            assert!(matches!(form(&s.app).tokens[0].1, Status::Saved(Some(_))));
+        }
+
+        #[test]
+        fn a_rejected_token_stays_in_its_field_and_is_not_saved() {
+            let mut s = open();
+            let _server = shortcut(&mut s, 401);
+
+            paste_shortcut_token(&mut s, "bad");
+
+            pump_until(&mut s.app, &s.rx, "the check fails", |a| !form(a).busy());
+            let error = form(&s.app).edit.as_ref().and_then(|e| e.error.clone());
+            assert_eq!(error.as_deref(), Some("Shortcut rejected the token"));
+            assert_eq!(secrets::read(&secrets_file(&s), "shortcut_token"), None);
+        }
+
+        #[test]
+        fn a_saved_token_shows_as_connected() {
+            let (dir, config) = (TempDir::new(), TempDir::new());
+            secrets::write(&secrets::path(&config.path().join("config.json")), "linear_api_key", "k").expect("save");
+            let (mut app, _rx) = app_in(dir.path(), config.path().join("config.json"));
+            app.env_tokens.clear();
+
+            click(&mut app, areas().settings.as_position());
+
+            assert_eq!(form(&app).tokens[1].1, Status::Saved(None));
+        }
+
+        #[test]
+        fn the_remove_button_forgets_a_saved_token() {
+            let mut s = open();
+            secrets::write(&secrets_file(&s), "shortcut_token", "t0k").expect("save");
+            send_key(&mut s.app, KeyCode::Esc, KeyModifiers::NONE);
+            click(&mut s.app, areas().settings.as_position());
+            show(&mut s.app, Page::Issues);
+            let row = ui::settings_row(AREA, &sections(&s.app), 0, 0);
+
+            click(&mut s.app, ui::settings_remove(row).as_position());
+
+            assert_eq!(
+                (secrets::read(&secrets_file(&s), "shortcut_token"), &form(&s.app).tokens[0].1),
+                (None, &Status::Missing)
+            );
+        }
+
+        #[test]
+        fn a_token_saved_here_opens_the_issues_tab_without_asking() {
+            let mut s = open();
+            let _server = shortcut(&mut s, 200);
+            paste_shortcut_token(&mut s, "t0k");
+            pump_until(&mut s.app, &s.rx, "the check finishes", |a| !form(a).busy());
+            send_key(&mut s.app, KeyCode::Esc, KeyModifiers::NONE);
+
+            click(&mut s.app, areas().issues.as_position());
+
+            let Some(Overlay::Issues(b)) = &s.app.overlay else { panic!("the issues are not open") };
+            assert!(b.connections.contains_key(&Source::Shortcut));
+        }
+
+        #[test]
+        fn a_mode_picked_here_is_how_the_agent_starts() {
+            let mut s = open();
+
+            pick(&mut s, &Row::Kind("claude".into()), "plan");
+
+            assert_eq!(
+                agents::command_line(&config::load(&config_path(&s)), "claude"),
+                "claude --permission-mode plan"
+            );
+        }
+
+        #[test]
+        fn the_default_agent_picked_here_takes_the_issues() {
+            let mut s = open();
+            pick(&mut s, &Row::DefaultAgent, "codex");
+            send_key(&mut s.app, KeyCode::Esc, KeyModifiers::NONE);
+
+            click(&mut s.app, areas().issues.as_position());
+
+            let Some(Overlay::Issues(b)) = &s.app.overlay else { panic!("the issues are not open") };
+            assert_eq!(b.agents.default.as_deref(), Some("codex"));
+        }
+
+        #[test]
+        fn hiding_a_tab_hides_it_in_the_issues() {
+            let mut s = open();
+            go_to(&mut s, &Row::Tab("linear"));
+            enter(&mut s);
+            send_key(&mut s.app, KeyCode::Esc, KeyModifiers::NONE);
+
+            click(&mut s.app, areas().issues.as_position());
+
+            let Some(Overlay::Issues(b)) = &s.app.overlay else { panic!("the issues are not open") };
+            assert!(!b.tabs.contains(&IssueTab::One(Source::Linear)));
+        }
+    }
+
+    mod select_text {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::style::Modifier;
+
+        use super::*;
+
+        fn showing(text: &str) -> (App, Receiver<AppEvent>) {
+            let (mut app, rx) = app();
+            app.term_mut().expect("a pane").feed(format!("\x1b[2J\x1b[H{text}").as_bytes());
+            (app, rx)
+        }
+
+        fn cell(col: u16, row: u16) -> Position {
+            Position::new(areas().pane.x + col, areas().pane.y + row)
+        }
+
+        fn drag(app: &mut App, from: Position, to: Position) {
+            click(app, from);
+            mouse(app, MouseEventKind::Drag(MouseButton::Left), to);
+            mouse(app, MouseEventKind::Up(MouseButton::Left), to);
+        }
+
+        #[test]
+        fn dragging_over_text_copies_it_to_the_clipboard() {
+            let (mut app, _rx) = showing("hello world");
+
+            drag(&mut app, cell(0, 0), cell(4, 0));
+
+            assert_eq!(app.take_host_writes(), [clipboard::osc52("hello")]);
+        }
+
+        #[test]
+        fn copying_shows_a_toast() {
+            let (mut app, _rx) = showing("hello world");
+
+            drag(&mut app, cell(0, 0), cell(4, 0));
+
+            assert_eq!(app.toast.map(|(message, _)| message), Some(COPIED));
+        }
+
+        #[test]
+        fn a_click_copies_nothing() {
+            let (mut app, _rx) = showing("hello world");
+
+            click(&mut app, cell(2, 0));
+            mouse(&mut app, MouseEventKind::Up(MouseButton::Left), cell(2, 0));
+
+            assert_eq!((app.take_host_writes(), app.toast), (Vec::<Vec<u8>>::new(), None));
+        }
+
+        #[test]
+        fn a_drag_past_the_pane_stops_at_its_edge() {
+            let (mut app, _rx) = showing("hello world");
+
+            drag(&mut app, cell(6, 0), Position::new(2, areas().pane.y));
+
+            assert_eq!(app.take_host_writes(), [clipboard::osc52("hello w")]);
+        }
+
+        #[test]
+        fn the_text_is_highlighted_while_dragging() {
+            let (mut app, _rx) = showing("hello world");
+            click(&mut app, cell(0, 0));
+
+            mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), cell(4, 0));
+
+            let screen = app.term_mut().expect("a pane").emulator.snapshot().expect("snapshot");
+            assert!(screen.rows[0][4].style.add_modifier.contains(Modifier::REVERSED));
+        }
+
+        #[test]
+        fn a_program_that_wants_the_mouse_gets_the_drag_instead() {
+            let (mut app, _rx) = showing("\x1b[?1002hhello world");
+
+            drag(&mut app, cell(0, 0), cell(4, 0));
+
+            assert_eq!((app.selecting, app.take_host_writes()), (None, Vec::<Vec<u8>>::new()));
+        }
+
+        #[test]
+        fn a_program_that_copies_reaches_the_clipboard_with_a_toast() {
+            let (mut app, _rx) = app();
+            let id = term(&app, 0).id;
+
+            app.handle_event(AppEvent::Output(id, b"\x1b]52;c;aGVsbG8=\x07".to_vec()), AREA).expect("handle output");
+
+            assert_eq!(
+                (app.take_host_writes(), app.toast.map(|(message, _)| message)),
+                (vec![clipboard::osc52("hello")], Some(COPIED))
+            );
+        }
+
+        #[test]
+        fn the_toast_goes_away_after_a_while() {
+            let (mut app, _rx) = showing("hello world");
+            app.toast = Instant::now().checked_sub(TOAST_FOR).map(|at| (COPIED, at));
+            let mut t = Terminal::new(TestBackend::new(AREA.width, AREA.height)).expect("test backend");
+
+            t.draw(|f| app.draw(f)).expect("draw");
+
+            assert_eq!(app.toast, None);
+        }
+    }
+
+    mod splits {
+        use super::*;
+
+        fn pane() -> Rect {
+            areas().pane
+        }
+
+        fn inside(r: Rect) -> Position {
+            Position::new(r.x + 1, r.y + 1)
+        }
+
+        fn tab(app: &App) -> &Tab {
+            app.tab().expect("an active tab")
+        }
+
+        fn rects(app: &App) -> Vec<Rect> {
+            tab(app).layout.panes(pane()).into_iter().map(|(_, r)| r).collect()
+        }
+
+        fn pane_menu(app: &App) -> Vec<&'static str> {
+            let Some(Overlay::PaneMenu { actions, .. }) = &app.overlay else { panic!("the pane menu is not open") };
+            actions.iter().map(|a| a.label()).collect()
+        }
+
+        fn pick(app: &mut App, label: &str) {
+            let Some(Overlay::PaneMenu { at, .. }) = &app.overlay else { panic!("the pane menu is not open") };
+            let labels = pane_menu(app);
+            let i = labels.iter().position(|l| *l == label).expect("the item is in the menu");
+            let item = ui::menu_item(ui::menu_area(AREA, *at, &labels), i).as_position();
+            click(app, item);
+        }
+
+        fn split(app: &mut App, at: Position, label: &str) {
+            right_click(app, at);
+            pick(app, label);
+        }
+
+        fn split_right() -> (App, Receiver<AppEvent>) {
+            let (mut app, rx) = app();
+            split(&mut app, inside(pane()), "split right");
+            (app, rx)
+        }
+
+        fn divider(app: &App) -> split::Divider {
+            tab(app).layout.dividers(pane()).remove(0)
+        }
+
+        fn drag(app: &mut App, from: Position, to: Position) {
+            click(app, from);
+            mouse(app, MouseEventKind::Drag(MouseButton::Left), to);
+            mouse(app, MouseEventKind::Up(MouseButton::Left), to);
+        }
+
+        #[test]
+        fn a_right_click_in_a_pane_opens_its_menu() {
+            let (mut app, _rx) = app();
+            right_click(&mut app, inside(pane()));
+            assert_eq!(pane_menu(&app), ["split right", "split down", "send right-clicks to the pane", "close pane"]);
+        }
+
+        #[test]
+        fn split_right_puts_a_new_pane_beside_it() {
+            let (app, _rx) = split_right();
+            let room = pane().width - 2;
+            let left = room.div_ceil(2);
+            assert_eq!(
+                rects(&app),
+                [Rect { width: left, ..pane() }, Rect { x: pane().x + left + 2, width: room - left, ..pane() }]
+            );
+        }
+
+        #[test]
+        fn split_down_puts_a_new_pane_below_it() {
+            let (mut app, _rx) = app();
+            split(&mut app, inside(pane()), "split down");
+            let room = pane().height - 1;
+            let top = room.div_ceil(2);
+            assert_eq!(
+                rects(&app),
+                [Rect { height: top, ..pane() }, Rect { y: pane().y + top + 1, height: room - top, ..pane() }]
+            );
+        }
+
+        #[test]
+        fn the_new_pane_becomes_the_active_one() {
+            let (app, _rx) = split_right();
+            assert_eq!(tab(&app).active, 1);
+        }
+
+        #[test]
+        fn each_terminal_gets_the_size_of_its_pane() {
+            let (app, _rx) = split_right();
+            let sizes: Vec<(u16, u16)> = tab(&app).panes.iter().map(|t| t.emulator.size().expect("size")).collect();
+            let expected: Vec<(u16, u16)> = rects(&app).iter().map(|r| (r.height, r.width)).collect();
+            assert_eq!(sizes, expected);
+        }
+
+        #[test]
+        fn the_new_pane_opens_in_the_folder_of_the_split_one() {
+            let (mut app, _rx, dirs) = app_with(1);
+            split(&mut app, inside(pane()), "split right");
+            let new = tab(&app).panes[1].cwd();
+            assert_eq!(new, Some(canonical(&dirs[0])));
+        }
+
+        #[test]
+        fn a_split_that_would_not_fit_is_not_offered() {
+            let (mut app, _rx) = split_right();
+            let at = inside(rects(&app)[1]);
+            right_click(&mut app, at);
+            assert_eq!(pane_menu(&app), ["split down", "send right-clicks to the pane", "close pane"]);
+        }
+
+        #[test]
+        fn a_click_on_another_pane_makes_it_active() {
+            let (mut app, _rx) = split_right();
+            let at = inside(rects(&app)[0]);
+            click(&mut app, at);
+            assert_eq!((tab(&app).active, app.selecting), (0, None));
+        }
+
+        fn pane_text(app: &mut App, i: usize) -> String {
+            let term = &mut app.tab_mut().expect("a tab").panes[i];
+            term.emulator.snapshot().map(|s| s.contents()).unwrap_or_default()
+        }
+
+        #[test]
+        fn keys_go_to_the_active_pane() {
+            let (mut app, rx) = split_right();
+            type_line(&mut app, "echo split-\"\"works");
+            wait_until("the new pane runs the command", || {
+                while let Ok(ev) = rx.try_recv() {
+                    app.handle_event(ev, AREA).expect("handle event");
+                }
+                pane_text(&mut app, 1).contains("split-works")
+            });
+            assert!(!pane_text(&mut app, 0).contains("split-works"));
+        }
+
+        #[test]
+        fn closing_a_pane_gives_its_space_back() {
+            let (mut app, rx) = split_right();
+            let first = tab(&app).panes[0].id;
+            let at = inside(rects(&app)[1]);
+            split(&mut app, at, "close pane");
+            pump_until(&mut app, &rx, "the pane is gone", |app| tab(app).panes.len() == 1);
+            assert_eq!((&tab(&app).layout, tab(&app).active), (&split::Node::Leaf(first), 0));
+        }
+
+        #[test]
+        fn exiting_the_shell_closes_its_pane() {
+            let (mut app, rx) = split_right();
+            type_line(&mut app, "exit");
+            pump_until(&mut app, &rx, "the pane is gone", |app| tab(app).panes.len() == 1);
+            assert_eq!(rects(&app), [pane()]);
+        }
+
+        #[test]
+        fn a_program_that_wants_the_mouse_still_gets_the_menu() {
+            let (mut app, _rx) = app();
+            app.term_mut().expect("a pane").feed(b"\x1b[?1000h");
+            right_click(&mut app, inside(pane()));
+            assert!(matches!(app.overlay, Some(Overlay::PaneMenu { .. })));
+        }
+
+        #[test]
+        fn right_clicks_can_go_to_the_program_instead() {
+            let (mut app, _rx) = app();
+            app.term_mut().expect("a pane").feed(b"\x1b[?1000h");
+            split(&mut app, inside(pane()), "send right-clicks to the pane");
+
+            right_click(&mut app, inside(pane()));
+
+            assert!(app.overlay.is_none());
+        }
+
+        #[test]
+        fn the_menu_offers_the_way_back() {
+            let (mut app, _rx) = app();
+            app.term_mut().expect("a pane").feed(b"\x1b[?1000h");
+            split(&mut app, inside(pane()), "send right-clicks to the pane");
+            app.term_mut().expect("a pane").feed(b"\x1b[?1000l");
+
+            right_click(&mut app, inside(pane()));
+
+            assert!(pane_menu(&app).contains(&"use this menu on right-click"));
+        }
+
+        #[test]
+        fn dragging_the_divider_moves_it() {
+            let (mut app, _rx) = split_right();
+            let line = divider(&app).line;
+
+            drag(&mut app, Position::new(line.x, line.y + 2), Position::new(line.x - 5, line.y + 2));
+
+            assert_eq!((divider(&app).line.x, app.divider_drag.is_none()), (line.x - 5, true));
+        }
+
+        #[test]
+        fn the_terminals_follow_the_divider() {
+            let (mut app, _rx) = split_right();
+            let line = divider(&app).line;
+            drag(&mut app, Position::new(line.x, line.y), Position::new(line.x - 5, line.y));
+
+            app.resize(AREA);
+
+            let left = rects(&app)[0];
+            assert_eq!(tab(&app).panes[0].emulator.size().expect("size"), (left.height, left.width));
+        }
+
+        #[test]
+        fn a_double_click_on_the_divider_splits_in_half_again() {
+            let (mut app, _rx) = split_right();
+            let line = divider(&app).line;
+            drag(&mut app, Position::new(line.x, line.y), Position::new(line.x - 5, line.y));
+            let moved = divider(&app).line.as_position();
+
+            click(&mut app, moved);
+            mouse(&mut app, MouseEventKind::Up(MouseButton::Left), moved);
+            click(&mut app, moved);
+
+            assert_eq!(divider(&app).line.x, line.x);
+        }
+
+        #[test]
+        fn a_selection_stops_at_the_edge_of_its_pane() {
+            let (mut app, _rx) = split_right();
+            let left = rects(&app)[0];
+            click(&mut app, inside(left));
+            app.tab_mut().expect("a tab").panes[0].feed(b"\x1b[2J\x1b[Hhello world, this line is long");
+
+            drag(&mut app, left.as_position(), Position::new(left.right() + 5, left.y));
+
+            assert_eq!(app.take_host_writes(), [clipboard::osc52("hello world, this li")]);
+        }
+
+        #[test]
+        fn the_layout_is_saved() {
+            let (app, _rx) = split_right();
+            let saved = &app.state().projects[0].workspaces[0].tabs[0];
+            let half = split::Node::Split {
+                dir: Dir::Right,
+                ratio: split::HALF,
+                first: Box::new(split::Node::Leaf(0)),
+                second: Box::new(split::Node::Leaf(1)),
+            };
+            assert_eq!((saved.panes.len(), saved.layout.as_ref()), (2, Some(&half)));
+        }
+
+        #[test]
+        fn restore_brings_back_the_layout_and_the_right_clicks() {
+            let (mut app, _rx) = split_right();
+            let at = inside(rects(&app)[1]);
+            split(&mut app, at, "send right-clicks to the pane");
+            let at = inside(rects(&app)[0]);
+            split(&mut app, at, "split down");
+            let saved = app.state();
+            let (mut restored, _rx2) = empty_app();
+
+            restored.restore(&saved, AREA).expect("restore");
+
+            let tab = tab(&restored);
+            let right_clicks: Vec<bool> = tab.panes.iter().map(|t| tab.right_clicks_to_pane(t.id)).collect();
+            assert_eq!(
+                (
+                    tab.layout.panes(pane()).len(),
+                    restored.state().projects[0].workspaces[0].tabs[0].layout.clone(),
+                    right_clicks
+                ),
+                (3, saved.projects[0].workspaces[0].tabs[0].layout.clone(), vec![false, true, false])
+            );
+        }
+
+        #[test]
+        fn a_tab_saved_without_a_layout_puts_its_panes_side_by_side() {
+            let dir = TempDir::new();
+            let (mut app, _rx) = empty_app();
+            let pane_state = PaneState { cwd: None, right_clicks: false };
+            let tab = TabState { name: None, panes: vec![pane_state.clone(), pane_state], active: 1, layout: None };
+            let workspace = WorkspaceState {
+                path: dir.path().to_path_buf(),
+                name: None,
+                worktree: false,
+                tabs: vec![tab],
+                active: 0,
+            };
+            let project =
+                ProjectState { path: dir.path().to_path_buf(), name: None, workspaces: vec![workspace], active: 0 };
+            let saved =
+                State { version: state::VERSION, projects: vec![project], active: 0, widths: None, issues: None };
+
+            app.restore(&saved, AREA).expect("restore");
+
+            assert_eq!(
+                (rects(&app).len(), tab_term(&app, 0, 0).id, app.tab().map(|t| t.active)),
+                (2, app.tab().expect("tab").panes[1].id, Some(1))
+            );
+        }
+    }
+
+    mod resize_columns {
+        use super::*;
+
+        fn border(app: &App, border: ui::Border) -> Position {
+            let r = app.layout(AREA).border(border);
+            Position::new(r.x, r.y + 1)
+        }
+
+        fn drag(app: &mut App, from: Position, to_x: u16) {
+            click(app, from);
+            mouse(app, MouseEventKind::Drag(MouseButton::Left), Position::new(to_x, from.y));
+            mouse(app, MouseEventKind::Up(MouseButton::Left), Position::new(to_x, from.y));
+        }
+
+        fn pane_cols(app: &App) -> u16 {
+            app.layout(AREA).pane.width
+        }
+
+        #[test]
+        fn dragging_the_projects_border_widens_the_sidebar() {
+            let (mut app, _rx) = app();
+            let from = border(&app, ui::Border::Projects);
+
+            drag(&mut app, from, 39);
+
+            assert_eq!(app.widths, ui::Widths { projects: 40, workspaces: ui::WORKSPACES_WIDTH });
+        }
+
+        #[test]
+        fn dragging_the_workspaces_border_narrows_the_pane() {
+            let (mut app, _rx) = app();
+            let before = pane_cols(&app);
+            let from = border(&app, ui::Border::Workspaces);
+
+            drag(&mut app, from, from.x + 5);
+
+            assert_eq!(pane_cols(&app), before - 5);
+        }
+
+        #[test]
+        fn the_terminals_follow_the_new_pane_size() {
+            let (mut app, _rx) = app();
+            let from = border(&app, ui::Border::Projects);
+
+            drag(&mut app, from, from.x - 10);
+            app.resize(AREA);
+
+            assert_eq!(term(&app, 0).emulator.size().expect("size"), (AREA.height, pane_cols(&app)));
+        }
+
+        #[test]
+        fn the_drag_ends_on_release() {
+            let (mut app, _rx) = app();
+            let from = border(&app, ui::Border::Projects);
+            drag(&mut app, from, 39);
+
+            mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), Position::new(45, from.y));
+
+            assert_eq!((app.resizing, app.widths.projects), (None, 40));
+        }
+
+        #[test]
+        fn a_drag_away_from_the_border_keeps_resizing() {
+            let (mut app, _rx) = app();
+            let from = border(&app, ui::Border::Projects);
+            click(&mut app, from);
+
+            mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), Position::new(39, from.y + 4));
+
+            assert_eq!((app.resizing, app.widths.projects), (Some(ui::Border::Projects), 40));
+        }
+
+        #[test]
+        fn a_double_click_brings_back_the_default_width() {
+            let (mut app, _rx) = app();
+            let from = border(&app, ui::Border::Projects);
+            drag(&mut app, from, 39);
+            let moved = border(&app, ui::Border::Projects);
+
+            click(&mut app, moved);
+            mouse(&mut app, MouseEventKind::Up(MouseButton::Left), moved);
+            click(&mut app, moved);
+
+            assert_eq!((app.widths, app.resizing), (ui::Widths::default(), None));
+        }
+
+        #[test]
+        fn two_slow_clicks_are_not_a_double_click() {
+            let (mut app, _rx) = app();
+            let from = border(&app, ui::Border::Projects);
+            drag(&mut app, from, 39);
+            let moved = border(&app, ui::Border::Projects);
+            click(&mut app, moved);
+            mouse(&mut app, MouseEventKind::Up(MouseButton::Left), moved);
+            app.border_click =
+                app.border_click.map(|(b, at)| (b, at.checked_sub(DOUBLE_CLICK).expect("an earlier instant")));
+
+            click(&mut app, moved);
+
+            assert_eq!(app.widths.projects, 40);
+        }
+
+        #[test]
+        fn a_click_right_after_a_drag_is_not_a_double_click() {
+            let (mut app, _rx) = app();
+            let from = border(&app, ui::Border::Projects);
+            drag(&mut app, from, 39);
+            let moved = border(&app, ui::Border::Projects);
+
+            click(&mut app, moved);
+
+            assert_eq!((app.widths.projects, app.resizing), (40, Some(ui::Border::Projects)));
+        }
+
+        #[test]
+        fn the_widths_are_saved() {
+            let (mut app, _rx) = app();
+            let from = border(&app, ui::Border::Projects);
+
+            drag(&mut app, from, 39);
+
+            assert_eq!(app.state().widths, Some(ui::Widths { projects: 40, workspaces: ui::WORKSPACES_WIDTH }));
+        }
+
+        #[test]
+        fn restore_brings_back_the_widths() {
+            let dir = TempDir::new();
+            let (mut app, _rx) = empty_app();
+            let widths = ui::Widths { projects: 40, workspaces: 20 };
+            let project = ProjectState { path: dir.path().to_path_buf(), name: None, workspaces: vec![], active: 0 };
+            let saved = State {
+                version: state::VERSION,
+                projects: vec![project],
+                active: 0,
+                widths: Some(widths),
+                issues: None,
+            };
+
+            app.restore(&saved, AREA).expect("restore");
+
+            assert_eq!(app.widths, widths);
+        }
+    }
+
+    #[test]
+    fn resize_fits_terminals_to_the_pane() {
+        let (mut app, _rx) = app();
+        app.resize(Rect::new(0, 0, 100, 10));
+        assert_eq!(
+            term(&app, 0).emulator.size().expect("size"),
+            (10, 100 - ui::SIDEBAR_WIDTH - ui::WORKSPACES_WIDTH - ui::PANE_PADDING)
+        );
+    }
+
+    mod issue_list {
+        use super::*;
+        use crate::test_util::{FakeHttp, fake_gh};
+
+        const LIST: &str = r#"[
+            {"number":7,"title":"Fix the login","state":"OPEN","labels":[{"name":"bug"}],"author":{"login":"ana"},
+             "updatedAt":"2026-09-19T12:00:00Z","url":"https://github.com/acme/shop/issues/7"},
+            {"number":3,"title":"Dark mode","state":"OPEN","labels":[],"author":{"login":"luis"},
+             "updatedAt":"2026-09-01T12:00:00Z","url":"https://github.com/acme/shop/issues/3"}
+        ]"#;
+        const VIEW: &str = r#"{"number":7,"title":"Fix the login","state":"OPEN","labels":[],"assignees":[],
+            "author":{"login":"ana"},"updatedAt":"","url":"u","body":"It **breaks**.",
+            "comments":[{"author":{"login":"bo"},"body":"Same here","createdAt":""}]}"#;
+        const MEMBER: &str = r#"{"mention_name":"ana","workspace2":{"url_slug":"acme"}}"#;
+        const STORIES: &str = r#"{"data":[{"id":482,"name":"Returns page crashes","app_url":"https://app.shortcut.com/acme/story/482",
+            "updated_at":"2026-09-30T00:00:00Z"}],"next":null}"#;
+
+        const FAKE_AGENT: &str = "#!/bin/sh\nprintf 'Do you trust the files in this folder?\\n'\nread answer\nprintf '\\033[2J\\033[H'\n\
+            printf 'agent ready> '\nread line\nprintf '%s' \"$line\" > got\n";
+
+        struct Setup {
+            app: App,
+            rx: Receiver<AppEvent>,
+            worktrees: TempDir,
+            config: TempDir,
+            _dir: TempDir,
+        }
+
+        fn setup(git: bool, gh_script: &str) -> Setup {
+            let dir = if git { git_repo(&[("README", "hi")]) } else { TempDir::new() };
+            let (worktrees, config) = (TempDir::new(), TempDir::new());
+            let config_path = config.path().join("config.json");
+            let gh = fake_gh(config.path(), &format!("touch \"$0.called\"\necho \"$@\" >> \"$0.args\"\n{gh_script}"));
+            let agent = config.path().join("agent");
+            crate::test_util::write_executable(&agent, FAKE_AGENT);
+            let settings = Config {
+                worktrees_dir: worktrees.path().display().to_string(),
+                agent: "fake".into(),
+                agent_commands: [("fake".to_string(), agent.display().to_string())].into(),
+                gh: gh.display().to_string(),
+                ..Config::default()
+            };
+            config::save(&config_path, &settings).expect("write config");
+            let (mut app, rx) = app_in(dir.path(), config_path);
+            app.env_tokens.clear();
+            Setup { app, rx, worktrees, config, _dir: dir }
+        }
+
+        fn listing() -> Setup {
+            setup(
+                true,
+                &format!("if [ \"$2\" = view ]; then cat <<'EOF'\n{VIEW}\nEOF\nelse cat <<'EOF'\n{LIST}\nEOF\nfi"),
+            )
+        }
+
+        fn shortcut(s: &mut Setup, routes: Vec<(&'static str, u16, &'static str)>) -> FakeHttp {
+            let mut all = vec![
+                ("GET /api/v3/member", 200, MEMBER),
+                ("GET /api/v3/members", 200, "[]"),
+                ("GET /api/v3/workflows", 200, "[]"),
+                ("GET /api/v3/search/stories", 200, STORIES),
+            ];
+            all.splice(0..0, routes);
+            let server = FakeHttp::start(all);
+            s.app.apis.shortcut = format!("{}/api/v3", server.url());
+            server
+        }
+
+        fn secrets_file(s: &Setup) -> PathBuf {
+            secrets::path(&s.config.path().join("config.json"))
+        }
+
+        fn browser(app: &App) -> &Browser {
+            let Some(Overlay::Issues(b)) = &app.overlay else { panic!("the list is not open") };
+            b
+        }
+
+        fn shown(app: &App) -> Vec<String> {
+            browser(app).shown().iter().map(|i| i.key.clone()).collect()
+        }
+
+        fn loaded(app: &App, source: Source) -> bool {
+            browser(app).lists.get(&source).is_some_and(|l| !l.loading)
+        }
+
+        fn open_list(s: &mut Setup) {
+            click(&mut s.app, areas().issues.as_position());
+        }
+
+        fn open_loaded(s: &mut Setup, source: Source) {
+            open_list(s);
+            pump_until(&mut s.app, &s.rx, "the issues load", |a| loaded(a, source));
+        }
+
+        fn enter(s: &mut Setup) {
+            send_key(&mut s.app, KeyCode::Enter, KeyModifiers::NONE);
+        }
+
+        fn start(s: &mut Setup) {
+            open_loaded(s, Source::Github);
+            enter(s);
+            enter(s);
+            pump_until(&mut s.app, &s.rx, "the issue workspace opens", |a| a.projects[0].workspaces.len() == 2);
+        }
+
+        fn checkout(s: &Setup) -> PathBuf {
+            let repo = s.app.projects[0].path.file_name().expect("repo name").to_owned();
+            s.worktrees.path().join(repo).join("issue-7-fix-the-login")
+        }
+
+        fn pump(s: &mut Setup) {
+            while let Ok(ev) = s.rx.try_recv() {
+                s.app.handle_event(ev, AREA).expect("handle event");
+            }
+            s.app.refresh(Instant::now());
+        }
+
+        fn wait_typed(s: &mut Setup, text: &str) {
+            wait_until("the command is typed", || {
+                pump(s);
+                s.app.launches.is_empty() && screen(&mut s.app).replace('\n', "").contains(text)
+            });
+        }
+
+        fn screen(app: &mut App) -> String {
+            app.term_mut().and_then(|t| t.emulator.snapshot().ok()).map(|s| s.contents()).unwrap_or_default()
+        }
+
+        fn to_tab_after_open(s: &mut Setup, tab: IssueTab) {
+            open_list(s);
+            to_tab(s, tab);
+        }
+
+        fn to_tab(s: &mut Setup, tab: IssueTab) {
+            let i = browser(&s.app).tabs.iter().position(|t| *t == tab).expect("the tab is shown");
+            for _ in 0..i {
+                send_key(&mut s.app, KeyCode::Tab, KeyModifiers::NONE);
+            }
+        }
+
+        mod github {
+            use super::*;
+
+            #[test]
+            fn the_button_lists_the_open_issues_from_gh() {
+                let mut s = listing();
+                open_loaded(&mut s, Source::Github);
+                assert_eq!(shown(&s.app), ["#7", "#3"]);
+            }
+
+            #[test]
+            fn outside_git_gh_is_not_asked() {
+                let mut s = setup(false, "echo '[]'");
+                open_list(&mut s);
+                assert!(browser(&s.app).lists.is_empty());
+                assert!(!s.config.path().join("gh.called").exists());
+            }
+
+            #[test]
+            fn what_gh_says_shows_in_the_list() {
+                let mut s = setup(true, "echo 'no git remotes found' >&2; exit 1");
+                open_loaded(&mut s, Source::Github);
+                let error = browser(&s.app).lists[&Source::Github].error.clone();
+                assert_eq!(error.as_deref(), Some("no git remotes found"));
+            }
+
+            #[test]
+            fn typing_filters_the_issues() {
+                let mut s = listing();
+                open_loaded(&mut s, Source::Github);
+                type_text(&mut s.app, "dark");
+                assert_eq!(shown(&s.app), ["#3"]);
+            }
+
+            #[test]
+            fn a_second_opening_shows_the_last_list_at_once() {
+                let mut s = listing();
+                open_loaded(&mut s, Source::Github);
+                send_key(&mut s.app, KeyCode::Esc, KeyModifiers::NONE);
+
+                open_list(&mut s);
+
+                assert_eq!(shown(&s.app), ["#7", "#3"]);
+            }
+
+            #[test]
+            fn esc_closes_the_list() {
+                let mut s = listing();
+                open_loaded(&mut s, Source::Github);
+                send_key(&mut s.app, KeyCode::Esc, KeyModifiers::NONE);
+                assert!(s.app.overlay.is_none());
+            }
+
+            #[test]
+            fn the_last_tab_opens_again() {
+                let mut s = listing();
+                open_list(&mut s);
+                send_key(&mut s.app, KeyCode::Tab, KeyModifiers::NONE);
+                send_key(&mut s.app, KeyCode::Esc, KeyModifiers::NONE);
+
+                open_list(&mut s);
+
+                assert_eq!(browser(&s.app).current(), IssueTab::One(Source::Github));
+            }
+        }
+
+        mod filters_and_places {
+            use super::*;
+
+            fn gh_args(s: &Setup) -> String {
+                std::fs::read_to_string(s.config.path().join("gh.args")).unwrap_or_default()
+            }
+
+            fn with_people() -> Setup {
+                setup(
+                    true,
+                    &format!(
+                        "case \"$1\" in api) printf 'zoe\\nana\\n';; *) if [ \"$2\" = view ]; then cat <<'EOF'\n{VIEW}\nEOF\nelse cat <<'EOF'\n{LIST}\nEOF\nfi;; esac"
+                    ),
+                )
+            }
+
+            fn open_people(s: &mut Setup) {
+                click(&mut s.app, ui::issue_toggles(ui::issues_area(AREA), &["closed", "people"])[1].as_position());
+            }
+
+            #[test]
+            fn a_person_picked_goes_into_the_gh_search() {
+                let mut s = with_people();
+                to_tab_after_open(&mut s, IssueTab::One(Source::Github));
+                open_people(&mut s);
+                pump_until(&mut s.app, &s.rx, "the people load", |a| browser(a).members.contains_key(&Source::Github));
+                enter(&mut s);
+                type_text(&mut s.app, "zoe");
+                enter(&mut s);
+                send_key(&mut s.app, KeyCode::Esc, KeyModifiers::NONE);
+
+                pump_until(&mut s.app, &s.rx, "the filtered list loads", |a| loaded(a, Source::Github));
+
+                assert!(gh_args(&s).contains("--assignee zoe"), "{}", gh_args(&s));
+                assert_eq!(s.app.issue_people.github[0], issues::Who::Person("zoe".into()));
+            }
+
+            #[test]
+            fn a_story_starts_in_the_project_picked_for_it() {
+                let mut s = setup(true, "echo '[]'");
+                let notes = TempDir::new();
+                s.app.open_project(notes.path().to_path_buf(), AREA).expect("open notes");
+                s.app.active = 0;
+                let _server = shortcut(&mut s, Vec::new());
+                secrets::write(&secrets_file(&s), "shortcut_token", "t0k").expect("save token");
+                open_loaded(&mut s, Source::Shortcut);
+                enter(&mut s);
+                enter(&mut s);
+                let folder = notes.path().file_name().and_then(|n| n.to_str()).expect("name").to_string();
+                type_text(&mut s.app, &folder);
+
+                enter(&mut s);
+
+                let project = &s.app.projects[1];
+                assert_eq!((s.app.overlay.is_none(), s.app.active, project.workspaces[0].tabs.len()), (true, 1, 2));
+                assert_eq!(project.workspaces[0].tabs[1].label(), "sc-482 Returns page crashes");
+            }
+        }
+
+        mod remembering {
+            use super::*;
+
+            fn people() -> People {
+                People { github: [issues::Who::Me, issues::Who::Anyone], ..People::default() }
+            }
+
+            fn toggle(s: &mut Setup, i: usize) {
+                let toggles = ui::issue_toggles(ui::issues_area(AREA), &["closed", "people"]);
+                click(&mut s.app, toggles[i].as_position());
+            }
+
+            #[test]
+            fn the_tab_and_the_toggles_are_saved_in_the_session() {
+                let mut s = listing();
+                open_list(&mut s);
+                to_tab(&mut s, IssueTab::One(Source::Github));
+                toggle(&mut s, 0);
+
+                let saved = s.app.state().issues;
+
+                let expected = IssuesState { tab: Some("github".into()), closed: true, people: People::default() };
+                assert_eq!(saved, Some(expected));
+            }
+
+            #[test]
+            fn a_restored_session_opens_the_same_tab_and_toggles() {
+                let mut s = listing();
+                let saved = State {
+                    issues: Some(IssuesState { tab: Some("github".into()), closed: false, people: people() }),
+                    ..s.app.state()
+                };
+                let (mut app, _rx) = empty_app();
+                app.restore(&saved, AREA).expect("restore");
+                s.app.issue_tab = app.issue_tab;
+                s.app.issue_closed = app.issue_closed;
+                s.app.issue_people = app.issue_people.clone();
+
+                open_list(&mut s);
+
+                assert_eq!(
+                    (browser(&s.app).current(), browser(&s.app).people.clone()),
+                    (IssueTab::One(Source::Github), people())
+                );
+            }
+
+            #[test]
+            fn the_last_list_comes_back_from_disk_after_a_restart() {
+                let mut s = listing();
+                let cache = s.config.path().join("issues.json");
+                s.app.set_issue_cache(cache.clone());
+                open_loaded(&mut s, Source::Github);
+                let dir = s.app.projects[0].path.clone();
+
+                let (mut app, _rx) = app_in(&dir, s.config.path().join("config.json"));
+                app.set_issue_cache(cache);
+                click(&mut app, areas().issues.as_position());
+
+                let shown: Vec<String> = browser(&app).shown().iter().map(|i| i.key.clone()).collect();
+                assert_eq!(shown, ["#7", "#3"]);
+            }
+        }
+
+        mod reading {
+            use super::*;
+
+            #[test]
+            fn copy_url_sends_it_to_the_outer_terminal() {
+                let mut s = listing();
+                open_loaded(&mut s, Source::Github);
+                enter(&mut s);
+                let labels = ["start", "raw", "copy url", "back"];
+
+                click(&mut s.app, ui::issue_buttons(ui::issues_area(AREA), &labels)[2].as_position());
+
+                let url = "https://github.com/acme/shop/issues/7";
+                assert_eq!(s.app.take_host_writes(), [clipboard::osc52(url)]);
+                assert_eq!(browser(&s.app).notice.as_deref(), Some(format!("copied {url}").as_str()));
+            }
+
+            #[test]
+            fn enter_reads_the_issue_with_its_comments() {
+                let mut s = listing();
+                open_loaded(&mut s, Source::Github);
+
+                enter(&mut s);
+
+                pump_until(&mut s.app, &s.rx, "the issue loads", |a| {
+                    matches!(&browser(a).screen, Screen::Detail { detail: Some(_), .. })
+                });
+                let Screen::Detail { detail: Some(Ok(detail)), .. } = &browser(&s.app).screen else {
+                    panic!("the issue did not load")
+                };
+                assert_eq!((detail.body.as_str(), detail.comments.len()), ("It **breaks**.", 1));
+            }
+        }
+
+        mod starting {
+            use super::*;
+
+            #[test]
+            fn opens_a_workspace_in_its_own_worktree() {
+                let mut s = listing();
+                start(&mut s);
+                let expected = checkout(&s).canonicalize().expect("checkout");
+                let project = &s.app.projects[0];
+                let workspace = &project.workspaces[1];
+                assert_eq!(
+                    (workspace.path.clone(), workspace.worktree, workspace.label(), git::branch(&workspace.path)),
+                    (expected, true, "#7 Fix the login".into(), Some("issue-7-fix-the-login".into()))
+                );
+                assert_eq!((s.app.overlay.is_none(), project.active, workspace.tabs.len()), (true, 1, 1));
+            }
+
+            #[test]
+            fn the_start_button_starts_the_selected_issue() {
+                let mut s = listing();
+                open_loaded(&mut s, Source::Github);
+                send_key(&mut s.app, KeyCode::Down, KeyModifiers::NONE);
+                click(
+                    &mut s.app,
+                    ui::issue_buttons(ui::issues_area(AREA), &["start", "refresh", "cancel"])[0].as_position(),
+                );
+                pump_until(&mut s.app, &s.rx, "the issue workspace opens", |a| a.projects[0].workspaces.len() == 2);
+                assert_eq!(s.app.projects[0].workspaces[1].label(), "#3 Dark mode");
+            }
+
+            const URL: &str = "https://github.com/acme/shop/issues/7";
+
+            fn got(s: &Setup) -> Option<String> {
+                std::fs::read_to_string(checkout(s).join("got")).ok()
+            }
+
+            #[test]
+            fn the_agent_trusts_the_folder_and_gets_the_prompt_typed() {
+                let mut s = listing();
+                start(&mut s);
+                wait_typed(&mut s, &format!("agent ready> {URL}"));
+                assert_eq!(got(&s), None);
+            }
+
+            #[test]
+            fn enter_sends_the_typed_prompt_to_the_agent() {
+                let mut s = listing();
+                start(&mut s);
+                wait_typed(&mut s, &format!("agent ready> {URL}"));
+
+                enter(&mut s);
+
+                wait_until("the agent gets the prompt", || got(&s).as_deref() == Some(URL));
+            }
+
+            #[test]
+            fn submit_sends_the_prompt_by_itself() {
+                let mut s = listing();
+                s.app.config.submit = true;
+                start(&mut s);
+
+                wait_until("the agent gets the prompt", || {
+                    pump(&mut s);
+                    got(&s).as_deref() == Some(URL)
+                });
+            }
+
+            #[test]
+            fn the_prompt_template_is_filled_in() {
+                let mut s = listing();
+                s.app.config.prompt = "Fix {key}: {title}".into();
+                start(&mut s);
+                wait_typed(&mut s, "agent ready> Fix #7: Fix the login");
+            }
+
+            #[test]
+            fn starting_it_again_goes_to_its_workspace() {
+                let mut s = listing();
+                start(&mut s);
+                s.app.projects[0].active = 0;
+
+                open_loaded(&mut s, Source::Github);
+                enter(&mut s);
+                enter(&mut s);
+
+                let project = &s.app.projects[0];
+                assert_eq!((s.app.overlay.is_none(), project.workspaces.len(), project.active), (true, 2, 1));
+            }
+
+            #[test]
+            fn git_errors_stay_in_the_list() {
+                let mut s = listing();
+                std::fs::create_dir_all(checkout(&s)).expect("create the checkout folder");
+                open_loaded(&mut s, Source::Github);
+                enter(&mut s);
+                enter(&mut s);
+
+                pump_until(
+                    &mut s.app,
+                    &s.rx,
+                    "the start fails",
+                    |a| matches!(&a.overlay, Some(Overlay::Issues(b)) if !b.starting && b.error.is_some()),
+                );
+                assert_eq!(s.app.projects[0].workspaces.len(), 1);
+            }
+
+            #[test]
+            fn without_git_a_story_starts_in_a_new_tab() {
+                let mut s = setup(false, "echo '[]'");
+                let _server = shortcut(&mut s, Vec::new());
+                secrets::write(&secrets_file(&s), "shortcut_token", "t0k").expect("save token");
+                open_loaded(&mut s, Source::Shortcut);
+
+                enter(&mut s);
+                enter(&mut s);
+
+                let workspace = &s.app.projects[0].workspaces[0];
+                assert_eq!(
+                    (s.app.overlay.is_none(), workspace.tabs.len(), workspace.active, workspace.tabs[1].label()),
+                    (true, 2, 1, "sc-482 Returns page crashes".into())
+                );
+                wait_typed(&mut s, "agent ready> https://app.shortcut.com/acme/story/482");
+            }
+        }
+
+        mod tokens {
+            use super::*;
+
+            fn type_token(s: &mut Setup, token: &str) {
+                open_list(s);
+                to_tab(s, IssueTab::One(Source::Shortcut));
+                type_text(&mut s.app, token);
+                enter(s);
+            }
+
+            #[test]
+            fn a_good_token_is_saved_and_lists_the_stories() {
+                let mut s = setup(false, "echo '[]'");
+                let _server = shortcut(&mut s, Vec::new());
+
+                type_token(&mut s, "t0k");
+
+                pump_until(&mut s.app, &s.rx, "the stories load", |a| loaded(a, Source::Shortcut));
+                assert_eq!(shown(&s.app), ["sc-482"]);
+                assert_eq!(secrets::read(&secrets_file(&s), "shortcut_token").as_deref(), Some("t0k"));
+            }
+
+            #[test]
+            fn a_rejected_token_is_not_saved() {
+                let mut s = setup(false, "echo '[]'");
+                let _server = shortcut(&mut s, vec![("GET /api/v3/member", 401, "{}")]);
+
+                type_token(&mut s, "bad");
+
+                pump_until(&mut s.app, &s.rx, "the check fails", |a| {
+                    browser(a).forms.get(&Source::Shortcut).is_some_and(|f| f.error.is_some())
+                });
+                assert_eq!(secrets::read(&secrets_file(&s), "shortcut_token"), None);
+            }
+
+            #[test]
+            fn a_token_from_the_environment_needs_no_form() {
+                let mut s = setup(false, "echo '[]'");
+                let _server = shortcut(&mut s, Vec::new());
+                s.app.env_tokens.insert(Source::Shortcut, "env-token".into());
+
+                open_loaded(&mut s, Source::Shortcut);
+
+                assert_eq!(shown(&s.app), ["sc-482"]);
+            }
+
+            #[test]
+            fn disconnect_forgets_the_saved_token() {
+                let mut s = setup(false, "echo '[]'");
+                let _server = shortcut(&mut s, Vec::new());
+                secrets::write(&secrets_file(&s), "shortcut_token", "t0k").expect("save token");
+                open_list(&mut s);
+                to_tab(&mut s, IssueTab::One(Source::Shortcut));
+
+                click(
+                    &mut s.app,
+                    ui::issue_buttons(ui::issues_area(AREA), &["start", "refresh", "disconnect", "cancel"])[2]
+                        .as_position(),
+                );
+
+                assert_eq!(secrets::read(&secrets_file(&s), "shortcut_token"), None);
+                assert!(!browser(&s.app).connections.contains_key(&Source::Shortcut));
+            }
+        }
+    }
+}

@@ -1,0 +1,22 @@
+---
+source: src/ui.rs
+expression: "render(&with(Settings { pick: Some(pick), ..agents })).backend()"
+---
+" ▄▀▀▀ cornercase                                         │                                          "
+" █┌ settings ────────────────────────────────────────────────────────────────────────────────────┐  "
+"  │  Worktrees   Agents   Issues   TUI                                                           │  "
+"  │                                                                                              │  "
+"  │ › How should claude start? pl                                                                │  "
+" p│                                                                                              │  "
+"  │  plan                             --permission-mode plan                                     │  "
+"▌ │  skip permissions (dangerous)     --dangerously-skip-permissions                             │  "
+"  │                                                                                              │  "
+"  │                                                                                              │  "
+"  │                                                                                              │  "
+"  │                                                                                              │  "
+"  │                                                                                              │  "
+"  │                                                                                              │  "
+"  │ enter changes the selected setting                                                           │  "
+" ─│                                                                                        done  │  "
+"  └──────────────────────────────────────────────────────────────────────────────────────────────┘  "
+"  quit                         │                         │                                          "

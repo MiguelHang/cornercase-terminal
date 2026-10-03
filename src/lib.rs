@@ -1,0 +1,31 @@
+pub mod agents;
+pub mod app;
+pub mod client;
+pub mod clipboard;
+pub mod config;
+pub mod emulator;
+pub mod error;
+pub mod git;
+pub mod highlight;
+pub mod host_theme;
+pub mod issues;
+pub mod keys;
+pub mod launch;
+pub mod markdown;
+pub mod mouse;
+pub mod picker;
+pub mod process;
+pub mod project;
+pub mod protocol;
+pub mod search;
+pub mod secrets;
+pub mod server;
+pub mod settings;
+pub mod split;
+pub mod state;
+pub mod term;
+pub mod ui;
+pub mod worktree;
+
+#[cfg(test)]
+mod test_util;

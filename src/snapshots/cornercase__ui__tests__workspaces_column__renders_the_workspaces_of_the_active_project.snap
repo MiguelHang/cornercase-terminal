@@ -1,0 +1,22 @@
+---
+source: src/ui.rs
+expression: render(&with_workspaces(Some(0))).backend()
+---
+" ▄▀▀▀ cornercase                                         │  no tab open                             "
+" █                                                       │                                          "
+"                                                         │                                          "
+"  ⌕ search projects, workspaces, tabs                    │                                          "
+"                                                         │                                          "
+" projects                      │ workspaces              │                                          "
+"                               │                         │                                          "
+"▌ cornercase (1)               │  login                  │                                          "
+"                               │  ▌ claude               │                                          "
+"  + new project                │    nvim                 │                                          "
+"                               │    + tab                │                                          "
+"                               │                         │                                          "
+"                               │  main                   │                                          "
+"                               │  ↓ 1 more               │                                          "
+"                               │  + new workspace        │                                          "
+" ───────────────────────────── │                         │                                          "
+"  settings                     │                         │                                          "
+"  quit                         │                         │                                          "

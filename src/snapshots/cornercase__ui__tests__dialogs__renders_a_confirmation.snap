@@ -1,0 +1,22 @@
+---
+source: src/ui.rs
+expression: "render(&with(Overlay::Confirm(confirm))).backend()"
+---
+" ▄▀▀▀ cornercase                                         │                                          "
+" █                                                       │                                          "
+"                                                         │                                          "
+"  ⌕ search projects, workspaces, tabs                    │                                          "
+"                  ┌ remove workspace ────────────────────────────────────────────┐                  "
+" projects         │ Remove the workspace login and delete its worktree folder    │                  "
+"                  │ ~/wt/login? The branch is kept.                              │                  "
+"▌ cornercase (1)  │                                                              │                  "
+"                  │                                                              │                  "
+"  + new project   │ contains modified or untracked files, use --force to delete  │                  "
+"                  │ it                                                           │                  "
+"                  │                                                              │                  "
+"                  │                                      remove anyway   cancel  │                  "
+"                  └──────────────────────────────────────────────────────────────┘                  "
+"                               │                         │                                          "
+" ───────────────────────────── │                         │                                          "
+"  settings                     │                         │                                          "
+"  quit                         │                         │                                          "

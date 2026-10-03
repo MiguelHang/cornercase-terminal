@@ -1,0 +1,22 @@
+---
+source: src/ui.rs
+expression: render(&with(i)).backend()
+---
+" ▄▀▀▀ cornercase                                         │                                          "
+" █┌ issues · shop ───────────────────────────────────────────────────────────────────────────────┐  "
+"  │  All   GitHub   Shortcut   Linear                                    [ ] closed    [x] mine  │  "
+"  │                                                                                              │  "
+"  │ › API token •••                                                                              │  "
+" p│                                                                                              │  "
+"  │  Connect Shortcut.                                                                           │  "
+"▌ │                                                                                              │  "
+"  │  Paste a token.                                                                              │  "
+"  │                                                                                              │  "
+"  │                                                                                              │  "
+"  │                                                                                              │  "
+"  │                                                                                              │  "
+"  │                                                                                              │  "
+"  │ enter reads #482 · start works on it in its own worktree, on issue-482-returns               │  "
+" ─│                                                                            connect   cancel  │  "
+"  └──────────────────────────────────────────────────────────────────────────────────────────────┘  "
+"  quit                         │                         │                                          "

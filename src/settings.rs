@@ -1,0 +1,1028 @@
+use std::path::PathBuf;
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+use crate::agents;
+use crate::config::{self, Config};
+use crate::issues::{Account, Secret, Source};
+use crate::search::Search;
+use crate::ui;
+
+pub const DONE: &str = "done";
+const TAB_IDS: [&str; 4] = ["all", "github", "shortcut", "linear"];
+const EXTRA_ARGS: &str = "extra arguments…";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Status {
+    Missing,
+    Saved(Option<Account>),
+    Env,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Row {
+    Folder,
+    DimPanes,
+    Token(Source),
+    Tab(&'static str),
+    DefaultAgent,
+    Submit,
+    Trust,
+    Kind(String),
+    AddAgent,
+}
+
+impl Row {
+    pub fn section(&self) -> &'static str {
+        match self {
+            Self::Folder | Self::DimPanes => "",
+            Self::Token(_) => "Accounts",
+            Self::Tab(_) => "Sources shown",
+            Self::DefaultAgent | Self::Submit | Self::Trust => "Agent",
+            Self::Kind(_) | Self::AddAgent => "How each agent starts",
+        }
+    }
+
+    pub fn page(&self) -> Page {
+        match self {
+            Self::Folder => Page::Worktrees,
+            Self::DefaultAgent | Self::Submit | Self::Trust | Self::Kind(_) | Self::AddAgent => Page::Agents,
+            Self::Token(_) | Self::Tab(_) => Page::Issues,
+            Self::DimPanes => Page::Tui,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Page {
+    #[default]
+    Worktrees,
+    Agents,
+    Issues,
+    Tui,
+}
+
+impl Page {
+    pub const ALL: [Self; 4] = [Self::Worktrees, Self::Agents, Self::Issues, Self::Tui];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Worktrees => "Worktrees",
+            Self::Agents => "Agents",
+            Self::Issues => "Issues",
+            Self::Tui => "TUI",
+        }
+    }
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|p| *p == self).unwrap_or(0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Move {
+    Up,
+    Down,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Action {
+    None,
+    Close,
+    Save(Box<Config>),
+    CheckToken(Source, Secret),
+    RemoveToken(Source),
+}
+
+#[derive(Debug)]
+pub struct Edit {
+    pub row: Row,
+    pub input: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct Pick {
+    pub row: Row,
+    pub items: Vec<PickItem>,
+    pub search: Search,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickItem {
+    pub value: String,
+    pub note: String,
+    pub dangerous: bool,
+}
+
+#[derive(Debug)]
+pub struct Settings {
+    pub config: Config,
+    pub page: Page,
+    home: Option<PathBuf>,
+    pub tokens: Vec<(Source, Status)>,
+    pub cursor: usize,
+    pub edit: Option<Edit>,
+    pub pick: Option<Pick>,
+    added: Vec<String>,
+    pub checking: Vec<Source>,
+    pub notice: Option<String>,
+}
+
+impl Settings {
+    pub fn new(config: Config, home: Option<PathBuf>, tokens: Vec<(Source, Status)>, page: Page) -> Self {
+        Self {
+            config,
+            page,
+            home,
+            tokens,
+            cursor: 0,
+            edit: None,
+            pick: None,
+            added: Vec::new(),
+            checking: Vec::new(),
+            notice: None,
+        }
+    }
+
+    pub fn busy(&self) -> bool {
+        !self.checking.is_empty()
+    }
+
+    fn shown_tabs(&self) -> Vec<&'static str> {
+        let mut shown: Vec<&'static str> = Vec::new();
+        for name in &self.config.issue_tabs {
+            if let Some(id) = TAB_IDS.iter().find(|id| id.eq_ignore_ascii_case(name.trim()))
+                && !shown.contains(id)
+            {
+                shown.push(id);
+            }
+        }
+        if shown.is_empty() { TAB_IDS.to_vec() } else { shown }
+    }
+
+    pub fn listed_kinds(&self) -> Vec<String> {
+        let config = &self.config;
+        let mut kinds: Vec<String> = Vec::new();
+        let default = agents::resolve(config, None, None);
+        let with_modes = agents::kinds(config).into_iter().filter(|k| !agents::modes(config, k).is_empty());
+        let candidates =
+            default.into_iter().chain(with_modes).chain(config.agent_args.keys().cloned()).chain(self.added.clone());
+        for kind in candidates {
+            if !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+        kinds
+    }
+
+    pub fn rows(&self) -> Vec<Row> {
+        let shown = self.shown_tabs();
+        let hidden = TAB_IDS.iter().filter(|id| !shown.contains(id)).copied();
+        let mut rows = vec![Row::Folder];
+        rows.extend(self.tokens.iter().map(|(source, _)| Row::Token(*source)));
+        rows.extend(shown.iter().copied().chain(hidden).map(Row::Tab));
+        rows.extend([Row::DefaultAgent, Row::Submit, Row::Trust]);
+        rows.extend(self.listed_kinds().into_iter().map(Row::Kind));
+        rows.extend([Row::AddAgent, Row::DimPanes]);
+        rows.retain(|row| row.page() == self.page);
+        rows
+    }
+
+    pub fn open_page(&mut self, page: Page) {
+        self.page = page;
+        self.cursor = 0;
+        self.edit = None;
+        self.pick = None;
+        self.notice = None;
+    }
+
+    fn switch_page(&mut self, delta: isize) {
+        let count = Page::ALL.len();
+        let step = delta.rem_euclid(isize::try_from(count).unwrap_or(1)).unsigned_abs();
+        self.open_page(Page::ALL[(self.page.index() + step) % count]);
+    }
+
+    fn row(&self) -> Option<Row> {
+        self.rows().get(self.cursor).cloned()
+    }
+
+    fn status(&self, source: Source) -> Option<&Status> {
+        self.tokens.iter().find(|(s, _)| *s == source).map(|(_, status)| status)
+    }
+
+    fn save(&mut self, config: Config, notice: String) -> Action {
+        self.config = config.clone();
+        self.notice = Some(notice);
+        Action::Save(Box::new(config))
+    }
+
+    pub fn select(&mut self, row: usize) {
+        if row < self.rows().len() {
+            self.cursor = row;
+        }
+    }
+
+    pub fn activate(&mut self) -> Action {
+        let Some(row) = self.row() else { return Action::None };
+        self.notice = None;
+        match row {
+            Row::Folder => self.start_edit(row, self.config.worktrees_dir.clone()),
+            Row::Token(source) => {
+                if self.status(source) == Some(&Status::Env) {
+                    let env = source.token_env().unwrap_or_default();
+                    self.notice = Some(format!("{env} is set: change or unset it there"));
+                    return Action::None;
+                }
+                self.start_edit(row, String::new())
+            }
+            Row::Tab(id) => self.toggle_tab(id),
+            Row::DefaultAgent => {
+                let auto = PickItem {
+                    value: agents::AUTO.into(),
+                    note: "the agent in your tab, otherwise ask".into(),
+                    dangerous: false,
+                };
+                let mut items = vec![auto];
+                items.extend(agents::kinds(&self.config).into_iter().map(|kind| PickItem {
+                    note: agents::command(&self.config, &kind),
+                    value: kind,
+                    dangerous: false,
+                }));
+                self.open_pick(row, items);
+                Action::None
+            }
+            Row::Submit => {
+                let submit = !self.config.submit;
+                let notice = if submit { "the prompt is sent for you" } else { "the prompt is typed; you press Enter" };
+                self.save(Config { submit, ..self.config.clone() }, notice.into())
+            }
+            Row::DimPanes => {
+                let on = !self.config.dim_inactive_panes;
+                let notice = if on { "inactive panes are dimmed" } else { "every pane looks the same" };
+                self.save(Config { dim_inactive_panes: on, ..self.config.clone() }, notice.into())
+            }
+            Row::Trust => {
+                let on = !self.config.auto_accept_trust_prompt;
+                let notice = if on { "trust prompts are accepted for you" } else { "trust prompts are left to you" };
+                self.save(Config { auto_accept_trust_prompt: on, ..self.config.clone() }, notice.into())
+            }
+            Row::Kind(kind) => {
+                let modes = agents::modes(&self.config, &kind);
+                if modes.is_empty() {
+                    self.edit_extra(&kind);
+                    return Action::None;
+                }
+                let mut items =
+                    vec![PickItem { value: "default".into(), note: "no mode arguments".into(), dangerous: false }];
+                items.extend(modes.iter().map(|(name, args)| PickItem {
+                    value: name.clone(),
+                    note: agents::join_args(args),
+                    dangerous: agents::is_dangerous(name),
+                }));
+                let extra = agents::extra_args(&agents::args(&self.config, &kind), &modes);
+                items.push(PickItem { value: EXTRA_ARGS.into(), note: agents::join_args(&extra), dangerous: false });
+                self.open_pick(Row::Kind(kind), items);
+                Action::None
+            }
+            Row::AddAgent => {
+                let listed = self.listed_kinds();
+                let items: Vec<PickItem> = agents::kinds(&self.config)
+                    .into_iter()
+                    .filter(|k| !listed.contains(k))
+                    .map(|kind| PickItem { note: agents::command(&self.config, &kind), value: kind, dangerous: false })
+                    .collect();
+                if items.is_empty() {
+                    self.notice = Some("every known agent is listed already".into());
+                } else {
+                    self.open_pick(row, items);
+                }
+                Action::None
+            }
+        }
+    }
+
+    fn start_edit(&mut self, row: Row, input: String) -> Action {
+        self.edit = Some(Edit { row, input, error: None });
+        Action::None
+    }
+
+    fn edit_extra(&mut self, kind: &str) {
+        let modes = agents::modes(&self.config, kind);
+        let extra = agents::extra_args(&agents::args(&self.config, kind), &modes);
+        self.start_edit(Row::Kind(kind.into()), agents::join_args(&extra));
+    }
+
+    fn open_pick(&mut self, row: Row, items: Vec<PickItem>) {
+        let current = match &row {
+            Row::DefaultAgent => Some(self.config.agent.clone()),
+            Row::Kind(kind) => Some(
+                agents::mode_of(&agents::args(&self.config, kind), &agents::modes(&self.config, kind))
+                    .unwrap_or_else(|| "default".into()),
+            ),
+            _ => None,
+        };
+        let mut search = Search::default();
+        if let Some(i) = current.and_then(|c| items.iter().position(|item| item.value == c)) {
+            search.select(i);
+        }
+        self.pick = Some(Pick { row, items, search });
+    }
+
+    pub fn pick_choices(&self) -> Vec<&PickItem> {
+        let Some(pick) = &self.pick else { return Vec::new() };
+        let needle = pick.search.query().trim().to_lowercase();
+        pick.items.iter().filter(|item| item.value.to_lowercase().contains(&needle)).collect()
+    }
+
+    pub fn choose(&mut self, index: Option<usize>) -> Action {
+        let Some(pick) = &self.pick else { return Action::None };
+        let choices = self.pick_choices();
+        let i = index.unwrap_or_else(|| pick.search.selected()).min(choices.len().saturating_sub(1));
+        let Some(value) = choices.get(i).map(|item| item.value.clone()) else { return Action::None };
+        let row = pick.row.clone();
+        self.pick = None;
+        match row {
+            Row::DefaultAgent => {
+                let notice = format!("default agent: {value}");
+                self.save(Config { agent: value, ..self.config.clone() }, notice)
+            }
+            Row::Kind(kind) if value == EXTRA_ARGS => {
+                self.edit_extra(&kind);
+                Action::None
+            }
+            Row::Kind(kind) => {
+                let modes = agents::modes(&self.config, &kind);
+                let mode = (value != "default").then_some(value.as_str());
+                let args = agents::with_mode(&agents::args(&self.config, &kind), &modes, mode);
+                let notice = starts_with(&kind, &args);
+                self.save(with_args(&self.config, &kind, args), notice)
+            }
+            Row::AddAgent => {
+                self.added.push(value.clone());
+                if let Some(i) = self.rows().iter().position(|r| *r == Row::Kind(value.clone())) {
+                    self.cursor = i;
+                }
+                self.activate()
+            }
+            _ => Action::None,
+        }
+    }
+
+    fn submit_edit(&mut self) -> Action {
+        let Some(edit) = &mut self.edit else { return Action::None };
+        match edit.row.clone() {
+            Row::Folder => match config::check_worktrees_dir(&edit.input, self.home.as_deref()) {
+                Ok(worktrees_dir) => {
+                    self.edit = None;
+                    let notice = format!("new worktrees go in {worktrees_dir}/<repo>/<branch>");
+                    self.save(Config { worktrees_dir, ..self.config.clone() }, notice)
+                }
+                Err(message) => {
+                    edit.error = Some(message.into());
+                    Action::None
+                }
+            },
+            Row::Token(source) => {
+                let token = edit.input.trim().to_string();
+                if token.is_empty() {
+                    edit.error = Some(format!("paste the {} first", source.token_name()));
+                    return Action::None;
+                }
+                edit.error = None;
+                self.checking.push(source);
+                Action::CheckToken(source, Secret(token))
+            }
+            Row::Kind(kind) => {
+                let extra = agents::split_args(&edit.input);
+                self.edit = None;
+                let modes = agents::modes(&self.config, &kind);
+                let args = agents::with_extra(&agents::args(&self.config, &kind), &modes, extra);
+                let notice = starts_with(&kind, &args);
+                self.save(with_args(&self.config, &kind, args), notice)
+            }
+            _ => Action::None,
+        }
+    }
+
+    pub fn checked(&mut self, source: Source, result: Result<Account, String>) {
+        self.checking.retain(|s| *s != source);
+        match result {
+            Ok(account) => {
+                self.edit = None;
+                self.notice = Some(format!("{} connected as {}", source.name(), account.describe()));
+                self.set_status(source, Status::Saved(Some(account)));
+            }
+            Err(e) => {
+                if let Some(edit) = &mut self.edit {
+                    edit.error = Some(e);
+                }
+            }
+        }
+    }
+
+    pub fn removed(&mut self, source: Source) {
+        self.set_status(source, Status::Missing);
+        self.notice = Some(format!("the {} {} was removed", source.name(), source.token_name()));
+    }
+
+    fn set_status(&mut self, source: Source, status: Status) {
+        if let Some((_, s)) = self.tokens.iter_mut().find(|(s, _)| *s == source) {
+            *s = status;
+        }
+    }
+
+    fn toggle_tab(&mut self, id: &'static str) -> Action {
+        let mut shown = self.shown_tabs();
+        if shown.contains(&id) {
+            if shown.len() == 1 {
+                self.notice = Some("at least one tab stays".into());
+                return Action::None;
+            }
+            shown.retain(|t| *t != id);
+        } else {
+            shown.push(id);
+        }
+        self.save_tabs(&shown)
+    }
+
+    pub fn move_tab(&mut self, row: usize, to: Move) -> Action {
+        let Some(Row::Tab(id)) = self.rows().get(row).cloned() else { return Action::None };
+        let mut shown = self.shown_tabs();
+        let Some(from) = shown.iter().position(|t| *t == id) else { return Action::None };
+        let target = match to {
+            Move::Up => from.checked_sub(1),
+            Move::Down => Some(from + 1).filter(|t| *t < shown.len()),
+        };
+        let Some(target) = target else { return Action::None };
+        shown.swap(from, target);
+        let action = self.save_tabs(&shown);
+        if let Some(i) = self.rows().iter().position(|r| *r == Row::Tab(id)) {
+            self.cursor = i;
+        }
+        action
+    }
+
+    fn save_tabs(&mut self, shown: &[&'static str]) -> Action {
+        let names: Vec<String> = shown.iter().map(|t| (*t).to_string()).collect();
+        let notice = format!("tabs: {}", names.join(", "));
+        self.save(Config { issue_tabs: names, ..self.config.clone() }, notice)
+    }
+
+    pub fn removable(&self, row: usize) -> Option<Source> {
+        match self.rows().get(row) {
+            Some(Row::Token(source)) if matches!(self.status(*source), Some(Status::Saved(_))) => Some(*source),
+            _ => None,
+        }
+    }
+
+    pub fn key(&mut self, key: KeyEvent, rows: usize) -> Action {
+        if self.busy() {
+            return Action::None;
+        }
+        let typing = !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        if let Some(edit) = &mut self.edit {
+            match key.code {
+                KeyCode::Esc => self.edit = None,
+                KeyCode::Enter => return self.submit_edit(),
+                KeyCode::Backspace => {
+                    edit.input.pop();
+                    edit.error = None;
+                }
+                KeyCode::Char(c) if typing => {
+                    edit.input.push(c);
+                    edit.error = None;
+                }
+                _ => {}
+            }
+            return Action::None;
+        }
+        if self.pick.is_some() {
+            let count = self.pick_choices().len();
+            let Some(pick) = &mut self.pick else { return Action::None };
+            match key.code {
+                KeyCode::Esc => self.pick = None,
+                KeyCode::Enter => return self.choose(None),
+                KeyCode::Up => pick.search.move_selection(-1, count, rows),
+                KeyCode::Down => pick.search.move_selection(1, count, rows),
+                KeyCode::Backspace => pick.search.pop(),
+                KeyCode::Char(c) if typing => pick.search.push(c),
+                _ => {}
+            }
+            return Action::None;
+        }
+        let count = self.rows().len();
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        self.notice = None;
+        match key.code {
+            KeyCode::Esc => return Action::Close,
+            KeyCode::Enter | KeyCode::Char(' ') => return self.activate(),
+            KeyCode::Up if shift => return self.move_tab(self.cursor, Move::Up),
+            KeyCode::Down if shift => return self.move_tab(self.cursor, Move::Down),
+            KeyCode::Tab | KeyCode::Right => self.switch_page(1),
+            KeyCode::BackTab | KeyCode::Left => self.switch_page(-1),
+            KeyCode::Up => self.cursor = self.cursor.saturating_sub(1),
+            KeyCode::Down => self.cursor = (self.cursor + 1).min(count.saturating_sub(1)),
+            KeyCode::Delete | KeyCode::Backspace => {
+                if let Some(source) = self.removable(self.cursor) {
+                    return Action::RemoveToken(source);
+                }
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
+    pub fn paste(&mut self, text: &str) {
+        if let Some(edit) = &mut self.edit {
+            let token = matches!(edit.row, Row::Token(_));
+            edit.input.extend(text.chars().filter(|c| !c.is_control() && (!token || !c.is_whitespace())));
+            edit.error = None;
+        } else if let Some(pick) = &mut self.pick {
+            text.chars().filter(|c| !c.is_control()).for_each(|c| pick.search.push(c));
+        }
+    }
+
+    fn row_view(&self, row: &Row) -> ui::SettingsRow {
+        let config = &self.config;
+        let (label, value, note, dangerous) = match row {
+            Row::Folder => (
+                "worktrees folder".to_string(),
+                config.worktrees_dir.clone(),
+                "new worktrees go in <folder>/<repo>/<branch>".to_string(),
+                false,
+            ),
+            Row::Token(source) => {
+                let label = format!("{} {}", source.name(), source.token_name());
+                let (value, note) = match self.status(*source) {
+                    Some(Status::Saved(Some(account))) => (account.describe(), "saved".to_string()),
+                    Some(Status::Saved(None)) => ("connected".into(), "saved".into()),
+                    Some(Status::Env) => {
+                        ("connected".into(), format!("from {}", source.token_env().unwrap_or_default()))
+                    }
+                    _ => ("not connected".into(), "enter pastes one".into()),
+                };
+                (label, value, note, false)
+            }
+            Row::Tab(id) => {
+                let on = self.shown_tabs().contains(id);
+                let name = match *id {
+                    "all" => "All",
+                    "github" => "GitHub",
+                    "shortcut" => "Shortcut",
+                    _ => "Linear",
+                };
+                let note = if *id == "all" { "every source together".into() } else { String::new() };
+                (format!("{} {name}", if on { "[x]" } else { "[ ]" }), String::new(), note, false)
+            }
+            Row::DefaultAgent => {
+                let note = if config.agent == agents::AUTO {
+                    "the agent in your tab, otherwise ask".into()
+                } else {
+                    String::new()
+                };
+                ("default agent".into(), config.agent.clone(), note, false)
+            }
+            Row::Submit => {
+                let value = if config.submit { "[x] sent for you" } else { "[ ] typed, you press Enter" };
+                ("send the prompt".into(), value.into(), String::new(), false)
+            }
+            Row::DimPanes => {
+                let value = if config.dim_inactive_panes { "[x] dimmed" } else { "[ ] as bright as the active one" };
+                ("inactive panes".into(), value.into(), "in a split tab".into(), false)
+            }
+            Row::Trust => {
+                let value = if config.auto_accept_trust_prompt { "[x] accepted for you" } else { "[ ] left to you" };
+                ("trust prompts".into(), value.into(), "\"do you trust this folder?\"".into(), false)
+            }
+            Row::Kind(kind) => {
+                let args = agents::args(config, kind);
+                let modes = agents::modes(config, kind);
+                let mode = agents::mode_of(&args, &modes);
+                let extra = agents::extra_args(&args, &modes);
+                let mut value = mode.clone().unwrap_or_else(|| "default".into());
+                if !extra.is_empty() {
+                    value = format!("{value} + {}", agents::join_args(&extra));
+                }
+                let is_default = agents::resolve(config, None, None).as_deref() == Some(kind.as_str());
+                let note = if is_default { "the default agent".into() } else { String::new() };
+                (kind.clone(), value, note, mode.as_deref().is_some_and(agents::is_dangerous))
+            }
+            Row::AddAgent => ("+ another agent…".into(), String::new(), String::new(), false),
+        };
+        ui::SettingsRow {
+            section: row.section(),
+            label,
+            value,
+            note,
+            dangerous,
+            removable: false,
+            movable: matches!(row, Row::Tab(_)),
+        }
+    }
+
+    pub fn view(&self) -> ui::Overlay {
+        let rows: Vec<ui::SettingsRow> = self
+            .rows()
+            .iter()
+            .enumerate()
+            .map(|(i, row)| ui::SettingsRow { removable: self.removable(i).is_some(), ..self.row_view(row) })
+            .collect();
+        let edit = self.edit.as_ref().map(|edit| {
+            let token = matches!(edit.row, Row::Token(_));
+            let label = match &edit.row {
+                Row::Folder => "worktrees folder".to_string(),
+                Row::Token(source) => format!("{} {}", source.name(), source.token_name()),
+                Row::Kind(kind) => format!("{kind} extra arguments"),
+                _ => String::new(),
+            };
+            let value = if token { "•".repeat(edit.input.chars().count()) } else { edit.input.clone() };
+            ui::SettingsEdit { label, value }
+        });
+        let pick = self.pick.as_ref().map(|pick| {
+            let choices = self.pick_choices();
+            let title = match &pick.row {
+                Row::DefaultAgent => "Which agent takes an issue by default?".to_string(),
+                Row::Kind(kind) => format!("How should {kind} start?"),
+                _ => "Which agent do you want to set up?".to_string(),
+            };
+            ui::SettingsPick {
+                title,
+                filter: pick.search.query().to_string(),
+                items: choices.iter().map(|item| (item.value.clone(), item.note.clone(), item.dangerous)).collect(),
+                selected: choices.len().checked_sub(1).map(|last| pick.search.selected().min(last)),
+                scroll: pick.search.scroll(),
+            }
+        });
+        let error = self.edit.as_ref().and_then(|e| e.error.clone());
+        let note = if self.busy() { Some(ui::Note::Busy("checking…")) } else { error.map(ui::Note::Error) };
+        let hint = self.notice.clone().unwrap_or_else(|| {
+            if self.edit.is_some() {
+                "enter saves · esc cancels".into()
+            } else if self.pick.is_some() {
+                "enter picks · type to filter · esc goes back".into()
+            } else if self.page == Page::Issues {
+                "enter changes the selected setting · shift+↑↓ moves a source · tab or ←→ switches tabs".into()
+            } else {
+                "enter changes the selected setting · tab or ←→ switches tabs · every change is saved at once".into()
+            }
+        });
+        ui::Overlay::Settings(ui::Settings {
+            tabs: Page::ALL.iter().map(|p| p.name()).collect(),
+            tab: self.page.index(),
+            rows,
+            cursor: self.cursor,
+            edit,
+            pick,
+            note,
+            hint,
+            submit: DONE,
+        })
+    }
+}
+
+fn starts_with(kind: &str, args: &[String]) -> String {
+    let args = if args.is_empty() { "no arguments".into() } else { agents::join_args(args) };
+    format!("{kind} starts with: {args}")
+}
+
+fn with_args(config: &Config, kind: &str, args: Vec<String>) -> Config {
+    let mut agent_args = config.agent_args.clone();
+    if args.is_empty() {
+        agent_args.remove(kind);
+    } else {
+        agent_args.insert(kind.to_string(), args);
+    }
+    Config { agent_args, ..config.clone() }
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyEventKind, KeyEventState};
+
+    use super::*;
+
+    fn settings() -> Settings {
+        Settings::new(
+            Config::default(),
+            Some(PathBuf::from("/home/ana")),
+            vec![(Source::Shortcut, Status::Missing), (Source::Linear, Status::Env)],
+            Page::default(),
+        )
+    }
+
+    fn key(s: &mut Settings, code: KeyCode, modifiers: KeyModifiers) -> Action {
+        s.key(KeyEvent { code, modifiers, kind: KeyEventKind::Press, state: KeyEventState::NONE }, 20)
+    }
+
+    fn press(s: &mut Settings, code: KeyCode) -> Action {
+        key(s, code, KeyModifiers::NONE)
+    }
+
+    fn type_text(s: &mut Settings, text: &str) {
+        for c in text.chars() {
+            press(s, KeyCode::Char(c));
+        }
+    }
+
+    fn go_to(s: &mut Settings, row: &Row) {
+        s.open_page(row.page());
+        s.cursor = s.rows().iter().position(|r| r == row).expect("the row is there");
+    }
+
+    fn saved(action: Action) -> Config {
+        match action {
+            Action::Save(config) => *config,
+            other => panic!("nothing saved: {other:?}"),
+        }
+    }
+
+    mod pages {
+        use rstest::rstest;
+
+        use super::*;
+
+        fn sections(page: Page) -> Vec<&'static str> {
+            let mut s = settings();
+            s.open_page(page);
+            let mut sections: Vec<&str> = s.rows().iter().map(Row::section).collect();
+            sections.dedup();
+            sections
+        }
+
+        #[rstest]
+        #[case::worktrees(Page::Worktrees, &[""])]
+        #[case::agents(Page::Agents, &["Agent", "How each agent starts"])]
+        #[case::issues(Page::Issues, &["Accounts", "Sources shown"])]
+        #[case::tui(Page::Tui, &[""])]
+        fn hold_their_sections(#[case] page: Page, #[case] expected: &[&str]) {
+            assert_eq!(sections(page), expected);
+        }
+
+        #[test]
+        fn the_first_one_is_worktrees() {
+            assert_eq!(settings().rows(), [Row::Folder]);
+        }
+
+        #[rstest]
+        #[case::tab(KeyCode::Tab, KeyModifiers::NONE, Page::Agents)]
+        #[case::right(KeyCode::Right, KeyModifiers::NONE, Page::Agents)]
+        #[case::shift_tab_wraps(KeyCode::BackTab, KeyModifiers::SHIFT, Page::Tui)]
+        #[case::left_wraps(KeyCode::Left, KeyModifiers::NONE, Page::Tui)]
+        fn are_switched_with_keys(#[case] code: KeyCode, #[case] modifiers: KeyModifiers, #[case] expected: Page) {
+            let mut s = settings();
+            key(&mut s, code, modifiers);
+            assert_eq!(s.page, expected);
+        }
+
+        #[test]
+        fn switching_selects_the_first_row() {
+            let mut s = settings();
+            go_to(&mut s, &Row::Trust);
+            press(&mut s, KeyCode::Tab);
+            assert_eq!((s.page, s.cursor), (Page::Issues, 0));
+        }
+
+        #[test]
+        fn switching_closes_an_open_edit() {
+            let mut s = settings();
+            press(&mut s, KeyCode::Enter);
+            s.open_page(Page::Tui);
+            assert!(s.edit.is_none());
+        }
+
+        #[test]
+        fn down_stays_on_the_page() {
+            let mut s = settings();
+            press(&mut s, KeyCode::Down);
+            assert_eq!((s.page, s.row()), (Page::Worktrees, Some(Row::Folder)));
+        }
+    }
+
+    #[test]
+    fn agents_with_modes_are_listed() {
+        assert_eq!(settings().listed_kinds(), ["claude", "codex", "gemini"]);
+    }
+
+    mod folder {
+        use super::*;
+
+        #[test]
+        fn is_edited_and_saved() {
+            let mut s = settings();
+            press(&mut s, KeyCode::Enter);
+            s.edit.as_mut().expect("editing").input.clear();
+            type_text(&mut s, "/srv/w");
+            assert_eq!(saved(press(&mut s, KeyCode::Enter)).worktrees_dir, "/srv/w");
+        }
+
+        #[test]
+        fn a_relative_one_is_refused() {
+            let mut s = settings();
+            press(&mut s, KeyCode::Enter);
+            s.edit.as_mut().expect("editing").input = "rel".into();
+            assert_eq!(press(&mut s, KeyCode::Enter), Action::None);
+            assert!(s.edit.as_ref().is_some_and(|e| e.error.is_some()));
+        }
+    }
+
+    mod tokens {
+        use super::*;
+
+        #[test]
+        fn a_pasted_token_is_checked() {
+            let mut s = settings();
+            go_to(&mut s, &Row::Token(Source::Shortcut));
+            press(&mut s, KeyCode::Enter);
+            s.paste("t0k\n");
+            assert_eq!(press(&mut s, KeyCode::Enter), Action::CheckToken(Source::Shortcut, Secret("t0k".into())));
+        }
+
+        #[test]
+        fn a_good_one_shows_its_account() {
+            let mut s = settings();
+            go_to(&mut s, &Row::Token(Source::Shortcut));
+            press(&mut s, KeyCode::Enter);
+            s.checking.push(Source::Shortcut);
+            let account = Account { handle: "ana".into(), workspace: "acme".into() };
+            s.checked(Source::Shortcut, Ok(account.clone()));
+            assert_eq!((s.edit.is_none(), s.status(Source::Shortcut)), (true, Some(&Status::Saved(Some(account)))));
+        }
+
+        #[test]
+        fn a_rejected_one_stays_in_the_field() {
+            let mut s = settings();
+            go_to(&mut s, &Row::Token(Source::Shortcut));
+            press(&mut s, KeyCode::Enter);
+            s.checked(Source::Shortcut, Err("Shortcut rejected the token".into()));
+            assert_eq!(s.edit.and_then(|e| e.error).as_deref(), Some("Shortcut rejected the token"));
+        }
+
+        #[test]
+        fn one_from_the_environment_cannot_be_typed() {
+            let mut s = settings();
+            go_to(&mut s, &Row::Token(Source::Linear));
+            press(&mut s, KeyCode::Enter);
+            assert!(s.edit.is_none());
+        }
+
+        #[test]
+        fn a_saved_one_can_be_removed_from_its_row() {
+            let mut s = settings();
+            s.tokens[0].1 = Status::Saved(None);
+            go_to(&mut s, &Row::Token(Source::Shortcut));
+            assert_eq!(press(&mut s, KeyCode::Delete), Action::RemoveToken(Source::Shortcut));
+        }
+
+        #[test]
+        fn are_never_shown() {
+            let mut s = settings();
+            go_to(&mut s, &Row::Token(Source::Shortcut));
+            press(&mut s, KeyCode::Enter);
+            type_text(&mut s, "t0k");
+            let ui::Overlay::Settings(view) = s.view() else { panic!("not the settings") };
+            assert_eq!(view.edit.map(|e| e.value).as_deref(), Some("•••"));
+        }
+    }
+
+    mod tabs {
+        use super::*;
+
+        #[test]
+        fn enter_hides_a_tab() {
+            let mut s = settings();
+            go_to(&mut s, &Row::Tab("shortcut"));
+            assert_eq!(saved(press(&mut s, KeyCode::Enter)).issue_tabs, ["all", "github", "linear"]);
+        }
+
+        #[test]
+        fn a_hidden_tab_comes_back_at_the_end() {
+            let mut s = settings();
+            s.config.issue_tabs = vec!["github".into()];
+            go_to(&mut s, &Row::Tab("all"));
+            assert_eq!(saved(press(&mut s, KeyCode::Enter)).issue_tabs, ["github", "all"]);
+        }
+
+        #[test]
+        fn the_last_one_stays() {
+            let mut s = settings();
+            s.config.issue_tabs = vec!["github".into()];
+            go_to(&mut s, &Row::Tab("github"));
+            assert_eq!(press(&mut s, KeyCode::Enter), Action::None);
+        }
+
+        #[test]
+        fn shift_up_moves_a_tab_earlier() {
+            let mut s = settings();
+            go_to(&mut s, &Row::Tab("linear"));
+            let config = saved(key(&mut s, KeyCode::Up, KeyModifiers::SHIFT));
+            assert_eq!(config.issue_tabs, ["all", "github", "linear", "shortcut"]);
+            assert_eq!(s.row(), Some(Row::Tab("linear")));
+        }
+    }
+
+    mod panes {
+        use super::*;
+
+        #[test]
+        fn dimming_inactive_ones_is_a_switch() {
+            let mut s = settings();
+            go_to(&mut s, &Row::DimPanes);
+            assert!(!saved(press(&mut s, KeyCode::Enter)).dim_inactive_panes);
+        }
+    }
+
+    mod agent {
+        use super::*;
+
+        #[test]
+        fn the_default_is_picked_from_the_known_agents() {
+            let mut s = settings();
+            go_to(&mut s, &Row::DefaultAgent);
+            press(&mut s, KeyCode::Enter);
+            type_text(&mut s, "codex");
+            assert_eq!(saved(press(&mut s, KeyCode::Enter)).agent, "codex");
+        }
+
+        #[test]
+        fn submit_and_trust_are_switches() {
+            let mut s = settings();
+            go_to(&mut s, &Row::Submit);
+            let submit = saved(press(&mut s, KeyCode::Enter)).submit;
+            go_to(&mut s, &Row::Trust);
+            let trust = saved(press(&mut s, KeyCode::Enter)).auto_accept_trust_prompt;
+            assert_eq!((submit, trust), (true, false));
+        }
+
+        #[test]
+        fn a_mode_sets_the_arguments_of_that_agent() {
+            let mut s = settings();
+            go_to(&mut s, &Row::Kind("claude".into()));
+            press(&mut s, KeyCode::Enter);
+            type_text(&mut s, "plan");
+            let config = saved(press(&mut s, KeyCode::Enter));
+            assert_eq!(config.agent_args["claude"], ["--permission-mode", "plan"]);
+        }
+
+        #[test]
+        fn extra_arguments_are_typed_after_the_mode() {
+            let mut s = settings();
+            s.config.agent_args.insert("claude".into(), vec!["--permission-mode".into(), "plan".into()]);
+            go_to(&mut s, &Row::Kind("claude".into()));
+            press(&mut s, KeyCode::Enter);
+            type_text(&mut s, "extra");
+            press(&mut s, KeyCode::Enter);
+            type_text(&mut s, "--add-dir '../my dir'");
+            let config = saved(press(&mut s, KeyCode::Enter));
+            assert_eq!(config.agent_args["claude"], ["--permission-mode", "plan", "--add-dir", "../my dir"]);
+        }
+
+        #[test]
+        fn default_mode_with_no_extras_forgets_the_agent_arguments() {
+            let mut s = settings();
+            s.config.agent_args.insert("codex".into(), vec!["--sandbox".into(), "read-only".into()]);
+            go_to(&mut s, &Row::Kind("codex".into()));
+            press(&mut s, KeyCode::Enter);
+            type_text(&mut s, "default");
+            assert!(!saved(press(&mut s, KeyCode::Enter)).agent_args.contains_key("codex"));
+        }
+
+        #[test]
+        fn another_agent_is_added_and_asks_for_its_arguments() {
+            let mut s = settings();
+            go_to(&mut s, &Row::AddAgent);
+            press(&mut s, KeyCode::Enter);
+            type_text(&mut s, "opencode");
+            press(&mut s, KeyCode::Enter);
+            type_text(&mut s, "--model x");
+            let config = saved(press(&mut s, KeyCode::Enter));
+            assert_eq!(config.agent_args["opencode"], ["--model", "x"]);
+        }
+
+        #[test]
+        fn a_dangerous_mode_is_marked() {
+            let mut s = settings();
+            s.config.agent_args.insert("claude".into(), vec!["--dangerously-skip-permissions".into()]);
+            s.open_page(Page::Agents);
+            let ui::Overlay::Settings(view) = s.view() else { panic!("not the settings") };
+            let claude = view.rows.iter().find(|r| r.label == "claude").expect("claude row");
+            assert_eq!((claude.value.as_str(), claude.dangerous), ("skip permissions (dangerous)", true));
+        }
+    }
+
+    #[test]
+    fn esc_closes_a_pick_before_the_settings() {
+        let mut s = settings();
+        go_to(&mut s, &Row::DefaultAgent);
+        press(&mut s, KeyCode::Enter);
+        let first = press(&mut s, KeyCode::Esc);
+        assert_eq!((first, s.pick.is_none(), press(&mut s, KeyCode::Esc)), (Action::None, true, Action::Close));
+    }
+
+    #[test]
+    fn keys_wait_while_a_token_is_checked() {
+        let mut s = settings();
+        s.checking.push(Source::Shortcut);
+        assert_eq!(press(&mut s, KeyCode::Esc), Action::None);
+    }
+}

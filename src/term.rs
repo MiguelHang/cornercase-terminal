@@ -1,0 +1,324 @@
+use std::io::{Read, Write};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::mpsc::Sender;
+use std::thread;
+
+use parking_lot::Mutex;
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+
+use crate::app::AppEvent;
+use crate::emulator::Emulator;
+use crate::error::{Error, Result};
+use crate::host_theme::HostTheme;
+use crate::process;
+use crate::protocol;
+
+const SCROLLBACK: usize = 5_000;
+const READ_BUFFER: usize = 16 * 1024;
+
+type Writer = Arc<Mutex<Box<dyn Write + Send>>>;
+
+pub struct Term {
+    pub id: u64,
+    pub emulator: Emulator,
+    master: Box<dyn MasterPty + Send>,
+    writer: Writer,
+    child: Box<dyn Child + Send + Sync>,
+    size: (u16, u16),
+}
+
+pub struct SpawnOptions<'a> {
+    pub id: u64,
+    pub shell: &'a str,
+    pub rows: u16,
+    pub cols: u16,
+    pub cwd: Option<PathBuf>,
+    pub theme: &'a HostTheme,
+}
+
+fn pty_size(rows: u16, cols: u16) -> PtySize {
+    PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }
+}
+
+impl Term {
+    pub fn spawn(opts: SpawnOptions, tx: Sender<AppEvent>) -> Result<Self> {
+        let SpawnOptions { id, shell, rows, cols, cwd, theme } = opts;
+        let pair = native_pty_system().openpty(pty_size(rows, cols)).map_err(|e| Error::OpenPty(e.into()))?;
+
+        let mut cmd = CommandBuilder::new(shell);
+        cmd.env("TERM", "xterm-256color");
+        cmd.env(protocol::NESTED_ENV, "1");
+        if let Some(dir) = cwd.or_else(|| std::env::current_dir().ok()) {
+            cmd.cwd(dir);
+        }
+
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|e| Error::SpawnShell { shell: shell.to_string(), source: e.into() })?;
+        drop(pair.slave);
+
+        let reader = pair.master.try_clone_reader().map_err(|e| Error::AttachPty(e.into()))?;
+        let writer: Writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| Error::AttachPty(e.into()))?));
+        let replies = Arc::clone(&writer);
+        let emulator = Emulator::new(rows, cols, SCROLLBACK, theme, Box::new(move |bytes| write_to(&replies, bytes)))
+            .map_err(|e| Error::Emulator(e.into()))?;
+        spawn_reader(id, reader, tx);
+
+        Ok(Self { id, emulator, master: pair.master, writer, child, size: (rows, cols) })
+    }
+
+    pub fn feed(&mut self, bytes: &[u8]) {
+        self.emulator.feed(bytes);
+    }
+
+    pub fn write(&mut self, bytes: &[u8]) {
+        write_to(&self.writer, bytes);
+    }
+
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        if self.size == (rows, cols) || rows == 0 || cols == 0 {
+            return;
+        }
+        self.size = (rows, cols);
+        let _ = self.master.resize(pty_size(rows, cols));
+        let _ = self.emulator.resize(rows, cols);
+    }
+
+    fn foreground_pid(&self) -> Option<i32> {
+        self.master
+            .process_group_leader()
+            .filter(|pid| process::alive(*pid))
+            .or_else(|| self.child.process_id().and_then(|pid| i32::try_from(pid).ok()))
+    }
+
+    pub fn cwd(&self) -> Option<PathBuf> {
+        process::cwd(self.foreground_pid()?)
+    }
+
+    pub fn process_name(&self) -> Option<String> {
+        process::name(self.foreground_pid()?)
+    }
+
+    pub fn shell_in_foreground(&self) -> bool {
+        let shell = self.child.process_id().and_then(|pid| i32::try_from(pid).ok());
+        shell.is_some() && self.foreground_pid() == shell
+    }
+
+    pub fn foreground_args(&self) -> Vec<String> {
+        self.foreground_pid().map(process::args).unwrap_or_default()
+    }
+
+    pub fn kill(&mut self) {
+        let _ = self.child.kill();
+    }
+}
+
+impl std::fmt::Debug for Term {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Term").field("id", &self.id).field("size", &self.size).finish_non_exhaustive()
+    }
+}
+
+impl Drop for Term {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+fn write_to(writer: &Writer, bytes: &[u8]) {
+    let mut writer = writer.lock();
+    if writer.write_all(bytes).is_ok() {
+        let _ = writer.flush();
+    }
+}
+
+fn spawn_reader(id: u64, mut reader: Box<dyn Read + Send>, tx: Sender<AppEvent>) {
+    thread::spawn(move || {
+        let mut buf = vec![0u8; READ_BUFFER];
+        while let Ok(n @ 1..) = reader.read(&mut buf) {
+            if tx.send(AppEvent::Output(id, buf[..n].to_vec())).is_err() {
+                return;
+            }
+        }
+        let _ = tx.send(AppEvent::Exited(id));
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches;
+    use std::sync::mpsc::{self, Receiver};
+    use std::time::Duration;
+
+    use super::*;
+    use crate::test_util::{is_sh, wait_until};
+
+    const RECV_TIMEOUT: Duration = Duration::from_secs(5);
+
+    fn spawn_sh_in(cwd: Option<PathBuf>) -> (Term, Receiver<AppEvent>) {
+        let (tx, rx) = mpsc::channel();
+        let opts = SpawnOptions { id: 1, shell: "/bin/sh", rows: 24, cols: 80, cwd, theme: &HostTheme::default() };
+        (Term::spawn(opts, tx).expect("spawn /bin/sh"), rx)
+    }
+
+    fn spawn_sh() -> (Term, Receiver<AppEvent>) {
+        spawn_sh_in(None)
+    }
+
+    fn contents(term: &mut Term, rx: &Receiver<AppEvent>) -> String {
+        while let Ok(ev) = rx.try_recv() {
+            if let AppEvent::Output(_, bytes) = ev {
+                term.feed(&bytes);
+            }
+        }
+        term.emulator.snapshot().expect("snapshot").contents()
+    }
+
+    mod spawn {
+        use super::*;
+
+        #[test]
+        fn returns_error_when_shell_does_not_exist() {
+            let (tx, _rx) = mpsc::channel();
+            let opts = SpawnOptions {
+                id: 1,
+                shell: "/nonexistent/shell",
+                rows: 24,
+                cols: 80,
+                cwd: None,
+                theme: &HostTheme::default(),
+            };
+
+            let result = Term::spawn(opts, tx);
+
+            assert_matches!(result, Err(Error::SpawnShell { .. }));
+        }
+
+        #[test]
+        fn starts_in_requested_dir() {
+            let tmp = std::env::temp_dir().canonicalize().expect("temp dir");
+            let (term, _rx) = spawn_sh_in(Some(tmp.clone()));
+
+            wait_until("shell starts in requested dir", || term.cwd().as_ref() == Some(&tmp));
+        }
+    }
+
+    mod output {
+        use super::*;
+
+        #[test]
+        fn is_parsed_into_the_screen() {
+            let (mut term, rx) = spawn_sh();
+
+            term.write(b"echo hello-$((1+1))\r");
+
+            wait_until("output appears on screen", || contents(&mut term, &rx).contains("hello-2"));
+        }
+
+        #[test]
+        fn sends_output_event() {
+            let (mut term, rx) = spawn_sh();
+
+            term.write(b"echo x\r");
+
+            assert_matches!(rx.recv_timeout(RECV_TIMEOUT), Ok(AppEvent::Output(1, _)));
+        }
+    }
+
+    mod replies {
+        use super::*;
+
+        #[test]
+        fn reach_the_program() {
+            let (mut term, rx) = spawn_sh();
+
+            term.write(b"stty -icanon -echo; printf '\\033[5n'; head -c 4 | tr '\\033' E; stty sane\r");
+
+            wait_until("program reads the status reply", || contents(&mut term, &rx).contains("E[0n"));
+        }
+    }
+
+    mod cwd {
+        use super::*;
+
+        #[test]
+        fn follows_cd() {
+            let (mut term, _rx) = spawn_sh();
+
+            term.write(b"cd /\r");
+
+            wait_until("cwd follows cd", || term.cwd() == Some(PathBuf::from("/")));
+        }
+    }
+
+    mod process_name {
+        use super::*;
+
+        #[test]
+        fn is_the_shell_when_idle() {
+            let (term, _rx) = spawn_sh();
+
+            wait_until("shows the shell", || term.process_name().as_deref().is_some_and(is_sh));
+        }
+
+        #[test]
+        fn is_the_foreground_program_while_it_runs() {
+            let (mut term, _rx) = spawn_sh();
+
+            term.write(b"sleep 30\r");
+
+            wait_until("shows the foreground program", || term.process_name().as_deref() == Some("sleep"));
+        }
+
+        #[test]
+        fn falls_back_to_shell_when_program_ends() {
+            let (mut term, _rx) = spawn_sh();
+            term.write(b"sleep 30\r");
+            wait_until("sleep starts", || term.process_name().as_deref() == Some("sleep"));
+
+            term.write(&[0x03]);
+
+            wait_until("back to the shell", || term.process_name().as_deref().is_some_and(is_sh));
+        }
+    }
+
+    mod resize {
+        use super::*;
+
+        #[test]
+        fn updates_the_emulator_size() {
+            let (mut term, _rx) = spawn_sh();
+
+            term.resize(10, 50);
+
+            assert_eq!(term.emulator.size().expect("size"), (10, 50));
+        }
+
+        #[test]
+        fn reaches_the_program() {
+            let (mut term, rx) = spawn_sh();
+
+            term.resize(10, 50);
+            term.write(b"stty size\r");
+
+            wait_until("stty sees the new size", || contents(&mut term, &rx).contains("10 50"));
+        }
+    }
+
+    mod kill {
+        use super::*;
+
+        #[test]
+        fn sends_exited_event() {
+            let (mut term, rx) = spawn_sh();
+
+            term.kill();
+
+            let exited =
+                std::iter::from_fn(|| rx.recv_timeout(RECV_TIMEOUT).ok()).any(|ev| matches!(ev, AppEvent::Exited(1)));
+            assert!(exited, "no Exited(1) event received");
+        }
+    }
+}

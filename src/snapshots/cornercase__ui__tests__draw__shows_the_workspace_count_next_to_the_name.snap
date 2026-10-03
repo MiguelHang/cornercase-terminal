@@ -1,0 +1,22 @@
+---
+source: src/ui.rs
+expression: render(&v).backend()
+---
+" ▄▀▀▀ cornercase                                         │                                          "
+" █                                                       │                                          "
+"                                                         │                                          "
+"  ⌕ search projects, workspaces, tabs                    │                                          "
+"                                                         │                                          "
+" projects                      │ workspaces              │                                          "
+"                               │                         │                                          "
+"  cornercase (3)               │                         │                                          "
+"▌ api (1)                      │                         │                                          "
+"  tmp (0)                      │                         │                                          "
+"                               │                         │                                          "
+"  + new project                │                         │                                          "
+"                               │                         │                                          "
+"                               │                         │                                          "
+"                               │                         │                                          "
+" ───────────────────────────── │                         │                                          "
+"  settings                     │                         │                                          "
+"  quit                         │                         │                                          "

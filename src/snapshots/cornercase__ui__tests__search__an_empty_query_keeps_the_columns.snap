@@ -1,0 +1,22 @@
+---
+source: src/ui.rs
+expression: "render(&with(search(\"\", Vec::new()))).backend()"
+---
+" ▄▀▀▀ cornercase                                         │                                          "
+" █                                                       │                                          "
+"                                                         │                                          "
+"  ⌕                                                      │                                          "
+"                                                         │                                          "
+" projects                      │ workspaces              │                                          "
+"                               │                         │                                          "
+"▌ cornercase (1)               │                         │                                          "
+"  notes (1)                    │                         │                                          "
+"                               │                         │                                          "
+"  + new project                │                         │                                          "
+"                               │                         │                                          "
+"                               │                         │                                          "
+"                               │                         │                                          "
+"                               │                         │                                          "
+" ───────────────────────────── │                         │                                          "
+"  settings                     │                         │                                          "
+"  quit                         │                         │                                          "

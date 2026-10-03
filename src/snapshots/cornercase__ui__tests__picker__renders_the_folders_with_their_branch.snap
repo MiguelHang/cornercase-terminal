@@ -1,0 +1,22 @@
+---
+source: src/ui.rs
+expression: render(&with(picker(None))).backend()
+---
+" ▄▀▀▀ cornercase                                         │                                          "
+" █            ┌ new workspace ───────────────────────────────────────────────────────┐              "
+"              │ › ~/projects/                                                        │              "
+"  ⌕ search pro│                                                                      │              "
+"              │  ..                                                                  │              "
+" projects     │  cornercase                                                    main  │              "
+"              │  notes                                                               │              "
+"▌ cornercase (│                                                                      │              "
+"              │                                                                      │              "
+"  + new projec│                                                                      │              "
+"              │                                                                      │              "
+"              │                                                                      │              "
+"              │                                                                      │              "
+"              │                                                                      │              "
+"              │ enter opens ~/projects                                               │              "
+" ─────────────│                                                       open   cancel  │              "
+"  settings    └──────────────────────────────────────────────────────────────────────┘              "
+"  quit                         │                         │                                          "

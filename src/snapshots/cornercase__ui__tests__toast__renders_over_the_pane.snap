@@ -1,0 +1,22 @@
+---
+source: src/ui.rs
+expression: render(&v).backend()
+---
+" ▄▀▀▀ cornercase                                         │ $ echo hello                             "
+" █                                                       │ hello                                    "
+"                                                         │ $                                        "
+"  ⌕ search projects, workspaces, tabs                    │                                          "
+"                                                         │                                          "
+" projects                      │ workspaces              │                                          "
+"                               │                         │                                          "
+"▌ ~ (1)                        │                         │                                          "
+"                               │                         │                                          "
+"  + new project                │                         │                                          "
+"                               │                         │                                          "
+"                               │                         │                                          "
+"                               │                         │                                          "
+"                               │                         │                                          "
+"                               │                         │                ┌───────────────────────┐ "
+" ───────────────────────────── │                         │                │ ✓ copied to clipboard │ "
+"  settings                     │                         │                └───────────────────────┘ "
+"  quit                         │                         │                                          "

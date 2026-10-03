@@ -1,0 +1,176 @@
+use std::collections::BTreeMap;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::agents;
+use crate::protocol;
+use crate::state;
+
+pub const DEFAULT_WORKTREES_DIR: &str = "~/.cornercase/worktrees";
+pub const DEFAULT_PROMPT: &str = "{url}";
+pub const DEFAULT_GH: &str = "gh";
+pub const DEFAULT_ISSUE_TABS: [&str; 4] = ["all", "github", "shortcut", "linear"];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    pub worktrees_dir: String,
+    pub issue_tabs: Vec<String>,
+    pub agent: String,
+    pub agent_args: BTreeMap<String, Vec<String>>,
+    pub agent_modes: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    pub agent_commands: BTreeMap<String, String>,
+    pub prompt: String,
+    pub submit: bool,
+    pub auto_accept_trust_prompt: bool,
+    pub trust_prompt_pattern: String,
+    pub gh: String,
+    pub dim_inactive_panes: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            worktrees_dir: DEFAULT_WORKTREES_DIR.into(),
+            issue_tabs: DEFAULT_ISSUE_TABS.map(String::from).to_vec(),
+            agent: agents::AUTO.into(),
+            agent_args: BTreeMap::new(),
+            agent_modes: BTreeMap::new(),
+            agent_commands: BTreeMap::new(),
+            prompt: DEFAULT_PROMPT.into(),
+            submit: false,
+            auto_accept_trust_prompt: true,
+            trust_prompt_pattern: agents::DEFAULT_TRUST_PROMPT.into(),
+            gh: DEFAULT_GH.into(),
+            dim_inactive_panes: true,
+        }
+    }
+}
+
+impl Config {
+    pub fn worktrees_dir(&self, home: Option<&Path>) -> PathBuf {
+        expand_home(&self.worktrees_dir, home)
+    }
+
+    pub fn gh(&self, home: Option<&Path>) -> PathBuf {
+        expand_home(&self.gh, home)
+    }
+}
+
+pub fn path() -> PathBuf {
+    if let Some(socket) = std::env::var_os(protocol::SOCKET_ENV) {
+        return Path::new(&socket).with_file_name("config.json");
+    }
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".config")))
+        .unwrap_or_else(std::env::temp_dir);
+    config_home.join("cornercase").join("config.json")
+}
+
+pub fn load(path: &Path) -> Config {
+    std::fs::read_to_string(path).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+}
+
+pub fn save(path: &Path, config: &Config) -> io::Result<()> {
+    state::save(path, config)
+}
+
+pub fn expand_home(path: &str, home: Option<&Path>) -> PathBuf {
+    match (path.strip_prefix('~'), home) {
+        (Some(""), Some(home)) => home.to_path_buf(),
+        (Some(rest), Some(home)) if rest.starts_with('/') => home.join(rest.trim_start_matches('/')),
+        _ => PathBuf::from(path),
+    }
+}
+
+pub fn check_worktrees_dir(input: &str, home: Option<&Path>) -> Result<String, &'static str> {
+    let dir = input.trim();
+    if dir.is_empty() {
+        return Err("the folder is required");
+    }
+    if !expand_home(dir, home).is_absolute() {
+        return Err("use an absolute path or one starting with ~/");
+    }
+    Ok(dir.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+    use crate::test_util::TempDir;
+
+    mod file {
+        use super::*;
+
+        #[test]
+        fn round_trips() {
+            let tmp = TempDir::new();
+            let path = tmp.path().join("nested").join("config.json");
+            let config = Config { worktrees_dir: "/srv/worktrees".into(), ..Config::default() };
+
+            save(&path, &config).expect("save");
+
+            assert_eq!(load(&path), config);
+        }
+
+        #[test]
+        fn missing_file_loads_the_defaults() {
+            let tmp = TempDir::new();
+            assert_eq!(load(&tmp.path().join("config.json")), Config::default());
+        }
+
+        #[test]
+        fn corrupt_file_loads_the_defaults() {
+            let tmp = TempDir::new();
+            let path = tmp.path().join("config.json");
+            std::fs::write(&path, "{ not json").expect("write");
+
+            assert_eq!(load(&path), Config::default());
+        }
+
+        #[test]
+        fn missing_keys_take_their_defaults() {
+            let tmp = TempDir::new();
+            let path = tmp.path().join("config.json");
+            std::fs::write(&path, r#"{"worktrees_dir": "/srv/w"}"#).expect("write");
+
+            assert_eq!(load(&path), Config { worktrees_dir: "/srv/w".into(), ..Config::default() });
+        }
+    }
+
+    mod expand_home {
+        use super::*;
+
+        #[rstest]
+        #[case::tilde_alone("~", "/home/ana")]
+        #[case::tilde_slash("~/.cornercase/worktrees", "/home/ana/.cornercase/worktrees")]
+        #[case::absolute("/srv/worktrees", "/srv/worktrees")]
+        #[case::other_users_home("~bob/x", "~bob/x")]
+        fn replaces_a_leading_tilde(#[case] input: &str, #[case] expected: &str) {
+            assert_eq!(expand_home(input, Some(Path::new("/home/ana"))), PathBuf::from(expected));
+        }
+
+        #[test]
+        fn keeps_the_tilde_without_a_home() {
+            assert_eq!(expand_home("~/x", None), PathBuf::from("~/x"));
+        }
+    }
+
+    mod check_worktrees_dir {
+        use super::*;
+
+        #[rstest]
+        #[case::tilde(" ~/worktrees ", Ok("~/worktrees".to_string()))]
+        #[case::absolute("/srv/worktrees", Ok("/srv/worktrees".to_string()))]
+        #[case::empty("  ", Err("the folder is required"))]
+        #[case::relative("worktrees", Err("use an absolute path or one starting with ~/"))]
+        fn accepts_only_absolute_folders(#[case] input: &str, #[case] expected: Result<String, &'static str>) {
+            assert_eq!(check_worktrees_dir(input, Some(Path::new("/home/ana"))), expected);
+        }
+    }
+}

@@ -1,0 +1,62 @@
+[package]
+name = "cornercase"
+version = "0.1.0"
+edition = "2024"
+description = "A terminal multiplexer for projects, git worktrees and coding agents, driven by the mouse"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/usecornercase/cornercase-terminal"
+readme = "README.md"
+keywords = ["terminal", "multiplexer", "tui", "worktree"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+anyhow = "1.0.104"
+crossterm = { version = "0.29.0", features = ["serde"] }
+libghostty-vt = { version = "=0.2.2", default-features = false }
+parking_lot = "0.12.5"
+portable-pty = "0.9.0"
+postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
+pulldown-cmark = { version = "0.13.4", default-features = false }
+ratatui = "0.30.2"
+regex = { version = "1.13.1", default-features = false, features = ["std", "unicode-case", "perf"] }
+rustix = { version = "1.1.5", features = ["event", "fs", "process", "stdio"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+signal-hook = "0.4.4"
+syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "regex-fancy", "parsing"] }
+thiserror = "2.0.21"
+ureq = "3.4.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.189"
+
+[dev-dependencies]
+insta = "1.48.0"
+rstest = "0.27.0"
+vt100 = "0.16.2"
+
+[lints.rust]
+future-incompatible = { level = "warn", priority = -1 }
+nonstandard_style = { level = "deny", priority = -2 }
+unused_qualifications = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[profile.dev.package.syntect]
+opt-level = 3
+
+[profile.dev.package.fancy-regex]
+opt-level = 3
+
+[profile.dev.package.regex-automata]
+opt-level = 3
+
+[profile.dev.package.regex-syntax]
+opt-level = 3

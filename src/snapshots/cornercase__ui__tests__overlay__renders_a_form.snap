@@ -1,0 +1,22 @@
+---
+source: src/ui.rs
+expression: "render(&with(Overlay::Form(form(None)))).backend()"
+---
+" ▄▀▀▀ cornercase                                         │                                          "
+" █                                                       │                                          "
+"                                                         │                                          "
+"  ⌕ search projects, workspaces, tabs                    │                                          "
+"                  ┌ new worktree ────────────────────────────────────────────────┐                  "
+" projects         │ branch                                                       │                  "
+"                  │ › feat/login                                                 │                  "
+"▌ cornercase (1)  │ in ~/.cornercase/worktrees/cornercase/feat-login             │                  "
+"                  │                                                              │                  "
+"  + new project   │                                                              │                  "
+"                  │                                                              │                  "
+"                  │                                                              │                  "
+"                  │                                             create   cancel  │                  "
+"                  └──────────────────────────────────────────────────────────────┘                  "
+"                               │                         │                                          "
+" ───────────────────────────── │                         │                                          "
+"  settings                     │                         │                                          "
+"  quit                         │                         │                                          "

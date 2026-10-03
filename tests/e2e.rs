@@ -1,0 +1,846 @@
+use std::io::{Read, Write};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use cornercase::protocol::{NESTED_ENV, SOCKET_ENV};
+use cornercase::split::{self, Dir};
+use cornercase::ui::{self, WorkspaceRow};
+use parking_lot::Mutex;
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use ratatui::layout::{Position, Rect};
+
+const ROWS: u16 = 24;
+const COLS: u16 = 100;
+const TIMEOUT: Duration = Duration::from_secs(10);
+const POLL: Duration = Duration::from_millis(30);
+const AREA: Rect = Rect { x: 0, y: 0, width: COLS, height: ROWS };
+const HOST_THEME_REPLY: &[u8] = b"\x1b]11;rgb:12/56/9a\x1b\\\x1b[?62;22c";
+
+struct Session {
+    dir: PathBuf,
+}
+
+impl Session {
+    fn new() -> Arc<Self> {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("cornercase-e2e-sock-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create socket dir");
+        Arc::new(Self { dir })
+    }
+
+    fn socket(&self) -> PathBuf {
+        self.dir.join("server.sock")
+    }
+
+    fn socket_var(&self) -> String {
+        format!("{SOCKET_ENV}={}", self.socket().display())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn servers(&self) -> usize {
+        let socket = self.socket_var();
+        let Ok(procs) = std::fs::read_dir("/proc") else { return 0 };
+        procs
+            .flatten()
+            .filter(|entry| {
+                let cmdline = std::fs::read(entry.path().join("cmdline")).unwrap_or_default();
+                let environ = std::fs::read(entry.path().join("environ")).unwrap_or_default();
+                cmdline.split(|b| *b == 0).nth(1) == Some(b"server".as_slice())
+                    && environ.split(|b| *b == 0).any(|var| var == socket.as_bytes())
+            })
+            .count()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn servers(&self) -> usize {
+        let socket = self.socket_var();
+        let ps = std::process::Command::new("ps").args(["-xEww", "-o", "command="]).output().expect("run ps");
+        String::from_utf8_lossy(&ps.stdout)
+            .lines()
+            .filter(|line| {
+                line.split_whitespace().nth(1) == Some("server") && line.split_whitespace().any(|word| word == socket)
+            })
+            .count()
+    }
+
+    fn wait_for_saved(&self, what: &str, cond: impl Fn(&str) -> bool) {
+        let path = self.dir.join("server.json");
+        let deadline = Instant::now() + TIMEOUT;
+        while !cond(&std::fs::read_to_string(&path).unwrap_or_default()) {
+            assert!(Instant::now() < deadline, "timed out waiting for: {what}");
+            thread::sleep(POLL);
+        }
+    }
+
+    fn run(&self, arg: &str) -> std::process::Output {
+        std::process::Command::new(env!("CARGO_BIN_EXE_cornercase"))
+            .arg(arg)
+            .env(SOCKET_ENV, self.socket())
+            .env_remove(NESTED_ENV)
+            .output()
+            .expect("run cornercase")
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        let _ = self.run("kill-server");
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+struct Harness {
+    session: Arc<Session>,
+    cols: u16,
+    screen: Arc<Mutex<vt100::Parser>>,
+    raw: Arc<Mutex<Vec<u8>>>,
+    writer: Box<dyn Write + Send>,
+    child: Box<dyn Child + Send + Sync>,
+    _master: Box<dyn MasterPty + Send>,
+}
+
+impl Harness {
+    fn start() -> Self {
+        let mut harness = Self::open(Session::new(), ROWS, COLS);
+        harness.wait_for("app starts with one terminal", |s| s.contains(&first_entry()));
+        harness
+    }
+
+    fn attach(&self, rows: u16, cols: u16) -> Self {
+        let mut harness = Self::open(Arc::clone(&self.session), rows, cols);
+        harness.wait_for("client shows the sidebar", |s| s.contains("projects"));
+        harness
+    }
+
+    fn open(session: Arc<Session>, rows: u16, cols: u16) -> Self {
+        let pair =
+            native_pty_system().openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).expect("open pty");
+        let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_cornercase"));
+        cmd.env("SHELL", "/bin/sh");
+        cmd.env("PS1", "$ ");
+        cmd.env(SOCKET_ENV, session.socket());
+        cmd.env_remove(NESTED_ENV);
+        cmd.env_remove("SHORTCUT_API_TOKEN");
+        cmd.env_remove("LINEAR_API_KEY");
+        cmd.cwd(std::env::temp_dir());
+        let child = pair.slave.spawn_command(cmd).expect("spawn cornercase");
+        drop(pair.slave);
+
+        let screen = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        let raw = Arc::new(Mutex::new(Vec::new()));
+        let mut reader = pair.master.try_clone_reader().expect("pty reader");
+        let (screen_in, raw_in) = (Arc::clone(&screen), Arc::clone(&raw));
+        thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            while let Ok(n @ 1..) = reader.read(&mut buf) {
+                screen_in.lock().process(&buf[..n]);
+                raw_in.lock().extend_from_slice(&buf[..n]);
+            }
+        });
+
+        let writer = pair.master.take_writer().expect("pty writer");
+        let mut harness = Self { session, cols, screen, raw, writer, child, _master: pair.master };
+        harness.wait_for_raw("app asks for the host colors", |raw| raw.contains("\x1b]4;255;?\x1b\\\x1b[c"));
+        harness.send(HOST_THEME_REPLY);
+        harness
+    }
+
+    fn text(&self) -> String {
+        self.screen.lock().screen().contents()
+    }
+
+    fn row(&self, y: u16) -> String {
+        self.screen.lock().screen().contents_between(y, 0, y, self.cols)
+    }
+
+    fn wait_for(&mut self, what: &str, cond: impl Fn(&str) -> bool) {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let text = self.text();
+            if cond(&text) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for: {what}\n--- screen ---\n{text}");
+            thread::sleep(POLL);
+        }
+    }
+
+    fn is_running(&mut self) -> bool {
+        self.child.try_wait().expect("poll child").is_none()
+    }
+
+    fn wait_exit(&mut self, what: &str) {
+        let deadline = Instant::now() + TIMEOUT;
+        while self.is_running() {
+            assert!(Instant::now() < deadline, "timed out waiting for: {what}\n--- screen ---\n{}", self.text());
+            thread::sleep(POLL);
+        }
+    }
+
+    fn wait_for_raw(&mut self, what: &str, cond: impl Fn(&str) -> bool) {
+        let deadline = Instant::now() + TIMEOUT;
+        while !cond(&String::from_utf8_lossy(&self.raw.lock())) {
+            assert!(Instant::now() < deadline, "timed out waiting for: {what}");
+            thread::sleep(POLL);
+        }
+    }
+
+    fn send(&mut self, bytes: &[u8]) {
+        self.writer.write_all(bytes).expect("write to pty");
+        self.writer.flush().expect("flush pty");
+    }
+
+    fn click(&mut self, pos: Position) {
+        let (x, y) = (pos.x + 1, pos.y + 1);
+        self.send(format!("\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m").as_bytes());
+    }
+
+    fn right_click(&mut self, pos: Position) {
+        let (x, y) = (pos.x + 1, pos.y + 1);
+        self.send(format!("\x1b[<2;{x};{y}M\x1b[<2;{x};{y}m").as_bytes());
+    }
+
+    fn open_picker(&mut self, entries: usize) {
+        self.click(ui::new_project_button(list(), 1, entries).as_position());
+        self.wait_for("the folder picker opens", |s| s.contains("new project") && s.contains("cancel"));
+    }
+
+    fn open_project(&mut self, entries: usize, dir: &std::path::Path) {
+        self.open_picker(entries);
+        self.send(format!("{}/\r", dir.display()).as_bytes());
+    }
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn entry(name: &str) -> String {
+    format!(" {name} (")
+}
+
+fn first_entry() -> String {
+    entry(temp().file_name().and_then(|n| n.to_str()).expect("temp dir name"))
+}
+
+fn temp() -> PathBuf {
+    std::env::temp_dir().canonicalize().expect("canonicalize temp dir")
+}
+
+fn workspaces_list() -> Rect {
+    areas().workspaces_list
+}
+
+fn workspace_row(tabs: &[usize], row: WorkspaceRow) -> Position {
+    let r = ui::workspace_row(workspaces_list(), 1, tabs, 0, row);
+    Position::new(r.x + 3, r.y)
+}
+
+fn areas() -> ui::Areas {
+    ui::layout(AREA, ui::Widths::default())
+}
+
+fn list() -> Rect {
+    areas().list
+}
+
+fn pane() -> Rect {
+    areas().pane
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.name=test", "-c", "user.email=test@example.com"])
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+fn write_executable(path: &std::path::Path, contents: &str) {
+    let mut child = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg("cat > \"$1\" && chmod 755 \"$1\"")
+        .arg("sh")
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("run sh");
+    child.stdin.take().expect("stdin").write_all(contents.as_bytes()).expect("write script");
+    assert!(child.wait().expect("wait for sh").success(), "failed to write {}", path.display());
+}
+
+fn temp_dir_named(name: &str) -> PathBuf {
+    let dir = temp().join(name);
+    std::fs::create_dir_all(&dir).expect("create dir");
+    dir
+}
+
+fn temp_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("cornercase-e2e-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    dir.canonicalize().expect("canonicalize temp dir")
+}
+
+#[test]
+fn shell_output_shows_in_the_pane() {
+    let mut app = Harness::start();
+
+    app.send(b"echo hello-$((20+22))\r");
+
+    app.wait_for("output in the pane", |s| s.contains("hello-42"));
+}
+
+#[test]
+fn sidebar_shows_the_brand_and_the_title() {
+    let app = Harness::start();
+    let areas = areas();
+
+    let brand = app.row(areas.brand.y);
+    assert!(brand.contains("cornercase"), "brand row: {brand:?}");
+    let title = app.row(areas.title.y);
+    assert!(title.starts_with(" projects"), "title row: {title:?}");
+}
+
+#[test]
+fn the_project_name_stays_after_cd() {
+    let mut app = Harness::start();
+    let dir = temp_dir("cd");
+
+    app.send(format!("cd {}; echo cd-\"\"done\r", dir.display()).as_bytes());
+
+    app.wait_for("the shell moved", |s| s.contains("cd-done"));
+    assert!(app.row(list().y).contains(&first_entry()), "entry row: {:?}", app.row(list().y));
+}
+
+#[test]
+fn new_project_opens_the_typed_folder() {
+    let mut app = Harness::start();
+    let name = format!("ccnw-{}", std::process::id());
+    let dir = temp_dir_named(&name);
+
+    app.open_project(1, &dir);
+
+    app.wait_for("the project opens", |s| s.contains(&entry(&name)) && !s.contains("cancel"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_folder_picker_works_with_the_mouse() {
+    let mut app = Harness::start();
+    let name = format!("ccpk-{}", std::process::id());
+    let dir = temp_dir_named(&name);
+    for folder in ["alpha", "beta"] {
+        std::fs::create_dir_all(dir.join(folder)).expect("create folder");
+    }
+    app.open_project(1, &dir.join("alpha"));
+    app.wait_for("the first project opens", |s| s.contains(&entry("alpha")));
+    app.open_picker(2);
+    let picker = ui::picker_area(AREA);
+    app.wait_for("the picker starts next to it", |s| s.contains(&format!("{name}/")) && s.contains("beta"));
+
+    app.click(ui::picker_item(picker, 3, 0, 2).as_position());
+    app.wait_for("the picker goes into it", |s| s.contains(&format!("{name}/beta/")));
+    app.click(ui::picker_buttons(picker, "open")[0].as_position());
+
+    app.wait_for("the second project opens", |s| s.contains(&entry("beta")));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn close_button_removes_a_project() {
+    let mut app = Harness::start();
+    let name = format!("cccl-{}", std::process::id());
+    let dir = temp_dir_named(&name);
+    app.open_project(1, &dir);
+    app.wait_for("project 2 appears", |s| s.contains(&entry(&name)));
+
+    app.click(ui::close_button(list(), 1, 2, 0, 0).as_position());
+
+    app.wait_for("only the second one is left", |s| s.contains(&entry(&name)) && !s.contains(&first_entry()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn opening_an_open_folder_switches_to_it() {
+    let mut app = Harness::start();
+    let name = format!("ccsw-{}", std::process::id());
+    let dir = temp_dir_named(&name);
+    app.open_project(1, &dir);
+    app.wait_for("project 2 appears", |s| s.contains(&entry(&name)));
+
+    app.open_project(2, &temp());
+
+    app.wait_for("project 1 is active again", |s| s.contains(&format!("▌{}", first_entry())) && !s.contains("cancel"));
+    let third = app.row(ui::new_project_button(list(), 1, 2).y);
+    assert!(third.contains("new project"), "a third entry opened: {third:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn clicking_an_entry_switches_project() {
+    let mut app = Harness::start();
+    let name = format!("ccen-{}", std::process::id());
+    let dir = temp_dir_named(&name);
+    app.send(b"echo in-the-first\r");
+    app.wait_for("output in project 1", |s| s.contains("in-the-first"));
+    app.open_project(1, &dir);
+    app.wait_for("project 2 active and empty", |s| s.contains(&entry(&name)) && !s.contains("in-the-first"));
+
+    app.click(Position::new(list().x + 2, list().y));
+
+    app.wait_for("back to project 1", |s| s.contains("in-the-first"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_search_switches_project() {
+    let mut app = Harness::start();
+    let name = format!("ccse-{}", std::process::id());
+    let dir = temp_dir_named(&name);
+    app.send(b"echo in-the-first\r");
+    app.wait_for("output in project 1", |s| s.contains("in-the-first"));
+    app.open_project(1, &dir);
+    app.wait_for("project 2 active and empty", |s| s.contains(&entry(&name)) && !s.contains("in-the-first"));
+
+    app.click(areas().search.as_position());
+    app.send(temp().file_name().and_then(|n| n.to_str()).expect("temp dir name").as_bytes());
+    app.wait_for("the project is found", |s| s.contains("enter goes to"));
+    app.send(b"\r");
+
+    app.wait_for("back to project 1", |s| s.contains("in-the-first") && !s.contains("enter goes to"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_narrow_terminal_gets_a_menu_bar() {
+    let narrow = ui::COMPACT_WIDTH - 10;
+    let areas = ui::layout(Rect::new(0, 0, narrow, ROWS), ui::Widths::default());
+    let mut app = Harness::open(Session::new(), ROWS, narrow);
+    app.wait_for("the bar names the project", |s| s.lines().nth(1).is_some_and(|l| l.contains("≡")));
+
+    app.send(b"stty size\r");
+    app.wait_for("the shell gets the whole width", |s| s.contains(&format!("{} {narrow}", ROWS - ui::COMPACT_PITCH)));
+
+    app.click(areas.bar.as_position());
+    app.wait_for("the menu lists the workspaces", |s| s.contains("‹ projects") && s.contains("+ new workspace"));
+    app.click(areas.back.as_position());
+    app.wait_for("back lists the projects", |s| s.contains("+ new project") && s.contains("quit"));
+}
+
+#[test]
+fn ctrl_b_reaches_the_shell() {
+    let mut app = Harness::start();
+    app.send(b"echo cat-\"\"starts; cat -v\r");
+    app.wait_for("cat runs", |s| s.contains("cat-starts"));
+
+    app.send(b"\x02c\r");
+
+    app.wait_for("cat echoes ctrl+b", |s| s.matches("^Bc").count() >= 2);
+}
+
+#[test]
+fn ctrl_enter_reaches_a_program_that_asked_for_kitty_keys() {
+    let mut app = Harness::start();
+    app.wait_for_raw("the app asks the terminal for kitty keys", |raw| raw.contains("\x1b[>1u"));
+    app.send(b"printf '\\033[>1u'; echo cat-\"\"starts; cat -v\r");
+    app.wait_for("cat runs", |s| s.contains("cat-starts"));
+
+    app.send(b"\x1b[13;5u\r");
+
+    app.wait_for("cat echoes ctrl+enter", |s| s.matches("^[[13;5u").count() >= 2);
+}
+
+#[test]
+fn quit_button_detaches_and_programs_keep_running() {
+    let mut app = Harness::start();
+    app.send(b"echo cat-\"\"starts; cat -v\r");
+    app.wait_for("cat runs", |s| s.contains("cat-starts"));
+
+    app.click(areas().quit.as_position());
+    app.wait_exit("client exits");
+    let mut again = app.attach(ROWS, COLS);
+    again.send(b"\x02\r");
+
+    again.wait_for("cat still echoes", |s| s.contains("cat-starts") && s.contains("^B"));
+}
+
+#[test]
+fn exiting_the_last_shell_keeps_the_project() {
+    let mut app = Harness::start();
+
+    app.send(b"exit\r");
+    app.wait_for("the workspace has no tab", |s| s.contains("no tab open") && s.contains(&first_entry()));
+    app.click(workspace_row(&[0], WorkspaceRow::NewTab(0)));
+
+    app.wait_for("a new tab opens", |s| !s.contains("no tab open") && s.contains("$ "));
+    assert!(app.is_running(), "client exited");
+}
+
+#[test]
+fn tabs_keep_their_own_shells() {
+    let mut app = Harness::start();
+    app.send(b"echo in-the-first\r");
+    app.wait_for("output in the first tab", |s| s.contains("in-the-first"));
+
+    app.click(workspace_row(&[1], WorkspaceRow::NewTab(0)));
+    app.wait_for("the second tab is active and empty", |s| !s.contains("in-the-first") && s.contains("$ "));
+    app.click(workspace_row(&[2], WorkspaceRow::Tab(0, 0)));
+
+    app.wait_for("back to the first tab", |s| s.contains("in-the-first"));
+}
+
+#[test]
+fn clients_mirror_each_other() {
+    let mut first = Harness::start();
+    let mut second = first.attach(ROWS, COLS);
+
+    second.send(b"echo from-\"\"second\r");
+
+    first.wait_for("first client sees it", |s| s.contains("from-second"));
+}
+
+#[test]
+fn the_smallest_client_sets_the_size() {
+    let mut big = Harness::start();
+    let small = big.attach(ROWS - 6, COLS - 8);
+
+    let columns = ui::SIDEBAR_WIDTH + ui::WORKSPACES_WIDTH + ui::PANE_PADDING;
+
+    big.send(b"stty size\r");
+    big.wait_for("pane fits the small client", |s| s.contains(&format!("{} {}", ROWS - 6, COLS - 8 - columns)));
+    drop(small);
+    big.send(b"stty size\r");
+
+    big.wait_for("pane grows back", |s| s.contains(&format!("{ROWS} {}", COLS - columns)));
+}
+
+#[test]
+fn dragging_a_border_resizes_the_shell_and_is_saved() {
+    let mut app = Harness::start();
+    let border = areas().projects_border;
+    let (from, to, y) = (border.x + 1, border.x + 11, border.y + 2);
+
+    app.send(format!("\x1b[<0;{from};{y}M\x1b[<32;{to};{y}M\x1b[<0;{to};{y}m").as_bytes());
+    app.send(b"stty size\r");
+
+    let pane = COLS - ui::SIDEBAR_WIDTH - 10 - ui::WORKSPACES_WIDTH - ui::PANE_PADDING;
+    app.wait_for("the shell sees the narrower pane", |s| s.contains(&format!("{ROWS} {pane}")));
+    let widths = format!("\"projects\": {}", ui::SIDEBAR_WIDTH + 10);
+    app.session.wait_for_saved("the widths are saved", |saved| saved.contains(&widths));
+}
+
+#[test]
+fn dragging_over_text_copies_it_and_says_so() {
+    let mut app = Harness::start();
+    app.send(b"clear; echo copy-\"\"me\r");
+    app.wait_for("the text shows", |s| s.lines().any(|l| l.trim_end().ends_with("copy-me")));
+    let y = (0..ROWS).find(|&y| app.row(y).trim_end().ends_with("copy-me")).expect("the row of the text") + 1;
+    let (from, to) = (pane().x + 1, pane().x + 7);
+
+    app.send(format!("\x1b[<0;{from};{y}M\x1b[<32;{to};{y}M\x1b[<0;{to};{y}m").as_bytes());
+
+    let osc52 = String::from_utf8(cornercase::clipboard::osc52("copy-me")).expect("utf-8");
+    app.wait_for_raw("the text reaches the outer terminal's clipboard", |raw| raw.contains(&osc52));
+    app.wait_for("a toast says it was copied", |s| s.contains("copied to clipboard"));
+}
+
+#[test]
+fn a_program_inside_can_copy_to_the_clipboard() {
+    let mut app = Harness::start();
+
+    app.send(b"printf '\\033]52;c;Y29weS1tZQ==\\007'\r");
+
+    let osc52 = String::from_utf8(cornercase::clipboard::osc52("copy-me")).expect("utf-8");
+    app.wait_for_raw("the copy reaches the outer terminal's clipboard", |raw| raw.contains(&osc52));
+    app.wait_for("a toast says it was copied", |s| s.contains("copied to clipboard"));
+}
+
+#[test]
+fn quitting_one_client_leaves_the_others_attached() {
+    let mut first = Harness::start();
+    let mut second = first.attach(ROWS, COLS);
+
+    second.click(areas().quit.as_position());
+    second.wait_exit("second client exits");
+    first.send(b"echo still-\"\"here\r");
+
+    first.wait_for("first client keeps working", |s| s.contains("still-here"));
+}
+
+#[test]
+fn kill_server_closes_every_client() {
+    let mut first = Harness::start();
+    let mut second = first.attach(ROWS, COLS);
+
+    let out = first.session.run("kill-server");
+
+    assert!(out.status.success(), "kill-server failed: {out:?}");
+    first.wait_exit("first client exits");
+    second.wait_exit("second client exits");
+}
+
+#[test]
+fn clients_starting_at_once_share_one_server() {
+    let session = Session::new();
+    let (mut first, mut second) = thread::scope(|s| {
+        let first = s.spawn(|| Harness::open(Arc::clone(&session), ROWS, COLS));
+        let second = Harness::open(Arc::clone(&session), ROWS, COLS);
+        (first.join().expect("first client"), second)
+    });
+    first.wait_for("first client has a terminal", |s| s.contains(&first_entry()));
+    second.wait_for("second client has a terminal", |s| s.contains(&first_entry()));
+
+    second.send(b"echo from-\"\"second\r");
+
+    first.wait_for("first client sees it", |s| s.contains("from-second"));
+    let entries = first.text().matches(&first_entry()).count();
+    assert_eq!(entries, 1, "two servers opened a terminal each:\n{}", first.text());
+    let deadline = Instant::now() + TIMEOUT;
+    while session.servers() != 1 {
+        assert!(Instant::now() < deadline, "{} servers are running for one socket", session.servers());
+        thread::sleep(POLL);
+    }
+}
+
+#[test]
+fn a_new_server_reopens_the_saved_projects() {
+    let mut app = Harness::start();
+    let name = format!("ccrs-{}", std::process::id());
+    let dir = temp_dir_named(&name);
+    app.open_project(1, &dir);
+    app.wait_for("project 2 appears", |s| s.contains(&entry(&name)));
+    app.session.wait_for_saved("both projects are saved", |saved| saved.contains(name.as_str()));
+
+    let out = app.session.run("kill-server");
+    assert!(out.status.success(), "kill-server failed: {out:?}");
+    app.wait_exit("client exits with the server");
+    let mut again = app.attach(ROWS, COLS);
+
+    again.wait_for("both projects come back", |s| s.contains(&first_entry()) && s.contains(&entry(&name)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn kill_server_says_when_none_is_running() {
+    let session = Session::new();
+
+    let out = session.run("kill-server");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success() && stderr.contains("no cornercase server is running"), "{out:?}");
+}
+
+#[test]
+fn running_cornercase_inside_itself_is_refused() {
+    let mut app = Harness::start();
+
+    let bin = env!("CARGO_BIN_EXE_cornercase");
+
+    app.send(format!("{bin} 2>&1 | grep -q 'nesting it is not supported' && echo refused-\"\"ok\r").as_bytes());
+    app.wait_for("nested client explains why", |s| s.contains("refused-ok"));
+    app.send(format!("{bin} 2>/dev/null; echo exit-\"\"code-$?\r").as_bytes());
+
+    app.wait_for("nested client fails", |s| s.contains("exit-code-1"));
+}
+
+#[test]
+fn mouse_is_not_forwarded_when_the_program_did_not_ask() {
+    let mut app = Harness::start();
+    app.send(b"echo cat-\"\"starts; cat -v\r");
+    app.wait_for("cat runs", |s| s.contains("cat-starts"));
+
+    app.click(Position::new(pane().x + 7, pane().y + 4));
+    app.send(b"done\r");
+
+    app.wait_for("cat echoes the text", |s| s.matches("done").count() >= 2);
+    assert!(!app.text().contains("^[[<"), "mouse leaked into the program:\n{}", app.text());
+}
+
+#[test]
+fn mouse_is_forwarded_relative_to_the_pane_when_requested() {
+    let mut app = Harness::start();
+    app.send(b"printf '\\033[?1000h\\033[?1006h'; echo cat-\"\"starts; cat -v\r");
+    app.wait_for("cat runs with mouse mode on", |s| s.contains("cat-starts"));
+
+    app.click(Position::new(pane().x + 7, pane().y + 4));
+
+    app.wait_for("program receives the click", |s| s.contains("^[[<0;8;5M^[[<0;8;5m"));
+}
+
+#[test]
+fn programs_see_the_host_background_color() {
+    let mut app = Harness::start();
+
+    app.send(b"stty -icanon -echo; printf '\\033]11;?\\033\\\\'; head -c 23 | tr '\\033' E; stty sane\r");
+
+    app.wait_for("program reads the host background", |s| s.contains("E]11;rgb:1212/5656/9a9a"));
+}
+
+#[test]
+fn sigterm_restores_the_terminal() {
+    let mut app = Harness::start();
+    let pid = app.child.process_id().expect("child pid");
+    app.raw.lock().clear();
+
+    let status = std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).status().expect("run kill");
+    assert!(status.success(), "kill failed: {status}");
+
+    app.wait_exit("app exits on SIGTERM");
+    app.wait_for_raw("kitty keys and mouse capture off, alternate screen left", |raw| {
+        raw.contains("\x1b[<1u") && raw.contains("\x1b[?1000l") && raw.contains("\x1b[?1049l")
+    });
+}
+
+#[test]
+fn a_workspace_with_its_own_worktree_is_created_and_removed() {
+    let session = Session::new();
+    let worktrees = session.dir.join("worktrees");
+    let config = format!("{{\"worktrees_dir\": \"{}\"}}", worktrees.display());
+    std::fs::write(session.dir.join("config.json"), config).expect("write config");
+    let repo = std::env::temp_dir().join(format!("ccwt-{}", std::process::id()));
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    let repo_name = repo.file_name().and_then(|n| n.to_str()).expect("repo name").to_string();
+    git(&repo, &["init", "--quiet"]);
+    std::fs::write(repo.join(".gitignore"), ".env\n").expect("write .gitignore");
+    std::fs::write(repo.join(".worktreeinclude"), ".env\n").expect("write .worktreeinclude");
+    std::fs::write(repo.join(".env"), "TOKEN=1\n").expect("write .env");
+    git(&repo, &["add", "--all"]);
+    git(&repo, &["commit", "--quiet", "-m", "init"]);
+    let mut app = Harness::open(session, ROWS, COLS);
+    app.wait_for("app starts with one terminal", |s| s.contains(&first_entry()));
+    app.open_project(1, &repo);
+    app.wait_for("the repo opens as project 2", |s| s.contains(&entry(&repo_name)));
+
+    app.click(ui::new_workspace_button(workspaces_list(), 1, &[1]).as_position());
+    app.wait_for("the form opens", |s| s.contains("with its own worktree"));
+    app.send(b"e2e/login\r");
+
+    let label_row = ui::workspace_row(workspaces_list(), 1, &[1, 1], 0, WorkspaceRow::Workspace(1));
+    app.wait_for("the worktree workspace opens", |s| s.contains("e2e/login") && !s.contains("cancel"));
+    assert!(app.row(label_row.y).contains("e2e/login"), "workspace row: {:?}", app.row(label_row.y));
+    let checkout = worktrees.join(&repo_name).join("e2e-login");
+    assert_eq!(std::fs::read_to_string(checkout.join(".env")).ok().as_deref(), Some("TOKEN=1\n"));
+
+    app.click(ui::row_close_button(label_row).as_position());
+    app.wait_for("it asks first", |s| s.contains("remove workspace"));
+    app.click(ui::form_buttons(ui::form_area(AREA), "remove")[0].as_position());
+
+    app.wait_for("the workspace goes away", |s| !s.contains("e2e/login") && !s.contains("remove workspace"));
+    assert!(!checkout.exists(), "the checkout is still there");
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn an_issue_is_read_then_handed_to_its_agent_in_its_own_worktree() {
+    let session = Session::new();
+    let worktrees = session.dir.join("worktrees");
+    let gh = session.dir.join("gh");
+    let list = r#"[{"number":7,"title":"Fix the login","state":"OPEN","labels":[],"author":{"login":"ana"},"updatedAt":"2026-09-19T12:00:00Z","url":"https://github.com/acme/shop/issues/7"}]"#;
+    let view = r#"{"number":7,"title":"Fix the login","state":"OPEN","labels":[],"assignees":[],"author":{"login":"ana"},"updatedAt":"","url":"u","body":"The form **breaks** after:\n\n- typing\n- waiting","comments":[{"author":{"login":"bo"},"body":"Same here","createdAt":""}]}"#;
+    let script =
+        format!("#!/bin/sh\nif [ \"$2\" = view ]; then cat <<'EOF'\n{view}\nEOF\nelse cat <<'EOF'\n{list}\nEOF\nfi\n");
+    write_executable(&gh, &script);
+    let agent = session.dir.join("agent");
+    let agent_script = "#!/bin/sh\nprintf 'Do you trust the files in this folder?\\n'\nread answer\n\
+        printf '\\033[2J\\033[Hagent ready> '\nread line\nprintf '%s' \"$line\" > got\n";
+    write_executable(&agent, agent_script);
+    let config = format!(
+        r#"{{"worktrees_dir": "{}", "gh": "{}", "agent": "fake", "agent_commands": {{"fake": "{}"}}}}"#,
+        worktrees.display(),
+        gh.display(),
+        agent.display()
+    );
+    std::fs::write(session.dir.join("config.json"), config).expect("write config");
+    let repo = std::env::temp_dir().join(format!("ccis-{}", std::process::id()));
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    let repo_name = repo.file_name().and_then(|n| n.to_str()).expect("repo name").to_string();
+    git(&repo, &["init", "--quiet"]);
+    git(&repo, &["commit", "--quiet", "--allow-empty", "-m", "init"]);
+    let mut app = Harness::open(session, ROWS, COLS);
+    app.wait_for("app starts with one terminal", |s| s.contains(&first_entry()));
+    app.open_project(1, &repo);
+    app.wait_for("the repo opens as project 2", |s| s.contains(&entry(&repo_name)));
+
+    app.click(areas().issues.as_position());
+    app.wait_for("the issues show", |s| s.contains("#7") && s.contains("Fix the login"));
+    app.send(b"\r");
+    app.wait_for("the issue shows rendered", |s| {
+        s.contains("The form breaks after:") && s.contains("• typing") && s.contains("@bo") && s.contains("Same here")
+    });
+    let detail_buttons = ["start", "agent…", "raw", "copy url", "back"];
+    app.click(ui::issue_buttons(ui::issues_area(AREA), &detail_buttons)[3].as_position());
+    let osc52 =
+        String::from_utf8(cornercase::clipboard::osc52("https://github.com/acme/shop/issues/7")).expect("utf-8");
+    app.wait_for_raw("the URL reaches the outer terminal's clipboard", |raw| raw.contains(&osc52));
+    app.send(b"\r");
+
+    app.wait_for("the agent starts in the issue workspace with the prompt typed", |s| {
+        s.contains("#7 Fix the login") && s.contains("agent ready> https://") && !s.contains("cancel")
+    });
+    assert!(worktrees.join(&repo_name).join("issue-7-fix-the-login").is_dir(), "no checkout");
+    let got = worktrees.join(&repo_name).join("issue-7-fix-the-login").join("got");
+    assert!(!got.exists(), "the prompt was sent without Enter");
+    app.send(b"\r");
+    let deadline = Instant::now() + TIMEOUT;
+    while std::fs::read_to_string(&got).ok().as_deref() != Some("https://github.com/acme/shop/issues/7") {
+        assert!(Instant::now() < deadline, "the agent never got the prompt");
+        thread::sleep(POLL);
+    }
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn right_click_renames_a_project() {
+    let mut app = Harness::start();
+    let at = Position::new(list().x + 3, list().y);
+
+    app.right_click(at);
+    app.wait_for("the menu opens", |s| s.contains("rename project"));
+    app.click(ui::menu_item(ui::menu_area(AREA, at, &["rename project"]), 0).as_position());
+    app.wait_for("the form opens", |s| s.contains("leave it empty"));
+    app.send(&[0x7f; 64]);
+    app.send(b"my-api\r");
+
+    app.wait_for("the entry shows the new name", |s| s.contains(&entry("my-api")) && !s.contains("leave it empty"));
+    app.send(b"cd /\r");
+    app.send(b"echo cd-\"\"done\r");
+    app.wait_for("the shell moved", |s| s.contains("cd-done"));
+    assert!(app.text().contains(&entry("my-api")), "the name changed after cd:\n{}", app.text());
+}
+
+#[test]
+fn a_pane_splits_from_its_menu_and_closes_on_exit() {
+    let mut app = Harness::start();
+    let at = Position::new(pane().x + 2, pane().y + 2);
+    let items = ["split right", "split down", "send right-clicks to the pane", "close pane"];
+    let (_, right, divider) = split::split_rect(pane(), Dir::Right, split::HALF);
+
+    app.right_click(at);
+    app.wait_for("the pane menu opens", |s| s.contains("split right"));
+    app.click(ui::menu_item(ui::menu_area(AREA, at, &items), 0).as_position());
+    app.wait_for("the divider shows", |s| screen_column(s, divider.x).iter().all(|c| *c == '│'));
+    app.send(b"stty size\r");
+
+    app.wait_for("the new shell has its half", |s| s.contains(&format!("{} {}", right.height, right.width)));
+    app.session.wait_for_saved("the layout is saved", |saved| saved.contains("\"right\""));
+    app.send(b"exit\r");
+    app.wait_for("the divider goes", |s| screen_column(s, divider.x).iter().all(|c| *c != '│'));
+    app.send(b"stty size\r");
+    app.wait_for("the first shell has the whole pane again", |s| {
+        s.contains(&format!("{} {}", pane().height, pane().width))
+    });
+}
+
+fn screen_column(screen: &str, x: u16) -> Vec<char> {
+    screen.lines().map(|l| l.chars().nth(usize::from(x)).unwrap_or(' ')).collect()
+}

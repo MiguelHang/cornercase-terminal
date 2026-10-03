@@ -1,0 +1,396 @@
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
+
+use crate::issues::People;
+use crate::protocol;
+use crate::split::Node;
+use crate::ui::Widths;
+
+pub const VERSION: u32 = 3;
+pub const SETTLE: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct State {
+    pub version: u32,
+    pub projects: Vec<ProjectState>,
+    pub active: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub widths: Option<Widths>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issues: Option<IssuesState>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssuesState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab: Option<String>,
+    #[serde(default)]
+    pub closed: bool,
+    #[serde(default)]
+    pub people: People,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectState {
+    pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub workspaces: Vec<WorkspaceState>,
+    #[serde(default)]
+    pub active: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceState {
+    pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub worktree: bool,
+    pub tabs: Vec<TabState>,
+    #[serde(default)]
+    pub active: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TabState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub panes: Vec<PaneState>,
+    #[serde(default)]
+    pub active: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<Node<usize>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneState {
+    pub cwd: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub right_clicks: bool,
+}
+
+impl WorkspaceState {
+    fn plain(path: PathBuf, cwds: Vec<Option<PathBuf>>, active: usize) -> Self {
+        let tabs = cwds.into_iter().map(|cwd| TabState {
+            name: None,
+            panes: vec![PaneState { cwd, right_clicks: false }],
+            active: 0,
+            layout: None,
+        });
+        Self { path, name: None, worktree: false, tabs: tabs.collect(), active }
+    }
+}
+
+#[derive(Deserialize)]
+struct Versioned {
+    version: u32,
+}
+
+#[derive(Deserialize)]
+struct V2State {
+    workspaces: Vec<V2Workspace>,
+    active: usize,
+}
+
+#[derive(Deserialize)]
+struct V2Workspace {
+    path: PathBuf,
+    #[serde(default)]
+    name: Option<String>,
+    terminals: Vec<PaneState>,
+    #[serde(default)]
+    active: usize,
+}
+
+impl From<V2State> for State {
+    fn from(old: V2State) -> Self {
+        let projects = old
+            .workspaces
+            .into_iter()
+            .map(|w| {
+                let cwds = w.terminals.into_iter().map(|t| t.cwd).collect();
+                let workspace = WorkspaceState::plain(w.path.clone(), cwds, w.active);
+                ProjectState { path: w.path, name: w.name, workspaces: vec![workspace], active: 0 }
+            })
+            .collect();
+        Self { version: VERSION, projects, active: old.active, widths: None, issues: None }
+    }
+}
+
+#[derive(Deserialize)]
+struct V1State {
+    terminals: Vec<V1Term>,
+    active: usize,
+}
+
+#[derive(Deserialize)]
+struct V1Term {
+    cwd: Option<PathBuf>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+impl From<V1State> for V2State {
+    fn from(old: V1State) -> Self {
+        let mut active = 0;
+        let mut workspaces = Vec::new();
+        for (i, term) in old.terminals.into_iter().enumerate() {
+            let Some(cwd) = term.cwd else { continue };
+            if i <= old.active {
+                active = workspaces.len();
+            }
+            let terminals = vec![PaneState { cwd: Some(cwd.clone()), right_clicks: false }];
+            workspaces.push(V2Workspace { path: cwd, name: term.name, terminals, active: 0 });
+        }
+        Self { workspaces, active }
+    }
+}
+
+pub fn path() -> PathBuf {
+    if let Some(socket) = std::env::var_os(protocol::SOCKET_ENV) {
+        return Path::new(&socket).with_extension("json");
+    }
+    let state_home = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".local").join("state")))
+        .unwrap_or_else(std::env::temp_dir);
+    state_home.join("cornercase").join("session.json")
+}
+
+pub fn load(path: &Path) -> Option<State> {
+    let text = std::fs::read_to_string(path).ok()?;
+    match serde_json::from_str::<Versioned>(&text).ok()?.version {
+        VERSION => serde_json::from_str(&text).ok(),
+        2 => serde_json::from_str::<V2State>(&text).ok().map(State::from),
+        1 => serde_json::from_str::<V1State>(&text).ok().map(|v1| State::from(V2State::from(v1))),
+        _ => None,
+    }
+}
+
+pub fn save(path: &Path, value: &impl Serialize) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
+    std::fs::rename(tmp, path)
+}
+
+#[derive(Debug)]
+pub struct Saver {
+    path: PathBuf,
+    saved: Option<State>,
+    pending: Option<(State, Instant)>,
+}
+
+impl Saver {
+    pub fn new(path: PathBuf, saved: Option<State>) -> Self {
+        Self { path, saved, pending: None }
+    }
+
+    pub fn observe(&mut self, state: State, now: Instant) -> io::Result<()> {
+        if self.saved.as_ref() == Some(&state) {
+            self.pending = None;
+            return Ok(());
+        }
+        match &self.pending {
+            Some((pending, since)) if *pending == state => {
+                if now.duration_since(*since) >= SETTLE {
+                    save(&self.path, &state)?;
+                    self.saved = Some(state);
+                    self.pending = None;
+                }
+            }
+            _ => self.pending = Some((state, now)),
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::TempDir;
+
+    fn project(dir: &str) -> ProjectState {
+        let workspace = WorkspaceState::plain(PathBuf::from(dir), vec![Some(PathBuf::from(dir))], 0);
+        ProjectState { path: PathBuf::from(dir), name: None, workspaces: vec![workspace], active: 0 }
+    }
+
+    fn state(dirs: &[&str]) -> State {
+        State {
+            version: VERSION,
+            projects: dirs.iter().map(|d| project(d)).collect(),
+            active: 0,
+            widths: None,
+            issues: None,
+        }
+    }
+
+    mod file {
+        use super::*;
+
+        #[test]
+        fn round_trips() {
+            let tmp = TempDir::new();
+            let path = tmp.path().join("nested").join("session.json");
+
+            save(&path, &state(&["/a", "/b"])).expect("save");
+
+            assert_eq!(load(&path), Some(state(&["/a", "/b"])));
+        }
+
+        #[test]
+        fn round_trips_the_column_widths() {
+            let tmp = TempDir::new();
+            let path = tmp.path().join("session.json");
+            let saved = State { widths: Some(Widths { projects: 40, workspaces: 20 }), ..state(&["/a"]) };
+
+            save(&path, &saved).expect("save");
+
+            assert_eq!(load(&path), Some(saved));
+        }
+
+        #[test]
+        fn files_without_widths_load_with_none() {
+            let tmp = TempDir::new();
+            let path = tmp.path().join("session.json");
+            std::fs::write(&path, r#"{"version":3,"projects":[],"active":0}"#).expect("write");
+
+            assert_eq!(load(&path).expect("load").widths, None);
+        }
+
+        #[test]
+        fn round_trips_names_worktrees_and_tabs() {
+            let tmp = TempDir::new();
+            let path = tmp.path().join("session.json");
+            let mut saved = state(&["/a"]);
+            saved.projects[0].name = Some("api".into());
+            let mut workspace = WorkspaceState::plain("/wt".into(), vec![Some("/wt".into()), None], 1);
+            workspace.name = Some("login".into());
+            workspace.worktree = true;
+            workspace.tabs[0].name = Some("server".into());
+            saved.projects[0].workspaces.push(workspace);
+
+            save(&path, &saved).expect("save");
+
+            assert_eq!(load(&path), Some(saved));
+        }
+
+        #[test]
+        fn version_2_files_become_one_project_per_workspace() {
+            let tmp = TempDir::new();
+            let path = tmp.path().join("session.json");
+            let v2 = r#"{"version":2,"workspaces":[{"path":"/a","terminals":[{"cwd":"/a"}]},
+                {"path":"/b","name":"api","terminals":[{"cwd":"/b"},{"cwd":"/b/src"}],"active":1}],"active":1}"#;
+            std::fs::write(&path, v2).expect("write");
+
+            let mut expected = state(&["/a", "/b"]);
+            expected.projects[1].name = Some("api".into());
+            expected.projects[1].workspaces[0] =
+                WorkspaceState::plain("/b".into(), vec![Some("/b".into()), Some("/b/src".into())], 1);
+            expected.active = 1;
+            assert_eq!(load(&path), Some(expected));
+        }
+
+        #[test]
+        fn version_1_files_become_one_project_per_terminal() {
+            let tmp = TempDir::new();
+            let path = tmp.path().join("session.json");
+            let v1 = r#"{"version":1,"terminals":[{"cwd":"/a"},{"cwd":null},{"cwd":"/b","name":"api"}],"active":2}"#;
+            std::fs::write(&path, v1).expect("write");
+
+            let mut expected = state(&["/a", "/b"]);
+            expected.projects[1].name = Some("api".into());
+            expected.active = 1;
+            assert_eq!(load(&path), Some(expected));
+        }
+
+        #[test]
+        fn missing_file_loads_nothing() {
+            let tmp = TempDir::new();
+            assert_eq!(load(&tmp.path().join("session.json")), None);
+        }
+
+        #[test]
+        fn corrupt_file_loads_nothing() {
+            let tmp = TempDir::new();
+            let path = tmp.path().join("session.json");
+            std::fs::write(&path, "{ not json").expect("write");
+
+            assert_eq!(load(&path), None);
+        }
+
+        #[test]
+        fn other_versions_load_nothing() {
+            let tmp = TempDir::new();
+            let path = tmp.path().join("session.json");
+            save(&path, &State { version: VERSION + 1, ..state(&["/a"]) }).expect("save");
+
+            assert_eq!(load(&path), None);
+        }
+    }
+
+    mod saver {
+        use super::*;
+
+        fn saver(tmp: &TempDir) -> (Saver, PathBuf) {
+            let path = tmp.path().join("session.json");
+            (Saver::new(path.clone(), None), path)
+        }
+
+        #[test]
+        fn waits_for_the_state_to_settle() {
+            let tmp = TempDir::new();
+            let (mut saver, path) = saver(&tmp);
+            let t0 = Instant::now();
+
+            saver.observe(state(&["/a"]), t0).expect("observe");
+            saver.observe(state(&["/a"]), t0 + SETTLE / 2).expect("observe");
+
+            assert_eq!(load(&path), None);
+        }
+
+        #[test]
+        fn saves_a_settled_state() {
+            let tmp = TempDir::new();
+            let (mut saver, path) = saver(&tmp);
+            let t0 = Instant::now();
+
+            saver.observe(state(&["/a"]), t0).expect("observe");
+            saver.observe(state(&["/a"]), t0 + SETTLE).expect("observe");
+
+            assert_eq!(load(&path), Some(state(&["/a"])));
+        }
+
+        #[test]
+        fn a_change_restarts_the_wait() {
+            let tmp = TempDir::new();
+            let (mut saver, path) = saver(&tmp);
+            let t0 = Instant::now();
+
+            saver.observe(state(&["/a"]), t0).expect("observe");
+            saver.observe(state(&[]), t0 + SETTLE / 2).expect("observe");
+            saver.observe(state(&[]), t0 + SETTLE).expect("observe");
+
+            assert_eq!(load(&path), None);
+        }
+
+        #[test]
+        fn does_not_rewrite_an_unchanged_state() {
+            let tmp = TempDir::new();
+            let path = tmp.path().join("session.json");
+            let mut saver = Saver::new(path.clone(), Some(state(&["/a"])));
+            let t0 = Instant::now();
+
+            saver.observe(state(&["/a"]), t0).expect("observe");
+            saver.observe(state(&["/a"]), t0 + SETTLE).expect("observe");
+
+            assert!(!path.exists());
+        }
+    }
+}
