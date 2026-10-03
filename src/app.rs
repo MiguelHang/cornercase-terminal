@@ -1669,15 +1669,26 @@ impl App {
     }
 
     fn search_candidates(&self) -> Vec<Candidate> {
-        let mut candidates = Vec::new();
+        let mut candidates: Vec<Candidate> = self
+            .groups
+            .iter()
+            .map(|g| Candidate {
+                kind: Kind::Group,
+                goto: Goto { group: Some(g.id), ..Goto::default() },
+                name: format!("{} {}", g.icon, g.name),
+                context: String::new(),
+                keys: vec![g.name.clone()],
+            })
+            .collect();
         for p in &self.projects {
             let project = self.project_label(p);
-            let goto = Goto { project: p.id, workspace: None, tab: None };
+            let goto = Goto { project: Some(p.id), ..Goto::default() };
+            let group = p.group.and_then(|id| self.group_index(id)).map(|g| self.groups[g].name.clone());
             candidates.push(Candidate {
                 kind: Kind::Project,
                 goto,
                 name: project.clone(),
-                context: String::new(),
+                context: group.unwrap_or_default(),
                 keys: vec![project.clone()],
             });
             for w in &p.workspaces {
@@ -1762,7 +1773,12 @@ impl App {
 
     fn goto(&mut self, goto: Goto) {
         self.nav = None;
-        let Some(p) = self.project_index(goto.project) else { return };
+        let first = goto.group.and_then(|id| {
+            let g = self.group_index(id)?;
+            self.groups[g].collapsed = false;
+            self.projects.iter().find(|p| p.group == Some(id)).map(|p| p.id)
+        });
+        let Some(p) = goto.project.or(first).and_then(|id| self.project_index(id)) else { return };
         self.active = p;
         let project = &mut self.projects[p];
         let Some(w) = goto.workspace.and_then(|id| project.workspaces.iter().position(|w| w.id == id)) else { return };
@@ -4348,6 +4364,50 @@ mod tests {
             send_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
             send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert_eq!(active(&app), (0, 0, 0));
+        }
+
+        fn with_group(app: &mut App, collapsed: bool) {
+            let id = app.add_group("clients".into());
+            app.groups[0].collapsed = collapsed;
+            app.projects[0].group = Some(id);
+        }
+
+        #[test]
+        fn a_group_is_found_before_its_projects() {
+            let (mut app, _rx, _dirs) = named();
+            with_group(&mut app, false);
+            app.projects[1].name = Some("clients-api".into());
+            let found: Vec<(Kind, String)> =
+                app.search_results("clients").into_iter().map(|c| (c.kind, c.name)).collect();
+            let group = format!("{} clients", ui::GROUP_ICONS[0]);
+            assert_eq!(found, [(Kind::Group, group), (Kind::Project, "clients-api".into())]);
+        }
+
+        #[test]
+        fn a_project_shows_its_group_as_context() {
+            let (mut app, _rx, _dirs) = named();
+            with_group(&mut app, false);
+            let contexts: Vec<String> = app.search_results("alpha").into_iter().map(|c| c.context).collect();
+            assert_eq!(contexts, ["clients"]);
+        }
+
+        #[test]
+        fn going_to_a_group_expands_it_and_opens_its_first_project() {
+            let (mut app, _rx, _dirs) = named();
+            with_group(&mut app, true);
+            open_search(&mut app);
+            submit_text(&mut app, "clients");
+            assert_eq!((app.active, app.groups[0].collapsed, query(&app)), (0, false, None));
+        }
+
+        #[test]
+        fn going_to_an_empty_group_expands_it_and_keeps_the_project() {
+            let (mut app, _rx, _dirs) = named();
+            app.add_group("empty".into());
+            app.groups[0].collapsed = true;
+            open_search(&mut app);
+            submit_text(&mut app, "empty");
+            assert_eq!((app.active, app.groups[0].collapsed), (1, false));
         }
 
         #[test]

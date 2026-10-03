@@ -2890,6 +2890,30 @@ mod tests {
             insta::assert_snapshot!(render_small(&in_a_project(Some(Nav::Projects))).backend());
         }
 
+        fn with_groups(view: View<'static>) -> View<'static> {
+            let mut v = View { active: 1, ..view };
+            v.groups = vec![GroupEntry { name: "work".into(), icon: '●', colour: 4, collapsed: false }];
+            v.projects[1].group = Some(0);
+            v
+        }
+
+        #[test]
+        fn renders_groups_in_the_projects_menu() {
+            insta::assert_snapshot!(render_small(&with_groups(in_a_project(Some(Nav::Projects)))).backend());
+        }
+
+        #[test]
+        fn a_header_is_a_whole_band_to_click() {
+            let v = with_groups(in_a_project(Some(Nav::Projects)));
+            let rows = v.sidebar_rows();
+            let header = entry_row(small().list, COMPACT_PITCH, &rows, 0, SidebarRow::Group(0));
+            let bottom = Position::new(header.x + 2, header.bottom() - 1);
+            assert_eq!(
+                (header.height, sidebar_hit(small().list, COMPACT_PITCH, &rows, 0, bottom)),
+                (COMPACT_PITCH, Some(SidebarHit::Group(0)))
+            );
+        }
+
         #[test]
         fn the_active_entry_fills_its_whole_band() {
             let t = render_small(&in_a_project(Some(Nav::Projects)));
