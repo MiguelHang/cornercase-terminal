@@ -15,6 +15,7 @@ cornercase is young. These are the gaps you may run into today.
 | **No key releases** | Programs inside cornercase only see key presses, never releases, even with the kitty keyboard protocol. |
 | **One size for all clients** | When several terminals are attached, all of them use the size of the one you used last. The others show the session cut off or with empty space around it. |
 | **100 issues per source** | The issue browser lists up to 100 issues from each tracker. Use the filters to narrow the list down. |
+| **Agent status for Claude Code only** | Tabs show what Claude Code is doing; other agents don't get an icon yet. Claude has to run in the tab itself: through `ssh` or inside a container, cornercase can't see it. |
 | **Agent readiness is a guess** | cornercase decides when a shell or an agent is ready by watching its output settle. A very slow agent may get its prompt late, or not at all; see [The launch](../../guides/issues-and-agents/#the-launch). |
 
 ## On purpose

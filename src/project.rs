@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::activity::Status;
 use crate::split::{self, Dir, Node};
 use crate::term::Term;
 use crate::ui::GroupEntry;
@@ -39,6 +40,10 @@ impl Tab {
 
     pub fn label(&self) -> String {
         self.name.clone().or_else(|| self.pane().and_then(Term::process_name)).unwrap_or_else(|| "?".into())
+    }
+
+    pub fn status(&self) -> Option<Status> {
+        self.panes.iter().filter_map(|t| t.agent.status()).max()
     }
 
     pub fn focus(&mut self, id: u64) {

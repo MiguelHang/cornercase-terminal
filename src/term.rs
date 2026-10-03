@@ -7,6 +7,7 @@ use std::thread;
 use parking_lot::Mutex;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+use crate::activity;
 use crate::app::AppEvent;
 use crate::emulator::Emulator;
 use crate::error::{Error, Result};
@@ -22,6 +23,7 @@ type Writer = Arc<Mutex<Box<dyn Write + Send>>>;
 pub struct Term {
     pub id: u64,
     pub emulator: Emulator,
+    pub agent: activity::Pane,
     master: Box<dyn MasterPty + Send>,
     writer: Writer,
     child: Box<dyn Child + Send + Sync>,
@@ -72,7 +74,8 @@ impl Term {
             .map_err(|e| Error::Emulator(e.into()))?;
         spawn_reader(id, reader, tx);
 
-        Ok(Self { id, emulator, master: pair.master, writer, child, size: (rows, cols) })
+        let agent = activity::Pane::default();
+        Ok(Self { id, emulator, agent, master: pair.master, writer, child, size: (rows, cols) })
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
@@ -92,7 +95,7 @@ impl Term {
         let _ = self.emulator.resize(rows, cols);
     }
 
-    fn foreground_pid(&self) -> Option<i32> {
+    pub fn foreground_pid(&self) -> Option<i32> {
         self.master
             .process_group_leader()
             .filter(|pid| process::alive(*pid))

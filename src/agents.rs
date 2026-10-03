@@ -3,10 +3,11 @@ use std::path::Path;
 use crate::config::Config;
 
 pub const AUTO: &str = "auto";
+pub const CLAUDE: &str = "claude";
 pub const DEFAULT_TRUST_PROMPT: &str =
     "trust the files|trust this (folder|directory|workspace|repository)|do you trust|yes, proceed";
 const KNOWN: [(&str, &str); 14] = [
-    ("claude", "claude"),
+    (CLAUDE, "claude"),
     ("codex", "codex"),
     ("gemini", "gemini"),
     ("opencode", "opencode"),

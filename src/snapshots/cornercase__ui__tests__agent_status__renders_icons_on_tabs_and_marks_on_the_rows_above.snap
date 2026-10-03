@@ -1,0 +1,22 @@
+---
+source: src/ui.rs
+expression: render(&with_agents()).backend()
+---
+" ▄▀▀▀ cornercase                                         │  no tab open                             "
+" █                                                       │                                          "
+"                                                         │                                          "
+"  ⌕ search projects, workspaces, tabs                    │                                          "
+"                                                         │                                          "
+" projects                      │ workspaces              │                                          "
+"                               │                         │                                          "
+"▌ shop (1)                !    │  login          ! ↓2    │                                          "
+"  api (1)                 ✓    │  ▌ ◐ claude             │                                          "
+"                               │    ! claude             │                                          "
+"  ▸ ● work (2)            !    │    nvim                 │                                          "
+"                               │    + tab                │                                          "
+"  + new project                │                         │                                          "
+"                               │  ↓ 3 more               │                                          "
+"                               │  + new workspace        │                                          "
+" ───────────────────────────── │                         │                                          "
+"  settings                     │                         │                                          "
+"  quit                         │                         │                                          "

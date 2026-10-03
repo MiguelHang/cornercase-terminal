@@ -48,6 +48,10 @@ When you press **start**, cornercase uses, in this order:
 
 cornercase looks at the program in the foreground of the active pane, and compares the file names of its first two arguments with each agent's command. That way it recognises `/usr/local/bin/claude --resume` as `claude`, and also agents started through an interpreter, like `node …/gemini-cli/bin/gemini`, as `gemini`.
 
+### What the agent is doing
+
+Tabs where Claude Code runs show whether it is working, needs you or finished, and the rows above them show what needs you; see [What your agents are doing](../../guides/projects-workspaces-tabs/#what-your-agents-are-doing). cornercase recognises Claude in every pane this way, every half second, and reads the session file Claude Code keeps for that process in `~/.claude/sessions` (or `$CLAUDE_CONFIG_DIR/sessions`). Other agents don't get an icon yet.
+
 ## Modes and arguments
 
 Each agent starts with its command followed by its arguments, `agent_args` in `config.json`. To make the common choices easy, some agents have **modes**: named sets of arguments you pick from a list in **settings → Agents**.

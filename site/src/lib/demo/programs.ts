@@ -734,6 +734,10 @@ export class Agent implements Program {
     return this.phase === 'ready';
   }
 
+  get working(): boolean {
+    return this.phase === 'working';
+  }
+
   get pending(): string {
     return this.input;
   }
