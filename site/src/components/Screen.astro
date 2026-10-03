@@ -1,0 +1,189 @@
+---
+import { parseAnsi } from '../lib/term/ansi';
+import { rect } from '../lib/term/grid';
+import { toSvg } from '../lib/term/svg';
+
+interface Props {
+  name: string;
+  alt: string;
+  caption?: string;
+  crop?: [number, number, number, number];
+  title?: string;
+}
+
+const screens = import.meta.glob<string>('../screens/*.ansi', { query: '?raw', import: 'default', eager: true });
+const { name, alt, caption, crop, title } = Astro.props;
+const source = screens[`../screens/${name}.ansi`];
+if (!source) throw new Error(`unknown screen: ${name}`);
+const full = parseAnsi(source);
+const grid = crop ? full.crop(rect(...crop)) : full;
+const svg = toSvg(grid, { label: alt, className: 'screen-svg' });
+const size = `${grid.cols}×${grid.rows}`;
+---
+
+<figure class="screen not-content" style={`--cols: ${grid.cols}`}>
+  <div class="screen-window">
+    <div class="screen-bar" aria-hidden="true">
+      <span class="screen-dots"><i></i><i></i><i></i></span>
+      <span class="screen-title">{title ?? 'cornercase'}</span>
+      <span class="screen-size">{size}</span>
+    </div>
+    <div class="screen-body" set:html={svg} />
+    <button class="screen-zoom" type="button" aria-label={`Enlarge the screen: ${alt}`}>
+      <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5 9 7M2.5 13.5 7 9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+    </button>
+  </div>
+  {caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<script>
+  const dialog = () => {
+    let d = document.querySelector<HTMLDialogElement>('dialog.screen-dialog');
+    if (d) return d;
+    d = document.createElement('dialog');
+    d.className = 'screen-dialog';
+    d.addEventListener('click', () => d?.close());
+    document.body.append(d);
+    return d;
+  };
+  document.addEventListener('click', (event) => {
+    const button = (event.target as Element | null)?.closest('.screen-zoom');
+    const win = button?.closest('.screen-window');
+    if (!button || !win) return;
+    const d = dialog();
+    const copy = win.cloneNode(true) as HTMLElement;
+    copy.querySelector('.screen-zoom')?.remove();
+    d.setAttribute('aria-label', button.getAttribute('aria-label') ?? 'Enlarged screen');
+    d.replaceChildren(copy);
+    d.showModal();
+  });
+</script>
+
+<style>
+  .screen {
+    margin: 1.75rem 0;
+  }
+  .screen-window {
+    max-width: calc(var(--cols) * 7.8px + 1.4rem);
+    margin-inline: auto;
+    border-radius: 12px;
+    overflow: hidden;
+    background: #0e0d14;
+    border: 1px solid #2c2a3b;
+    box-shadow:
+      0 0 0 1px rgb(0 0 0 / 0.4),
+      0 24px 60px -24px rgb(20 10 60 / 0.55);
+  }
+  .screen-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    height: 2rem;
+    padding: 0 0.85rem;
+    background: #15131f;
+    border-bottom: 1px solid #24223a;
+    font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+    font-size: 0.7rem;
+    color: #7d7a95;
+  }
+  .screen-dots {
+    display: flex;
+    gap: 6px;
+  }
+  .screen-dots i {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #2f2c42;
+  }
+  .screen-title {
+    flex: 1;
+    text-align: center;
+    letter-spacing: 0.02em;
+  }
+  .screen-size {
+    opacity: 0.7;
+  }
+  .screen-body {
+    padding: 0.6rem 0.7rem 0.7rem;
+    line-height: 0;
+  }
+  .screen-body :global(.screen-svg) {
+    width: 100%;
+    height: auto;
+    display: block;
+    font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+    font-variant-ligatures: none;
+  }
+  .screen-body :global(.screen-svg text) {
+    dominant-baseline: central;
+    white-space: pre;
+  }
+  .screen-window {
+    position: relative;
+  }
+
+  .screen-zoom {
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border: 1px solid #2c2a3b;
+    border-radius: 8px;
+    background: rgb(21 19 31 / 0.85);
+    color: #b8b5cb;
+    cursor: zoom-in;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+  }
+
+  .screen-window:hover .screen-zoom,
+  .screen-zoom:focus-visible {
+    opacity: 1;
+  }
+
+  .screen-zoom:hover {
+    color: #fff;
+    border-color: #875fff;
+  }
+
+  :global(dialog.screen-dialog) {
+    position: fixed;
+    inset: 0;
+    margin: auto;
+    width: min(96vw, 1600px);
+    height: fit-content;
+    max-width: none;
+    max-height: 94vh;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    overflow: auto;
+    cursor: zoom-out;
+  }
+
+  :global(dialog.screen-dialog::backdrop) {
+    background: rgb(5 4 10 / 0.82);
+    backdrop-filter: blur(6px);
+  }
+
+  :global(dialog.screen-dialog .screen-window) {
+    max-width: none;
+  }
+
+  @media (hover: none) {
+    .screen-zoom {
+      opacity: 1;
+    }
+  }
+
+  figcaption {
+    margin-top: 0.6rem;
+    font-size: var(--sl-text-sm, 0.875rem);
+    color: var(--sl-color-gray-3, #8f8ca6);
+    text-align: center;
+  }
+</style>

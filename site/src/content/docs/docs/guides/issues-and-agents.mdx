@@ -1,0 +1,208 @@
+---
+title: Issues and agents
+description: Browse GitHub issues, Shortcut stories and Linear issues, read them as Markdown, and start a coding agent on one in its own worktree.
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+import Screen from '../../../../components/Screen.astro';
+
+The issue browser turns "I should look at #482" into a running agent in a few clicks: pick an issue, read it, press **start**. cornercase creates a worktree on a branch named after the issue, opens a tab there, starts your coding agent and hands it the issue.
+
+<Screen
+  name="issue-started"
+  alt="After starting issue 482: a new workspace called #482 Returns page… with a claude tab, where the agent has the issue link typed at its prompt"
+  caption="The result of start: a worktree workspace named after the issue, with the agent and the issue link waiting at its prompt."
+/>
+
+## Open the issue browser
+
+Click **`issues`** at the bottom of the workspaces column. The browser opens for the active project, with one tab per source:
+
+| Tab | Shows |
+| --- | --- |
+| **All** | Every connected source together, most recently updated first. |
+| **GitHub** | Issues of the project's repository, read with the `gh` CLI. |
+| **Shortcut** | Stories from your Shortcut workspace. |
+| **Linear** | Issues from your Linear workspace. |
+
+You can hide tabs and change their order in **settings → Issues → Sources shown**. The browser remembers the last tab you used.
+
+## Connect your trackers
+
+<Tabs>
+<TabItem label="GitHub">
+
+GitHub goes through the [GitHub CLI](https://cli.github.com), `gh`, using its own login. There is nothing to configure in cornercase:
+
+```sh
+gh auth login
+```
+
+cornercase runs `gh` in the project folder, so it lists the issues of that folder's repository. The project must be inside a git checkout; otherwise the GitHub tab says *this project is not in a git repository*.
+
+If `gh` isn't on your `PATH`, set its location in [`config.json`](../../reference/configuration/) with the `gh` key.
+
+</TabItem>
+<TabItem label="Shortcut">
+
+Shortcut needs an API token:
+
+1. In Shortcut, open **Settings → Your account → API Tokens** and create one.
+2. In cornercase, open the **Shortcut** tab of the issue browser (or **settings → Issues → Accounts**), paste the token and press `Enter`.
+
+cornercase checks the token against Shortcut and, if it works, saves it. You can also set `SHORTCUT_API_TOKEN` in your environment instead.
+
+</TabItem>
+<TabItem label="Linear">
+
+Linear needs a personal API key:
+
+1. In Linear, open **Settings → Security & access → Personal API keys** and create one.
+2. In cornercase, open the **Linear** tab of the issue browser (or **settings → Issues → Accounts**), paste the key and press `Enter`.
+
+cornercase checks the key against Linear and, if it works, saves it. You can also set `LINEAR_API_KEY` in your environment instead.
+
+</TabItem>
+</Tabs>
+
+<Screen
+  name="issues-token"
+  crop={[2, 1, 106, 15]}
+  alt="The Shortcut tab of the issue browser asking for an API token, with instructions to create one and a note that it is saved in ~/.config/cornercase/secrets.json"
+/>
+
+Saved tokens go to `secrets.json` next to your `config.json`, readable only by you (mode `0600`). They are never written to logs, to the issue cache or to the screen. The **disconnect** button in a tracker's tab removes its saved token.
+
+<Aside type="caution" title="Environment variables win">
+When `SHORTCUT_API_TOKEN` or `LINEAR_API_KEY` is set, it takes precedence over a saved token, and cornercase won't let you change it from the app. The server reads these variables when it starts, so after changing them, restart it with `cornercase kill-server`.
+</Aside>
+
+## Browse and filter
+
+<Screen
+  name="issues-list"
+  crop={[2, 1, 106, 28]}
+  alt="The issue browser listing six GitHub issues of the shop project, each with its number, title, labels, author and age"
+/>
+
+Each row shows the issue's key, its title and, on the right, its state (for closed or tracker states), labels, author and age. Up to 100 issues are listed per source.
+
+- **Type** to filter the list by key, title, author, state, labels or assignees.
+- `↑` `↓`, `PgUp` `PgDn` or the mouse wheel move through it; `Tab` and `Shift+Tab` switch source tabs.
+- **refresh** reloads the list. Lists are also cached on disk, so they appear instantly the next time while cornercase fetches the latest.
+
+Two toggles at the top right narrow the list down:
+
+- **closed** includes closed (GitHub), done (Shortcut) or completed and canceled (Linear) issues.
+- **people** filters by person, with the fields each tracker has: *assignee* and *author* on GitHub, *owner* and *requester* on Shortcut, *assignee* and *creator* on Linear.
+
+<Screen
+  name="issues-people"
+  crop={[2, 1, 106, 9]}
+  alt="The people filters of the GitHub source: assignee anyone and author anyone"
+/>
+
+<Screen
+  name="issues-person-picker"
+  crop={[2, 1, 106, 28]}
+  alt="Choosing the GitHub assignee filter: anyone, me, or one of the people of the repository"
+/>
+
+For each field you pick *anyone*, *me*, or a person from the tracker (type to find them). The filter goes into each tracker's own search, and cornercase remembers it, along with the closed toggle, the next time you open the browser:
+
+<Screen
+  name="issues-mine"
+  crop={[2, 1, 106, 9]}
+  alt="The issue list filtered to GitHub assignee me, showing two issues"
+/>
+
+## Read an issue
+
+Click an issue, or select it and press `Enter`, to read it:
+
+<Screen
+  name="issue-detail"
+  crop={[2, 1, 106, 28]}
+  alt="Issue 482 open in the browser: its state, labels and people, its link, what start will do, then the description rendered from Markdown with headings and a numbered list"
+/>
+
+At the top you see the issue's details and its link, then exactly what **start** will do:
+
+| Line | Meaning |
+| --- | --- |
+| **start** | Where the work happens: in its own worktree and on which branch, or in a new tab. |
+| **agent** | Which agent will be started, in which mode, and its full command line. |
+| **prompt** | What will be pasted into the agent, and whether it is sent for you or left for you to send. |
+
+Below comes the description, rendered from Markdown: headings, lists and task lists, tables, quotes, links and code blocks with syntax highlighting in your terminal's colours, then the comments.
+
+<Screen
+  name="issue-detail-end"
+  crop={[2, 1, 106, 28]}
+  alt="The end of issue 482: a Rust code block, a task list with two unchecked items and a comment from luis"
+/>
+
+- Scroll with the wheel, `↑` `↓`, `PgUp` `PgDn`, `Space`, `Home` and `End`.
+- **raw** shows the original Markdown; **rendered** goes back.
+- **copy url** copies the issue's link to your clipboard.
+- **back**, `Esc` or `←` return to the list.
+
+## Start working on it
+
+Press **start** in the issue, or select an issue in the list and press **start** there. cornercase then works out three things.
+
+### Where
+
+- **GitHub** issues belong to the project you opened the browser from.
+- **Shortcut** and **Linear** issues aren't tied to a repository, so when more than one place is open, cornercase asks **where…**: every project that is a git repository is offered as *a new worktree*, and the workspaces of other projects as *a new tab*. The place you are in is marked *where you are*.
+
+In a repository, the issue gets its own worktree on a branch named after it:
+
+| Source | Example issue | Branch |
+| --- | --- | --- |
+| GitHub | #482 Returns page crashes on empty address | `issue-482-returns-page-crashes-on-empty-address` |
+| Shortcut | sc-48 Dark mode | `sc-48-dark-mode` |
+| Linear | ENG-123 Returns page crashes | `ENG-123-returns-page-crashes` |
+
+The title part is lowercased, accents become plain letters, everything else becomes dashes, and it is cut at a word boundary to at most 40 characters. The workspace is named after the issue's key and title, like `#482 Returns page crashes on empty addr…`.
+
+If a workspace on that branch is already open, cornercase takes you there instead of creating another one, and only starts the agent if the workspace has no tab open. Outside a repository, the agent starts in a new tab of the chosen workspace, and the tab is named after the issue.
+
+### Which agent
+
+cornercase picks the agent in this order:
+
+1. the one you chose for this issue with **agent…**;
+2. the default agent from **settings → Agents**;
+3. when the default is `auto`, the agent already running in your current tab;
+4. otherwise it asks:
+
+<Screen
+  name="issue-agent-picker"
+  crop={[2, 1, 106, 28]}
+  alt="The agent picker: claude, codex, gemini, opencode, cursor, copilot, amp, droid, pi, qwen, kimi, cline, goose and aider, each with its command"
+/>
+
+When you pick an agent that isn't your default, a **make default** button appears so you can keep that choice. How each agent starts (its permission mode and extra arguments) is set in **settings → Agents**; see [Agents](../../reference/agents/).
+
+### The launch
+
+Once the worktree exists, cornercase opens a tab in it and drives the new shell for you:
+
+<Steps>
+
+1. It waits for your shell's prompt to settle, then types the agent's command line, for example `claude --permission-mode plan`, and presses `Enter`.
+
+2. It waits until the agent has taken over the terminal and its screen has been still for a moment.
+
+3. If the agent asks whether you trust the folder, cornercase answers yes for you, moving the selection to the "yes" option first when needed. You can turn this off in **settings → Agents → trust prompts**.
+
+4. It pastes the prompt. By default the prompt is your issue's link, typed on one line and left at the agent's prompt for you to read and send with `Enter`. With **settings → Agents → send the prompt** turned on, it is pasted as written and sent for you.
+
+</Steps>
+
+Readiness is detected from what the terminal shows, so a slow agent may take a few seconds. If the shell still hasn't started the agent a few seconds after the command was typed, cornercase gives up and leaves the tab as it is; the reason is written to the server log.
+
+<Aside type="tip" title="Make the prompt yours">
+The prompt is a template. Instead of just the link, you can send a whole instruction, such as `Fix {url} on branch {branch}. Start by writing a failing test.` See [Prompt template](../../reference/prompt/) for every placeholder.
+</Aside>

@@ -1,0 +1,30 @@
+[38;5;99m ▄▀▀▀ [1mc[39mornercase[0m                               [38;5;8m│[39m test checkout::tests::coupons_[38;5;8m│[39m [1;2m[38;5;6mshop[0;2m [38;5;5m❯[39m git log --oneline --gr
+[0m[38;5;99m █[38;5;8m┌[1m issues · shop [0m[38;5;8m─────────────────────────────────────────────────────────────────────────────────────────┐[2m[39m
+[0m  [38;5;8m│[39m                                                                                                        [38;5;8m│[1;2m[38;5;2mat
+[0m [38;5;8m[48;5;236m [49m│[39m When a customer starts a return without an address line, the returns page crashes with a 500.          [38;5;8m│[2m[39mea
+[0m  [38;5;8m│[39m                                                                                                        [38;5;8m│[2m[39m
+[0;1m[38;5;8m p[0m[38;5;8m│[39m [1mSteps[0m [1mto[0m [1mreproduce[0m                                                                                     [38;5;8m│[2m[39mn
+[0m  [38;5;8m│[39m                                                                                                        [38;5;8m│[2m[39m
+[0m[38;5;6m[48;5;236m▌ [38;5;8m[49m│[39m 1. Open a delivered order                                                                              [38;5;8m│[2m[39m s
+[0m[38;5;6m  [38;5;8m│[39m 2. Click [1mStart[0m [1ma[0m [1mreturn[0m                                                                                [38;5;8m│[2m[39m
+[0m[38;5;6m  [38;5;8m│[39m 3. Clear the address and submit                                                                        [38;5;8m│[2m[39m
+[0m[38;5;6m  [38;5;8m│[39m                                                                                                        [38;5;8m│[2m[39m
+[0m  [38;5;8m│[39m [1mExpected[0m                                                                                               [38;5;8m│[2m[39m
+[0m [38;5;6m [38;5;8m│[39m                                                                                                        [38;5;8m│[2m[39m
+[0m  [38;5;8m│[39m A validation error: [3mEnter[0m [3mthe[0m [3mfirst[0m [3mline[0m [3mof[0m [3myour[0m [3maddress[0m.                                              [38;5;8m│[2m[39m
+[0m  [38;5;8m│[39m                                                                                                        [38;5;8m│[2m[39m
+[0m  [38;5;8m│[39m [1mLogs[0m                                                                                                   [38;5;8m│──
+[39m  [38;5;8m│[39m                                                                                                        [38;5;8m│[2m[39m
+[0m  [38;5;8m│[39m [38;5;8mrust[39m                                                                                                   [38;5;8m│[2m[39m
+[0m  [38;5;8m│[39m [38;5;8m│ [39mthread [38;5;5m'tokio[39m-runtime-worker' panicked at src/returns/address.rs:[38;5;3m12[39m:[38;5;3m33[39m:                              [38;5;8m│[2m[39m
+[0m  [38;5;8m│[39m [38;5;8m│ [39mcalled `[38;5;6mOption[39m::unwrap()` on a `[38;5;6mNone[39m` value                                                          [38;5;8m│[2m[39m
+[0m  [38;5;8m│[39m                                                                                                        [38;5;8m│[2m[39m
+[0m  [38;5;8m│[39m • [ ] Answer 422 instead of panicking                                                                  [38;5;8m│[2m[39m
+[0m  [38;5;8m│[39m • [ ] Add a test with an empty [38;5;3mlines[39m array                                                             [38;5;8m│[2m[39m
+[0m  [38;5;8m│[39m                                                                                                        [38;5;8m│[2m[39m
+[0m  [38;5;8m│[39m [38;5;8m── @luis · 2d ago ────────────────────────────────────────────────────────────────────────────────────[39m [38;5;8m│[2m[39m
+[0m  [38;5;8m│[39m Happens on mobile too. [38;5;3mfirst_line()[39m should return an [38;5;3mOption[39m.                                           [38;5;8m│[2m[39m
+[0m  [38;5;8m│[39m [38;5;8menter starts it · lines 8-31 of 31[39m                                                                     [38;5;8m│[2m[39m
+[0m[38;5;8m ─│[39m                                                               [1m[38;5;0m[48;5;6m start [0m [38;5;8m agent… [39m [38;5;8m raw [39m [38;5;8m copy url [39m [38;5;8m back [39m [38;5;8m│[2m[39m
+[0m [38;5;8m └────────────────────────────────────────────────────────────────────────────────────────────────────────┘[2m[39m
+[0m [38;5;8m quit [39m              [38;5;8m│[39m                         [38;5;8m│[39m [1m[38;5;6mshop[0m [38;5;5m❯[39m                        [38;5;8m│[39m [2m

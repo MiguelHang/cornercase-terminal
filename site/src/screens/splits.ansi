@@ -1,0 +1,30 @@
+[38;5;99m ▄▀▀▀ [1mc[39mornercase[0m                               [38;5;8m│[39m test checkout::tests::coupons_[38;5;8m│[39m [1;2m[38;5;6mshop[0;2m [38;5;5m❯[39m git log --oneline --gr
+[0m[38;5;99m █[39m                                             [38;5;8m│[39m stack ... [38;5;2mok[39m                  [38;5;8m│[39m [2maph --decorate
+[0m                                               [38;5;8m│[39m test returns::tests::label_is_[38;5;8m│[39m [2m* [38;5;3ma0a4525 ([1m[38;5;6mHEAD[0;2m[38;5;3m -> [1m[38;5;2mmain[0;2m[38;5;3m, [1m[38;5;2mfeat
+[0m [38;5;8m[48;5;236m ⌕ search projects, workspaces, tabs[39m         [49m [38;5;8m│[39m printed ... [38;5;2mok[39m                [38;5;8m│[39m [1;2m[38;5;2m/login[0;2m[38;5;3m, [1m[38;5;2mfeat/dark-mode[0;2m[38;5;3m)[39m Relea
+[0m                                               [38;5;8m│[39m test returns::address::tests::[38;5;8m│[39m [2mse 0.5.0
+[0;1m[38;5;8m projects[0m            [38;5;8m│[1m workspaces[0m              [38;5;8m│[39m first_line_is_the_first ... [38;5;2mok[38;5;8m│[39m [2m* [38;5;3md8ec657[39m Explain how to run
+[0m                     [38;5;8m│[39m                         [38;5;8m│[39m test returns::tests::refund_us[38;5;8m│[39m [2mit
+[0m[38;5;6m[48;5;236m▌ [1m[38;5;15mshop[0m[38;5;8m[48;5;236m (3)[39m           [38;5;8m[49m│[1m[38;5;15m  main[0m                   [38;5;8m│[39m es_the_order_currency ... [38;5;2mok[39m  [38;5;8m│[39m [2m* [38;5;3mf44be6f[39m Start the returns s
+[0m[38;5;6m  [38;5;7mapi[38;5;8m (1)[39m            [38;5;8m│[39m  [38;5;6m  [38;5;7mnvim[39m                 [38;5;8m│[39m test returns::address::tests::[38;5;8m│[39m [2mervice
+[0m[38;5;6m  [38;5;7minfra[38;5;8m (1)[39m          [38;5;8m│[39m[48;5;236m  [38;5;6m▌ [38;5;15mbash[39m                 [38;5;8m[49m│[39m postcode_is_trimmed ... [38;5;2mok[39m    [38;5;8m│[39m [1;2m[38;5;6mshop[0;2m [38;5;5m❯[39m
+[0m[38;5;6m  [38;5;7mnotes[38;5;8m (1)[39m          [38;5;8m│[39m   [38;5;8m + tab [39m               [38;5;8m│[39m test returns::address::tests::[38;5;8m│[39m [2m
+[0m                     [38;5;8m│[39m                         [38;5;8m│[39m empty_address_is_rejected ... [38;5;8m│[39m [2m
+[0m [38;5;6m + new project [39m     [38;5;8m│[1m[38;5;7m  feat/dark-mode[0m         [38;5;8m│[39m [38;5;1mFAILED[39m                        [38;5;8m│[39m [2m
+[0m                     [38;5;8m│[39m   [38;5;8m + tab [39m               [38;5;8m│[39m                               [38;5;8m│[39m [2m
+[0m                     [38;5;8m│[39m                         [38;5;8m│[39m failures:                     [38;5;8m│[39m [2m
+[0m                     [38;5;8m│[1m[38;5;7m  feat/login[0m             [38;5;8m│[39m                               [38;5;8m├──────────────────────────────
+[39m                     [38;5;8m│[39m  [38;5;6m  [38;5;7mbash[39m                 [38;5;8m│[39m ---- returns::address::tests::[38;5;8m│[39m [1;2m[38;5;6mshop[0;2m [38;5;5m❯[39m git status -sb
+[0m                     [38;5;8m│[39m   [38;5;8m + tab [39m               [38;5;8m│[39m empty_address_is_rejected stdo[38;5;8m│[39m [2m## [38;5;2mmain[39m
+[0m                     [38;5;8m│[39m                         [38;5;8m│[39m ut ----                       [38;5;8m│[39m [1;2m[38;5;6mshop[0;2m [38;5;5m❯[39m
+[0m                     [38;5;8m│[39m [38;5;6m + new workspace [39m       [38;5;8m│[39m thread 'returns::address::test[38;5;8m│[39m [2m
+[0m                     [38;5;8m│[39m                         [38;5;8m│[39m s::empty_address_is_rejected' [38;5;8m│[39m [2m
+[0m                     [38;5;8m│[39m                         [38;5;8m│[39m panicked at src/returns/addres[38;5;8m│[39m [2m
+[0m                     [38;5;8m│[39m                         [38;5;8m│[39m s.rs:12:33:                   [38;5;8m│[39m [2m
+[0m                     [38;5;8m│[39m                         [38;5;8m│[39m called `Option::unwrap()` on a[38;5;8m│[39m [2m
+[0m                     [38;5;8m│[39m                         [38;5;8m│[39m  `None` value                 [38;5;8m│[39m [2m
+[0m                     [38;5;8m│[39m                         [38;5;8m│[39m                               [38;5;8m│[39m [2m
+[0m                     [38;5;8m│[39m                         [38;5;8m│[39m test result: [38;5;1mFAILED[39m. 6 passed;[38;5;8m│[39m [2m
+[0m[38;5;8m ───────────────────[39m [38;5;8m│ ───────────────────────[39m [38;5;8m│[39m  1 failed; 0 ignored; finished[38;5;8m│[39m [2m
+[0m [38;5;8m settings [39m          [38;5;8m│[39m [38;5;8m issues [39m                [38;5;8m│[39m  in 0.02s                     [38;5;8m│[39m [2m
+[0m [38;5;8m quit [39m              [38;5;8m│[39m                         [38;5;8m│[39m [1m[38;5;6mshop[0m [38;5;5m❯[39m                        [38;5;8m│[39m [2m

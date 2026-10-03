@@ -4,6 +4,8 @@ A terminal multiplexer for working on several projects at once, each with its ow
 
 > **Status:** early and moving fast. Runs on Linux and macOS.
 
+**Website and documentation:** https://usecornercase.github.io/cornercase-terminal/
+
 ## What it does
 
 - **Projects, workspaces, tabs.** A sidebar of projects (folders), and for the active project its workspaces (lines of work) and their tabs. Click to switch, `+` to create, `×` to close, right-click to rename.
@@ -64,7 +66,7 @@ GitHub issues are read with the [`gh`](https://cli.github.com) CLI, using its lo
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Design notes and the reasons behind them are in [CLAUDE.md](CLAUDE.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md). Design notes and the reasons behind them are in [CLAUDE.md](CLAUDE.md). The website and its documentation live in [`site/`](site).
 
 ## License
 

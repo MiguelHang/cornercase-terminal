@@ -1,0 +1,35 @@
+---
+import { snapshot } from '../../lib/demo/snapshot';
+import { themes } from '../../lib/term/palette';
+
+interface Props {
+  scene: string;
+  label: string;
+  theme?: keyof typeof themes;
+  class?: string;
+  bare?: boolean;
+}
+
+const { scene, label, theme = 'midnight', class: className, bare = false } = Astro.props;
+const { svg, cols } = snapshot(scene, label, themes[theme]);
+const background = themes[theme].background;
+---
+
+<div class:list={['snapshot', className, { bare }]} style={`--cols: ${cols}; --term-bg: ${background}`} set:html={svg} />
+
+<style>
+  .snapshot {
+    position: relative;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: var(--term-bg);
+    border: 1px solid rgb(255 255 255 / 0.08);
+    line-height: 0;
+  }
+
+  .bare {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+  }
+</style>

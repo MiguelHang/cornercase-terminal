@@ -1,0 +1,115 @@
+---
+title: Projects, workspaces and tabs
+description: How cornercase organises your work, and how to open, rename, close and arrange projects, workspaces and tabs.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Screen from '../../../../components/Screen.astro';
+
+cornercase organises your shells in three levels, each in its own column: **projects** (folders) hold **workspaces** (lines of work), and workspaces hold **tabs** (shells, possibly split into [panes](../panes-and-splits/)). Everything is opened, switched, renamed and closed with the mouse.
+
+<Screen
+  name="hover-close"
+  crop={[0, 5, 48, 21]}
+  alt="The projects column with shop, api, infra and notes, and the workspaces column of shop: main with nvim and bash, feat/dark-mode, feat/login with a close button showing on hover, and an issue workspace with a claude tab"
+  caption="The two columns. Hovering a row shows its × button."
+/>
+
+## Projects
+
+A project is a folder. The projects column lists them in the order you opened them, each with its number of workspaces in parentheses. Click one to make it active; the second column then shows its workspaces.
+
+A project is called after its folder (`~` for your home folder) unless you rename it.
+
+### Open a project
+
+Click **`+ new project`** at the end of the list. A folder picker opens in the folder that contains the active project, or in your home folder.
+
+<Screen
+  name="picker"
+  crop={[19, 3, 72, 24]}
+  alt="The new project folder picker showing the folders in ~/code, with the branch of each git repository on the right"
+/>
+
+| To | Do |
+| --- | --- |
+| Filter the list | Type. Exact names come first, then names that start with what you typed, then names that contain it. |
+| Go into a folder | Click it, or select it and press `Enter`, `→` or `Tab`. Typing `/` also goes into the selected folder. |
+| Go up | `←`, the `..` entry, or `Backspace` when the filter is empty. |
+| Jump home or to `/` | Type `~` or `/` while the filter is empty. Pasting a path walks it the same way. |
+| See hidden folders | Start the filter with a dot. |
+| Open the folder you are in | Click **open**, or press `Enter` when nothing is selected. |
+| Cancel | Click **cancel** or press `Esc`. |
+
+Folders that are git repositories show their current branch on the right. Opening a folder that is already a project switches to it instead of opening it twice.
+
+## Workspaces
+
+A workspace is one line of work inside a project. Every project starts with one: the project folder itself, called after its git branch (`main`), or `default` when the folder isn't a git repository.
+
+Click **`+ new workspace`** to start another one. You give it a name and, when the project folder is the root of a git repository, choose whether it gets **its own worktree**:
+
+- **With its own worktree** (the default in a repository): the name is a branch, and the workspace is a separate checkout of the repository in `~/.cornercase/worktrees/<repo>/<branch>`. Its files, builds and agents don't touch your other work. See [Git worktrees](../worktrees/).
+- **Without**: the workspace uses the project folder itself, under the name you chose. This is handy to keep a group of tabs together, for example a `servers` workspace next to `main`.
+
+<Screen
+  name="new-workspace-plain"
+  crop={[23, 10, 64, 10]}
+  alt="The new workspace dialog with the worktree box unticked: the workspace will live in ~/code/shop"
+/>
+
+A workspace is called after its custom name, otherwise its branch, otherwise `default`. When the checkout is on a detached `HEAD`, the short commit hash takes the place of the branch.
+
+Worktrees of the repository that you create outside cornercase, with `git worktree add`, appear as workspaces by themselves.
+
+## Tabs
+
+Each workspace lists its tabs under its name. Click **`+ tab`** under a workspace to open a new shell in the workspace's folder.
+
+A tab is named after the program in the foreground of its active pane, so the name follows what you do: `bash` while you are at the prompt, `nvim` while you edit, `claude` while an agent works. Tabs started from an issue in a folder that isn't a repository are named after the issue instead.
+
+The shell is the one in your `SHELL` environment variable when the server started, or `/bin/sh` if it isn't set.
+
+## Rename
+
+Right-click a project, workspace or tab to open its menu, then choose **rename**:
+
+<Screen
+  name="rename-menu"
+  crop={[0, 6, 48, 8]}
+  alt="Right-clicking the api project opens a small menu with a single item: rename project"
+/>
+
+Type the new name and press `Enter`. Leave the name empty to go back to the automatic one: the folder name for a project, the branch for a workspace, the program for a tab.
+
+<Screen
+  name="rename-form"
+  crop={[23, 10, 64, 10]}
+  alt="The rename project dialog with the current name api and the hint leave it empty to use the folder name"
+/>
+
+## Close
+
+Hover a row and a `×` appears at its right end. Clicking it closes that item and ends every program inside it:
+
+| You close | What happens |
+| --- | --- |
+| A tab | Its panes' programs are ended, then the tab goes away. |
+| A workspace | All its tabs are closed, then the workspace goes away. A workspace with its own worktree asks first, because it also deletes the worktree folder; see [Removing a worktree](../worktrees/#remove-a-worktree). |
+| A project | Everything in it is closed, then the project goes away. |
+
+Rows disappear once their programs have exited, not before. Closing the last tab keeps its workspace (the pane says *no tab open*), closing the last workspace keeps its project, and closing the last project leaves cornercase open and empty, ready for `+ new project`.
+
+When a program ends by itself, for example when you type `exit`, its pane closes; when the last pane of a tab closes, so does the tab.
+
+## Arrange the columns
+
+- **Scroll** a column with the mouse wheel when it has more rows than fit. `↑ n more` and `↓ n more` tell you what is hidden, and the `+` buttons stay at the bottom.
+- **Resize** a column by dragging the border on its right. The panes follow live. Double-click a border to reset that column to its default width.
+- The active project and tab are marked with a cyan bar `▌` on a highlighted background; the active workspace's name is brighter than the others.
+
+Column widths are saved with your session. On a small terminal the columns shrink to leave room for the panes, and below 90 columns cornercase switches to a [compact layout](../small-terminals/).
+
+<Aside type="tip">
+Lost in a big session? Click the search bar above the projects column and type: it finds projects, workspaces, branches and tabs. See [Search](../search/).
+</Aside>

@@ -1,0 +1,740 @@
+import type { Cursor } from '../term/canvas';
+import { BOLD, DIM, INVERSE, type Grid, type Rect, type Style, contains, rect } from '../term/grid';
+import type { App } from './app';
+import {
+  type Areas,
+  Rows,
+  bottom,
+  buttonWidth,
+  closeButton,
+  formArea,
+  inner,
+  intersect,
+  isEmpty,
+  issuesArea,
+  layout,
+  menuArea,
+  moreAbove,
+  pickerArea,
+  right,
+  rightAligned,
+  tabsIn,
+} from './layout';
+import { type IssuesOverlay, type Pane, type SettingsOverlay, type Tab, projectLabel, tabLabel, workspaceLabel } from './model';
+import { type Divider, dividers, grab, panes } from './split';
+import { type Line, drawLine, seg, truncateLeft, truncateRight, wrapAll } from './text';
+
+export type Drag = { kind: 'border'; border: 'projects' | 'workspaces' } | { kind: 'divider'; tab: Tab; divider: Divider; area: Rect };
+
+export interface Region {
+  r: Rect;
+  click?: (x: number, y: number) => void;
+  right?: (x: number, y: number) => void;
+  double?: () => void;
+  drag?: Drag;
+  wheel?: (dy: number) => boolean;
+  cursor?: string;
+  pane?: { pane: Pane; rect: Rect; tab: Tab };
+}
+
+export interface Frame {
+  regions: Region[];
+  cursor: Cursor | null;
+  areas: Areas | null;
+}
+
+const DARK: Style = { fg: 8 };
+const CYAN: Style = { fg: 6 };
+const PRESSED: Style = { fg: 0, bg: 6, add: BOLD };
+const BRAND = 99;
+const INPUT_PROMPT = '› ';
+
+const middle = (r: Rect): Rect => rect(r.x, r.y + Math.floor(Math.max(0, r.h - 1) / 2), r.w, Math.min(r.h, 1));
+
+export class Painter {
+  readonly regions: Region[] = [];
+  cursor: Cursor | null = null;
+  private surface: number;
+
+  constructor(
+    readonly app: App,
+    readonly g: Grid,
+  ) {
+    this.surface = app.light ? 254 : 236;
+  }
+
+  hovered(r: Rect): boolean {
+    const h = this.app.hover;
+    return !!h && !isEmpty(r) && contains(r, h.x, h.y);
+  }
+
+  sidebarHovered(r: Rect): boolean {
+    return !this.app.overlay && this.hovered(r);
+  }
+
+  region(region: Region): void {
+    if (!isEmpty(region.r)) this.regions.push(region);
+  }
+
+  span(x: number, y: number, text: string, s: Style, max = Infinity): number {
+    return this.g.text(x, y, text, s, max);
+  }
+
+  line(r: Rect, line: Line, base?: Style): void {
+    if (base) this.g.fill(r, base);
+    drawLine(this.g, r.x, r.y, line.map((s) => ({ t: s.t, s: { ...base, ...s.s, add: (base?.add ?? 0) | (s.s?.add ?? 0) } })), r.w);
+  }
+
+  band(r: Rect, line: Line, base: Style): void {
+    this.g.fill(r, base);
+    this.line(middle(r), line, base);
+  }
+
+  button(r: Rect, indent: string, label: string, style: Style): void {
+    if (r.h > 1 && style.bg !== undefined) this.g.fill(r, { bg: style.bg });
+    const m = middle(r);
+    const x = this.span(m.x, m.y, indent, {}, m.w);
+    this.span(x, m.y, ` ${label} `, style, Math.max(0, right(m) - x));
+  }
+
+  buttonStyle(r: Rect, idle: Style, hoverBg: number): Style {
+    return this.sidebarHovered(r) ? { fg: 0, bg: hoverBg, add: BOLD } : idle;
+  }
+
+  draw(): Frame {
+    const app = this.app;
+    if (app.detached) {
+      this.outer();
+      return { regions: this.regions, cursor: this.cursor, areas: null };
+    }
+    const areas = layout(app.cols, app.rows, app.widths, app.nav);
+    this.pane(areas);
+    if (areas.compact) {
+      this.bar(areas);
+      if (app.nav) this.g.clear(areas.pane);
+    } else {
+      this.borders(areas);
+      this.brand(areas.brand);
+      this.searchBar(areas.search);
+    }
+    if (!isEmpty(areas.sidebar)) this.sidebar(areas);
+    if (!isEmpty(areas.workspaces)) this.workspaces(areas);
+    this.overlay(areas);
+    if (app.toast) this.toast(app.toast.text);
+    return { regions: this.regions, cursor: this.cursor, areas };
+  }
+
+  private outer(): void {
+    const g = this.g;
+    const lines: Line[] = [
+      [seg('~', { fg: 6, add: BOLD }), seg(' '), seg('❯', { fg: 5 }), seg(' cornercase')],
+      ...this.app.outerLines,
+      [seg('~', { fg: 6, add: BOLD }), seg(' '), seg('❯', { fg: 5 }), seg(' '), seg(this.app.outerInput)],
+    ];
+    const rows = wrapAll(lines, g.cols);
+    rows.forEach((row, y) => row.forEach((c, x) => g.put(x, y, c.ch, c.s ?? {})));
+    const last = rows.length - 1;
+    this.cursor = { x: rows[last].length, y: last, shape: 'block' };
+    this.region({ r: rect(0, 0, g.cols, g.rows), click: () => this.app.reattach() , cursor: 'pointer' });
+  }
+
+  private pane(areas: Areas): void {
+    const app = this.app;
+    const tab = app.tab();
+    if (tab) this.tab(tab, areas.pane);
+    else if (app.project()) this.span(areas.pane.x, areas.pane.y, ' no tab open', DARK, areas.pane.w);
+  }
+
+  private tab(tab: Tab, area: Rect): void {
+    const app = this.app;
+    const list = panes(tab.layout, area);
+    const split = list.length > 1;
+    for (const [id, r] of list) {
+      const pane = tab.panes.find((p) => p.id === id);
+      if (!pane) continue;
+      const active = id === tab.active;
+      const cursor = pane.shell.draw(this.g, r, app.focused && active && !app.overlay);
+      if (active && !app.overlay && cursor) this.cursor = cursor;
+      if (split && !active && app.config.dim) this.g.fill(r, { add: DIM });
+      const sel = app.selection;
+      if (sel && sel.pane === id) {
+        for (const [x, y] of app.selectedCells(r)) this.g.style(x, y, { add: INVERSE });
+      }
+      this.region({ r, pane: { pane, rect: r, tab }, cursor: pane.shell.mouse ? 'default' : 'text' });
+    }
+    this.dividers(tab, area);
+  }
+
+  private dividers(tab: Tab, area: Rect): void {
+    const UP = 1;
+    const DOWN = 2;
+    const LEFT = 4;
+    const RIGHT = 8;
+    const list = dividers(tab.layout, area);
+    const cells = new Map<string, { x: number; y: number; links: number; lit: boolean }>();
+    const key = (x: number, y: number) => `${x},${y}`;
+    const dragging = this.app.dragging?.kind === 'divider' ? this.app.dragging.divider : null;
+    for (const d of list) {
+      const lit = (dragging && dragging.path.join() === d.path.join() && dragging.dir === d.dir) || (!dragging && this.sidebarHovered(grab(d)));
+      const links = d.dir === 'right' ? UP | DOWN : LEFT | RIGHT;
+      for (let y = d.line.y; y < bottom(d.line); y++) {
+        for (let x = d.line.x; x < right(d.line); x++) {
+          const c = cells.get(key(x, y)) ?? { x, y, links: 0, lit: false };
+          c.links |= links;
+          c.lit ||= !!lit;
+          cells.set(key(x, y), c);
+        }
+      }
+    }
+    for (const d of list.filter((d) => d.dir === 'down')) {
+      const pad = d.line.x - 1;
+      const bar = pad - 1;
+      if (pad < 0 || bar < 0) continue;
+      const joins = !cells.has(key(pad, d.line.y)) && ((cells.get(key(bar, d.line.y))?.links ?? 0) & UP) !== 0;
+      if (joins) {
+        cells.set(key(pad, d.line.y), { x: pad, y: d.line.y, links: LEFT | RIGHT, lit: false });
+        const b = cells.get(key(bar, d.line.y));
+        if (b) b.links |= RIGHT;
+      }
+    }
+    for (const d of list) {
+      const ends: [number, number, number][] =
+        d.dir === 'right'
+          ? [
+              [d.line.x, d.line.y - 1, DOWN],
+              [d.line.x, bottom(d.line), UP],
+            ]
+          : [
+              [d.line.x - 1, d.line.y, RIGHT],
+              [right(d.line), d.line.y, LEFT],
+            ];
+      for (const [x, y, link] of ends) {
+        const c = cells.get(key(x, y));
+        if (c) c.links |= link;
+      }
+    }
+    const symbol = (l: number) => {
+      if (l === (UP | DOWN | LEFT | RIGHT)) return '┼';
+      if (l === (UP | DOWN | RIGHT)) return '├';
+      if (l === (UP | DOWN | LEFT)) return '┤';
+      if (l === (LEFT | RIGHT | DOWN)) return '┬';
+      if (l === (LEFT | RIGHT | UP)) return '┴';
+      if (l & (UP | DOWN)) return '│';
+      return '─';
+    };
+    for (const c of cells.values()) this.g.put(c.x, c.y, symbol(c.links), { fg: c.lit ? 6 : 8, bg: -1, sub: DIM | INVERSE });
+    for (const d of list) {
+      this.region({ r: grab(d), drag: { kind: 'divider', tab, divider: d, area: d.area }, cursor: d.dir === 'right' ? 'col-resize' : 'row-resize' });
+    }
+  }
+
+  private borders(areas: Areas): void {
+    const app = this.app;
+    for (const [border, r] of [
+      ['projects', areas.projectsBorder],
+      ['workspaces', areas.workspacesBorder],
+    ] as const) {
+      const lit = (app.dragging?.kind === 'border' && app.dragging.border === border) || this.sidebarHovered(r);
+      for (let y = r.y; y < bottom(r); y++) this.g.put(r.x, y, '│', { fg: lit ? 6 : 8 });
+      this.region({ r, drag: { kind: 'border', border }, double: () => app.resetBorder(border), cursor: 'col-resize' });
+    }
+  }
+
+  private brand(r: Rect): void {
+    const mark: Style = { fg: BRAND };
+    let x = this.span(r.x, r.y, ' ▄▀▀▀ ', mark);
+    x = this.span(x, r.y, 'c', { fg: BRAND, add: BOLD });
+    this.span(x, r.y, 'ornercase', { add: BOLD });
+    this.span(r.x, r.y + 1, ' █', mark);
+  }
+
+  private searchBar(r: Rect): void {
+    const app = this.app;
+    const search = app.overlay?.kind === 'search' ? app.overlay : null;
+    this.g.fill(r, { bg: this.surface });
+    if (search) {
+      const max = Math.max(0, r.w - 4);
+      const query = truncateLeft(search.query, max);
+      const x = this.span(r.x, r.y, ' ⌕ ', { fg: 6, bg: this.surface });
+      this.span(x, r.y, query, { add: BOLD, bg: this.surface });
+      if (x + [...query].length < right(r)) this.cursor = { x: x + [...query].length, y: r.y, shape: 'block' };
+      return;
+    }
+    const icon = this.sidebarHovered(r) ? CYAN : DARK;
+    const x = this.span(r.x, r.y, ' ⌕ ', { ...icon, bg: this.surface });
+    this.span(x, r.y, 'search projects, workspaces, tabs', { fg: 8, bg: this.surface }, right(r) - x);
+    this.region({ r, click: () => app.openSearch(), cursor: 'text' });
+  }
+
+  private bar(areas: Areas): void {
+    const app = this.app;
+    const r = areas.bar;
+    this.g.fill(r, { bg: this.surface });
+    if (app.overlay?.kind === 'search') {
+      this.searchBar(middle(r));
+      return;
+    }
+    const menu = rect(r.x, r.y, r.w - areas.searchButton.w, r.h);
+    const icon = rect(menu.x, menu.y, Math.min(7, menu.w), menu.h);
+    const menuStyle = app.nav || this.sidebarHovered(menu) ? PRESSED : { fg: 6, bg: this.surface };
+    this.band(icon, [seg(centered('≡', icon.w))], menuStyle);
+    const crumbs = rect(right(icon) + 2, middle(menu).y, Math.max(0, menu.w - icon.w - 2), 1);
+    this.line(crumbs, this.breadcrumb(crumbs.w), { bg: this.surface });
+    this.region({ r: menu, click: () => app.toggleNav(), cursor: 'pointer' });
+    const s = areas.searchButton;
+    const sStyle = this.sidebarHovered(s) ? PRESSED : { fg: 8, bg: this.surface };
+    this.band(s, [seg(centered('⌕', s.w))], sStyle);
+    this.region({ r: s, click: () => app.openSearch(), cursor: 'pointer' });
+  }
+
+  private breadcrumb(room: number): Line {
+    const app = this.app;
+    const p = app.project();
+    if (!p) return [seg('c', { fg: BRAND, add: BOLD }), seg('ornercase', { add: BOLD })];
+    const w = p.workspaces[p.active];
+    const t = w?.tabs[w.active];
+    const crumbs = [projectLabel(p), w ? workspaceLabel(w) : null, t ? tabLabel(t) : null].filter(Boolean) as string[];
+    const text = truncateRight(crumbs.join(' › '), room);
+    const head = Math.min([...projectLabel(p)].length, [...text].length);
+    return [seg([...text].slice(0, head).join(''), { fg: 15, add: BOLD }), seg([...text].slice(head).join(''), { fg: 7 })];
+  }
+
+  private title(r: Rect, text: string): void {
+    this.line(middle(r), [seg(` ${text}`, { fg: 8, add: BOLD })]);
+  }
+
+  private more(top: Rect, below: Rect, above: number, under: number): void {
+    for (const [n, arrow, r] of [
+      [above, '↑', top],
+      [under, '↓', below],
+    ] as const) {
+      if (!n || isEmpty(r)) continue;
+      this.g.clear(rect(r.x, r.y, r.w, 1));
+      this.span(r.x, r.y, `  ${arrow} ${n} more`, DARK, r.w);
+    }
+  }
+
+  private closeX(row: Rect, bg: Style, act: () => void): void {
+    if (!this.sidebarHovered(row)) return;
+    const r = closeButton(row);
+    const style = this.hovered(r) ? { ...bg, fg: 1, add: BOLD } : { ...bg, fg: 8 };
+    this.band(r, [seg(centered('×', r.w))], style);
+    this.region({ r, click: act, cursor: 'pointer' });
+  }
+
+  private sidebar(areas: Areas): void {
+    const app = this.app;
+    this.title(areas.title, 'projects');
+    const rows = new Rows(areas.list, app.projects.map(() => areas.pitch), areas.pitch, app.projectsScroll);
+    this.region({ r: areas.list, wheel: (dy) => app.scrollProjects(rows, dy) });
+    app.projects.forEach((p, i) => {
+      const r = rows.item(i);
+      if (isEmpty(r)) return;
+      const active = i === app.active;
+      const bg: Style = active ? { bg: this.surface } : {};
+      const reserved = 6 + (closeButton(r).w - 3);
+      const count = ` (${p.workspaces.length})`;
+      const name = truncateRight(projectLabel(p), r.w - reserved - count.length);
+      this.band(r, [seg(active ? '▌ ' : '  ', CYAN), seg(name, active ? { fg: 15, add: BOLD } : { fg: 7 }), seg(count, DARK)], bg);
+      this.region({ r, click: () => app.selectProject(i), right: (x, y) => app.openMenu({ x, y }, { kind: 'project', project: p.id }), cursor: 'pointer' });
+      this.closeX(r, bg, () => app.closeProject(i));
+    });
+    const [above, under] = rows.hidden();
+    this.more(moreAbove(areas.list), rows.moreBelow(), above, under);
+    const b = rows.buttonRect();
+    this.button(b, ' ', '+ new project', this.buttonStyle(b, CYAN, 6));
+    this.region({ r: b, click: () => app.openPicker(), cursor: 'pointer' });
+    if (!areas.compact) this.line(areas.separator, [seg(` ${'─'.repeat(Math.max(0, areas.separator.w - 2))}`, DARK)]);
+    else this.line(areas.separator, [seg(` ${'─'.repeat(Math.max(0, areas.separator.w - 2))} `, DARK)]);
+    this.button(areas.settings, ' ', 'settings', this.buttonStyle(areas.settings, DARK, 6));
+    this.region({ r: areas.settings, click: () => app.openSettings(), cursor: 'pointer' });
+    this.button(areas.quit, ' ', 'quit', this.buttonStyle(areas.quit, DARK, 1));
+    this.region({ r: areas.quit, click: () => app.quit(), cursor: 'pointer' });
+  }
+
+  private workspaces(areas: Areas): void {
+    const app = this.app;
+    if (isEmpty(areas.back)) this.title(areas.workspacesTitle, 'workspaces');
+    else {
+      const style = this.buttonStyle(areas.back, CYAN, 6);
+      this.button(areas.back, '', '‹ projects', style);
+      this.region({ r: areas.back, click: () => app.navTo('projects'), cursor: 'pointer' });
+      const restX = right(areas.back);
+      const name = app.project() ? projectLabel(app.project()!) : '';
+      const m = middle(areas.workspacesTitle);
+      this.span(restX, m.y, ` ${truncateRight(name, Math.max(0, right(m) - restX - 1))}`, { fg: 8, add: BOLD });
+    }
+    const p = app.project();
+    if (!p) return;
+    const list = areas.workspacesList;
+    type Row = { kind: 'gap' } | { kind: 'ws'; w: number } | { kind: 'tab'; w: number; t: number } | { kind: 'new'; w: number };
+    const rowsSpec: Row[] = [];
+    p.workspaces.forEach((w, wi) => {
+      if (wi > 0) rowsSpec.push({ kind: 'gap' });
+      rowsSpec.push({ kind: 'ws', w: wi });
+      w.tabs.forEach((_, ti) => rowsSpec.push({ kind: 'tab', w: wi, t: ti }));
+      rowsSpec.push({ kind: 'new', w: wi });
+    });
+    const rows = new Rows(list, rowsSpec.map((r) => (r.kind === 'gap' ? 1 : areas.pitch)), areas.pitch, app.workspacesScroll);
+    this.region({ r: list, wheel: (dy) => app.scrollWorkspaces(rows, dy) });
+    rowsSpec.forEach((spec, i) => {
+      const r = rows.item(i);
+      if (isEmpty(r) || spec.kind === 'gap') return;
+      const closeWidth = closeButton(r).w;
+      if (spec.kind === 'ws') {
+        const w = p.workspaces[spec.w];
+        const style: Style = spec.w === p.active ? { fg: 15, add: BOLD } : { fg: 7, add: BOLD };
+        this.band(r, [seg(`  ${truncateRight(workspaceLabel(w), r.w - 2 - closeWidth - 1)}`, style)], {});
+        this.region({ r, click: () => app.selectWorkspace(spec.w), right: (x, y) => app.openMenu({ x, y }, { kind: 'workspace', project: p.id, workspace: w.id }), cursor: 'pointer' });
+        this.closeX(r, {}, () => app.closeWorkspace(spec.w));
+      } else if (spec.kind === 'tab') {
+        const w = p.workspaces[spec.w];
+        const t = w.tabs[spec.t];
+        const active = spec.w === p.active && spec.t === w.active;
+        const bg: Style = active ? { bg: this.surface } : {};
+        const name = truncateRight(tabLabel(t), r.w - 4 - closeWidth - 1);
+        this.band(r, [seg('  '), seg(active ? '▌ ' : '  ', CYAN), seg(name, active ? { fg: 15 } : { fg: 7 })], bg);
+        this.region({ r, click: () => app.selectTab(spec.w, spec.t), right: (x, y) => app.openMenu({ x, y }, { kind: 'tab', project: p.id, workspace: w.id, tab: t.id }), cursor: 'pointer' });
+        this.closeX(r, bg, () => app.closeTab(spec.w, spec.t));
+      } else {
+        this.button(r, '   ', '+ tab', this.buttonStyle(r, DARK, 6));
+        this.region({ r, click: () => app.addTab(spec.w), cursor: 'pointer' });
+      }
+    });
+    const [above, under] = rows.hidden();
+    const named = (from: number, to: number) => rowsSpec.slice(from, to).filter((r) => r.kind === 'ws' || r.kind === 'tab').length;
+    this.more(moreAbove(list), rows.moreBelow(), above ? named(0, above) : 0, under ? named(rowsSpec.length - under, rowsSpec.length) : 0);
+    const b = rows.buttonRect();
+    this.button(b, ' ', '+ new workspace', this.buttonStyle(b, CYAN, 6));
+    this.region({ r: b, click: () => app.openNewWorkspace(), cursor: 'pointer' });
+    this.line(areas.workspacesSeparator, [seg(` ${'─'.repeat(Math.max(0, areas.workspacesSeparator.w - 2))}`, DARK)]);
+    this.button(areas.issues, ' ', 'issues', this.buttonStyle(areas.issues, DARK, 6));
+    this.region({ r: areas.issues, click: () => app.openIssues(), cursor: 'pointer' });
+  }
+
+  private box(r: Rect, title: string): void {
+    this.g.clear(r);
+    this.g.box(r, { fg: 8 }, title || undefined, { add: BOLD, fg: -1 });
+  }
+
+  private backdrop(close: boolean): void {
+    const app = this.app;
+    this.region({ r: rect(0, 0, app.cols, app.rows), click: close ? () => app.closeOverlay() : () => {}, right: close ? () => app.closeOverlay() : () => {} });
+  }
+
+  private overlay(areas: Areas): void {
+    const o = this.app.overlay;
+    if (!o) return;
+    if (o.kind === 'menu' || o.kind === 'paneMenu') return this.menu();
+    if (o.kind === 'newWorkspace' || o.kind === 'rename') return this.form();
+    if (o.kind === 'remove') return this.confirm();
+    if (o.kind === 'picker') return this.picker();
+    if (o.kind === 'settings') return this.settings(o);
+    if (o.kind === 'issues') return this.issues(o);
+    if (o.kind === 'search') return this.results(areas);
+  }
+
+  private menu(): void {
+    const app = this.app;
+    const o = app.overlay;
+    if (!o || (o.kind !== 'menu' && o.kind !== 'paneMenu')) return;
+    const items = o.kind === 'menu' ? [app.renameLabel(o.target)] : o.actions;
+    const r = menuArea(app.cols, app.rows, o.at, items);
+    this.backdrop(true);
+    this.box(r, '');
+    items.forEach((item, i) => {
+      const row = intersect(rect(r.x + 1, r.y + 1 + i, r.w - 2, 1), r);
+      this.line(row, [seg(` ${item} `)], this.hovered(row) ? PRESSED : {});
+      this.region({ r: row, click: () => app.chooseMenu(i), cursor: 'pointer' });
+    });
+  }
+
+  private dialogButtons(row: Rect, submit: string, onSubmit: () => void, onCancel: () => void): void {
+    const cancel = intersect(rect(right(row) - buttonWidth('cancel'), row.y, buttonWidth('cancel'), 1), row);
+    const ok = intersect(rect(cancel.x - buttonWidth(submit) - 1, row.y, buttonWidth(submit), 1), row);
+    this.span(ok.x, ok.y, ` ${submit} `, this.hovered(ok) ? PRESSED : { fg: 6, add: BOLD });
+    this.span(cancel.x, cancel.y, ' cancel ', this.hovered(cancel) ? { fg: 0, bg: 7 } : DARK);
+    this.region({ r: ok, click: onSubmit, cursor: 'pointer' });
+    this.region({ r: cancel, click: onCancel, cursor: 'pointer' });
+  }
+
+  private input(row: Rect, label: string, value: string): void {
+    const lbl = label ? `${label} ` : '';
+    const max = Math.max(0, row.w - INPUT_PROMPT.length - [...lbl].length - 1);
+    const v = truncateLeft(value, max);
+    let x = this.span(row.x, row.y, INPUT_PROMPT, CYAN);
+    x = this.span(x, row.y, lbl, DARK);
+    x = this.span(x, row.y, v, { add: BOLD });
+    if (x < right(row)) this.cursor = { x, y: row.y, shape: 'block' };
+  }
+
+  private form(): void {
+    const app = this.app;
+    const o = app.overlay;
+    if (!o || (o.kind !== 'newWorkspace' && o.kind !== 'rename')) return;
+    const r = formArea(app.cols, app.rows);
+    this.backdrop(false);
+    const title = o.kind === 'rename' ? app.renameLabel(o.target) : 'new workspace';
+    this.box(r, title);
+    const c = rect(r.x + 2, r.y + 1, r.w - 4, r.h - 2);
+    this.span(c.x, c.y, 'name', DARK);
+    this.input(rect(c.x, c.y + 1, c.w, 1), '', o.input);
+    if (o.kind === 'newWorkspace') {
+      this.span(c.x, c.y + 2, truncateLeft(app.newWorkspaceHint(o), c.w), DARK);
+      if (o.worktree !== null) {
+        const t = rect(c.x, c.y + 3, c.w, 1);
+        this.span(t.x, t.y, `${o.worktree ? '[x]' : '[ ]'} with its own worktree`, this.hovered(t) ? CYAN : {});
+        this.region({ r: t, click: () => app.toggleWorktree(), cursor: 'pointer' });
+      }
+      if (o.creating) {
+        this.span(c.x, c.y + 4, 'creating…', DARK);
+        this.cursor = null;
+      } else if (o.error) this.span(c.x, c.y + 4, truncateRight(o.error, c.w), { fg: 1 });
+    } else this.span(c.x, c.y + 2, truncateLeft(app.renameHint(o.target), c.w), DARK);
+    this.dialogButtons(rect(c.x, bottom(c) - 1, c.w, 1), o.kind === 'rename' ? 'rename' : 'create', () => app.submitForm(), () => app.closeOverlay());
+  }
+
+  private confirm(): void {
+    const app = this.app;
+    const o = app.overlay;
+    if (!o || o.kind !== 'remove') return;
+    const r = formArea(app.cols, app.rows);
+    this.backdrop(false);
+    this.box(r, 'remove workspace');
+    const c = rect(r.x + 2, r.y + 1, r.w - 4, r.h - 2);
+    const rows = wrapAll([[seg(app.removeMessage(o))]], c.w);
+    rows.slice(0, 4).forEach((row, i) => row.forEach((cell, x) => this.g.put(c.x + x, c.y + i, cell.ch, {})));
+    if (o.removing) this.span(c.x, c.y + 4, 'removing…', DARK);
+    this.dialogButtons(rect(c.x, bottom(c) - 1, c.w, 1), 'remove', () => app.submitRemove(), () => app.closeOverlay());
+  }
+
+  private picker(): void {
+    const app = this.app;
+    const o = app.overlay;
+    if (!o || o.kind !== 'picker') return;
+    const r = pickerArea(app.cols, app.rows);
+    this.backdrop(false);
+    this.box(r, 'new project');
+    const c = rect(r.x + 2, r.y + 1, r.w - 4, r.h - 2);
+    const path = app.pickerPath(o);
+    const max = Math.max(0, c.w - INPUT_PROMPT.length - 1);
+    const filter = truncateLeft(o.filter, max);
+    const shown = truncateLeft(path, Math.max(0, max - [...filter].length));
+    let x = this.span(c.x, c.y, INPUT_PROMPT, CYAN);
+    x = this.span(x, c.y, shown, {});
+    x = this.span(x, c.y, filter, { add: BOLD });
+    this.cursor = { x, y: c.y, shape: 'block' };
+    const list = rect(c.x, c.y + 2, c.w, Math.max(0, c.h - 4));
+    const items = app.pickerItems(o);
+    if (!items.length) this.span(list.x, list.y, o.filter ? ' no matches' : ' no folders here', DARK);
+    const first = Math.min(o.scroll, Math.max(0, items.length - list.h));
+    items.slice(first, first + list.h).forEach((item, k) => {
+      const i = first + k;
+      const row = rect(list.x, list.y + k, list.w, 1);
+      const hi = o.selected === i || this.hovered(row);
+      const style: Style = hi ? { fg: 0, bg: 6, add: BOLD } : {};
+      const branch = item.branch ?? '';
+      const name = truncateLeft(item.name, row.w - branch.length - 3);
+      this.g.fill(row, hi ? { bg: 6 } : {});
+      this.span(row.x, row.y, ` ${name}`, style);
+      this.span(right(row) - branch.length - 1, row.y, branch, hi ? { fg: 0, bg: 6 } : DARK);
+      this.region({ r: row, click: () => app.pickerClick(i), cursor: 'pointer' });
+    });
+    this.region({ r: list, wheel: (dy) => app.pickerScroll(dy) });
+    this.span(c.x, bottom(c) - 2, truncateLeft(app.pickerHint(o), c.w), DARK);
+    this.dialogButtons(rect(c.x, bottom(c) - 1, c.w, 1), 'open', () => app.pickerOpen(), () => app.closeOverlay());
+  }
+
+  private tabs(row: Rect, names: string[], active: number, onClick: (i: number) => void): void {
+    tabsIn(row, names).forEach((r, i) => {
+      const style: Style = i === active ? PRESSED : this.hovered(r) ? CYAN : { fg: 7 };
+      this.span(r.x, r.y, ` ${names[i]} `, style, r.w);
+      this.region({ r, click: () => onClick(i), cursor: 'pointer' });
+    });
+  }
+
+  private settings(o: SettingsOverlay): void {
+    const app = this.app;
+    const r = issuesArea(app.cols, app.rows);
+    this.backdrop(false);
+    this.box(r, 'settings');
+    const c = inner(r);
+    const tabsRow = rect(c.x, c.y, c.w, 1);
+    const body = rect(c.x, c.y + 2, c.w, Math.max(0, c.h - 5));
+    const editRow = rect(c.x, bottom(body), c.w, 1);
+    const noteRow = rect(c.x, bottom(body) + 1, c.w, 1);
+    const buttonsRow = rect(c.x, bottom(body) + 2, c.w, 1);
+    this.tabs(tabsRow, ['Worktrees', 'Agents', 'Issues', 'TUI'], o.page, (i) => app.settingsPage(i));
+    if (o.pick) {
+      this.input(rect(body.x, body.y, body.w, 1), o.pick.title, o.pick.filter);
+      const list = rect(body.x, body.y + 2, body.w, Math.max(0, body.h - 2));
+      const items = app.pickChoices(o);
+      if (!items.length) this.span(list.x, list.y, ' nothing matches', DARK);
+      items.slice(0, list.h).forEach((item, i) => {
+        const row = rect(list.x, list.y + i, list.w, 1);
+        const hi = Math.min(o.pick!.selected, items.length - 1) === i || this.hovered(row);
+        const base: Style = hi ? { fg: 0, bg: 6 } : {};
+        this.g.fill(row, base);
+        const value: Style = { ...base, ...(item.dangerous && !hi ? { fg: 1 } : {}), add: BOLD };
+        const x = this.span(row.x, row.y, ` ${item.value.padEnd(32)} `, value);
+        this.span(x, row.y, item.note, hi ? base : DARK, right(row) - x);
+        this.region({ r: row, click: () => app.choosePick(i), cursor: 'pointer' });
+      });
+    } else {
+      const rows = app.settingsRows(o.page);
+      const lines: ({ kind: 'blank' } | { kind: 'header'; text: string } | { kind: 'row'; i: number })[] = [];
+      rows.forEach((row, i) => {
+        if (row.section && (i === 0 || rows[i - 1].section !== row.section)) {
+          if (i > 0) lines.push({ kind: 'blank' });
+          lines.push({ kind: 'header', text: row.section });
+        }
+        lines.push({ kind: 'row', i });
+      });
+      lines.slice(0, body.h).forEach((line, n) => {
+        const y = body.y + n;
+        if (line.kind === 'header') this.span(body.x, y, line.text, { fg: 8, add: BOLD });
+        if (line.kind !== 'row') return;
+        const row = rows[line.i];
+        const selected = line.i === o.cursor;
+        const rr = rect(body.x, y, body.w, 1);
+        const bg: Style = selected ? { bg: this.surface } : {};
+        this.g.fill(rr, bg);
+        let x = this.span(rr.x, y, selected ? '› ' : '  ', { ...bg, fg: 6 });
+        x = this.span(x, y, truncateRight(row.label, 24).padEnd(26), { ...bg, ...(selected ? { add: BOLD } : {}) });
+        const value = truncateRight(row.value, Math.floor((rr.w - 30) / 2) + 10);
+        x = this.span(x, y, value, { ...bg, ...(row.dangerous ? { fg: 1 } : {}) });
+        if (value && row.note) x = this.span(x, y, '  ', bg);
+        this.span(x, y, row.note, { ...bg, fg: 8 }, right(rr) - x);
+        this.region({ r: rr, click: () => app.settingsClick(line.i), cursor: 'pointer' });
+      });
+    }
+    if (o.edit) this.input(editRow, `${o.edit.label}:`, o.edit.token ? '•'.repeat(o.edit.input.length) : o.edit.input);
+    const note = o.busy ?? o.edit?.error ?? o.notice ?? app.settingsHint(o);
+    this.span(noteRow.x, noteRow.y, truncateRight(note, noteRow.w), o.edit?.error && !o.busy ? { fg: 1 } : DARK);
+    if (o.busy) this.cursor = null;
+    const done = rightAligned(buttonsRow, ['done'], buttonWidth, 1)[0];
+    this.span(done.x, done.y, ' done ', this.hovered(done) ? PRESSED : { fg: 6, add: BOLD });
+    this.region({ r: done, click: () => app.closeOverlay(), cursor: 'pointer' });
+  }
+
+  private issues(o: IssuesOverlay): void {
+    const app = this.app;
+    const r = issuesArea(app.cols, app.rows);
+    this.backdrop(false);
+    this.box(r, `issues · ${app.issuesProjectName(o)}`);
+    const c = inner(r);
+    const tabsRow = rect(c.x, c.y, c.w, 1);
+    const inputRow = rect(c.x, c.y + 2, c.w, 1);
+    const list = rect(c.x, c.y + 4, c.w, Math.max(0, c.h - 6));
+    const noteRow = rect(c.x, bottom(c) - 2, c.w, 1);
+    const buttonsRow = rect(c.x, bottom(c) - 1, c.w, 1);
+    const view = app.issuesView(o);
+    if (view.detail) {
+      const area = rect(c.x, c.y, c.w, noteRow.y - c.y);
+      const lines = view.detail;
+      lines.slice(o.detailScroll, o.detailScroll + area.h).forEach((line, i) => drawLine(this.g, area.x, area.y + i, line, area.w));
+      this.region({ r: area, wheel: (dy) => app.issuesScrollDetail(dy, lines.length - area.h) });
+    } else {
+      this.tabs(tabsRow, view.tabs, o.tab, (i) => app.issuesTab(i));
+      const toggles = view.toggles;
+      rightAligned(tabsRow, toggles.map((t) => t.label), (l) => buttonWidth(l) + 4, 2).forEach((tr, i) => {
+        const t = toggles[i];
+        this.span(tr.x, tr.y, ` ${t.on ? '[x]' : '[ ]'} ${t.label} `, this.hovered(tr) ? CYAN : {}, tr.w);
+        this.region({ r: tr, click: () => app.issuesToggle(i), cursor: 'pointer' });
+      });
+      if (view.token) {
+        this.input(inputRow, view.token.label, '•'.repeat(Math.min(o.token.input.length, 40)));
+        const help = wrapAll(view.token.help.map((h) => [seg(h)]), list.w - 2);
+        help.slice(0, list.h).forEach((row, i) => row.forEach((cell, x) => this.g.put(list.x + 1 + x, list.y + i, cell.ch, {})));
+      } else {
+        this.input(inputRow, '', view.picking ? o.agentPick?.filter ?? '' : o.filter);
+        const items = view.items;
+        if (!items.length) this.span(list.x, list.y, ` ${view.empty}`, DARK);
+        const keyWidth = Math.max(0, ...items.map((i) => [...i.key].length));
+        const first = Math.min(view.scroll, Math.max(0, items.length - list.h));
+        items.slice(first, first + list.h).forEach((item, k) => {
+          const i = first + k;
+          const row = rect(list.x, list.y + k, list.w, 1);
+          const hi = view.selected === i || this.hovered(row);
+          const style: Style = hi ? { fg: 0, bg: 6, add: BOLD } : {};
+          const keyStyle: Style = hi ? { fg: 0, bg: 6, add: BOLD } : CYAN;
+          const metaStyle: Style = hi ? { fg: 0, bg: 6 } : DARK;
+          this.g.fill(row, hi ? { bg: 6 } : {});
+          const meta = truncateRight(item.meta, Math.floor(row.w / 3));
+          const title = truncateRight(item.title, row.w - keyWidth - meta.length - 6);
+          let x = this.span(row.x, row.y, ` ${item.key.padEnd(keyWidth)}  `, { ...keyStyle, ...(item.danger && !hi ? { fg: 1 } : {}) });
+          x = this.span(x, row.y, title, style);
+          this.span(right(row) - meta.length - 1, row.y, meta, metaStyle);
+          this.region({ r: row, click: () => app.issuesClick(i), cursor: 'pointer' });
+        });
+        this.region({ r: list, wheel: (dy) => app.issuesScroll(dy) });
+      }
+    }
+    const busy = o.busy;
+    const note = busy ?? o.notice ?? view.hint;
+    this.span(noteRow.x, noteRow.y, truncateRight(note, noteRow.w), view.error && !busy ? { fg: 1 } : DARK);
+    if (busy) this.cursor = null;
+    const labels = view.buttons;
+    rightAligned(buttonsRow, labels, buttonWidth, 1).forEach((br, i) => {
+      const hov = this.hovered(br);
+      const style: Style = i === 0 ? (hov ? PRESSED : { fg: 6, add: BOLD }) : hov ? { fg: 0, bg: 7 } : DARK;
+      this.span(br.x, br.y, ` ${labels[i]} `, style);
+      this.region({ r: br, click: () => app.issuesButton(labels[i]), cursor: 'pointer' });
+    });
+  }
+
+  private results(areas: Areas): void {
+    const app = this.app;
+    const o = app.overlay;
+    if (!o || o.kind !== 'search') return;
+    this.backdrop(true);
+    this.region({ r: areas.compact ? areas.bar : areas.search, click: () => {} });
+    if (!o.query) return;
+    const r = areas.results;
+    this.g.clear(r);
+    const list = rect(r.x, r.y, r.w, Math.max(0, r.h - 2));
+    const hint = rect(r.x, bottom(r) - 1, r.w, 1);
+    const results = app.searchResults(o.query);
+    if (!results.length) this.span(list.x, list.y, '  no matches', DARK);
+    const first = Math.min(o.scroll, Math.max(0, results.length - list.h));
+    results.slice(first, first + list.h).forEach((res, k) => {
+      const i = first + k;
+      const row = rect(list.x, list.y + k, list.w, 1);
+      const hi = o.selected === i || this.hovered(row);
+      const base: Style = hi ? { fg: 0, bg: 6, add: BOLD } : {};
+      const matched: Style = hi ? base : { fg: 6, add: BOLD };
+      const ctxStyle: Style = hi ? { fg: 0, bg: 6 } : DARK;
+      this.g.fill(row, hi ? { bg: 6 } : {});
+      const context = truncateLeft(res.context, Math.floor(row.w / 2));
+      const name = truncateRight(res.name, row.w - context.length - 5);
+      let x = this.span(row.x, row.y, '  ', base);
+      const at = name.toLowerCase().indexOf(o.query.toLowerCase());
+      if (at >= 0) {
+        x = this.span(x, row.y, name.slice(0, at), base);
+        x = this.span(x, row.y, name.slice(at, at + o.query.length), matched);
+        x = this.span(x, row.y, name.slice(at + o.query.length), base);
+      } else x = this.span(x, row.y, name, base);
+      this.span(right(row) - context.length - 1, row.y, context, ctxStyle);
+      this.region({ r: row, click: () => app.searchGo(i), cursor: 'pointer' });
+    });
+    const selected = results[Math.min(o.selected, results.length - 1)];
+    if (selected) this.span(hint.x, hint.y, `  ${truncateLeft(`enter goes to ${selected.name}`, hint.w - 2)}`, DARK);
+  }
+
+  private toast(message: string): void {
+    const app = this.app;
+    const w = Math.min(3 + [...message].length + 1 + 2, app.cols);
+    const h = Math.min(3, app.rows);
+    const r = rect(Math.max(0, app.cols - w - 1), Math.max(0, app.rows - h - 1), w, h);
+    this.g.clear(r);
+    this.g.box(r, { fg: 2 });
+    const x = this.span(r.x + 1, r.y + 1, ' ✓ ', { fg: 2 });
+    this.span(x, r.y + 1, message, {}, right(r) - 1 - x);
+  }
+}
+
+export function centered(text: string, w: number): string {
+  const n = [...text].length;
+  const left = Math.max(0, Math.floor((w - n) / 2));
+  return ' '.repeat(left) + text + ' '.repeat(Math.max(0, w - n - left));
+}

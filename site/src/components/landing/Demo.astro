@@ -1,0 +1,206 @@
+---
+import Snapshot from './Snapshot.astro';
+
+interface Props {
+  kind: 'hero' | 'flow';
+  title: string;
+  label: string;
+  fallback: string;
+}
+
+const { kind, title, label, fallback } = Astro.props;
+---
+
+<div class={`demo demo-${kind}`} data-demo={kind}>
+  <div class="window">
+    <div class="window-bar">
+      <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span class="window-title">{title}</span>
+      <span class="live" aria-hidden="true"><i></i>live</span>
+    </div>
+    <div class="screen">
+      <Snapshot scene={fallback} label={label} bare class="fallback" />
+      <canvas role="img" aria-label={label}></canvas>
+      <textarea
+        class="keys"
+        aria-label="Keyboard input for the demo: what you type goes to the active pane"
+        autocapitalize="off"
+        autocomplete="off"
+        autocorrect="off"
+        spellcheck="false"></textarea>
+      <div class="pointer" hidden aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="22" height="22"><path d="M4 2.5v17.2l4.6-4.4 2.9 6.6 3-1.3-2.9-6.5h6.4z" fill="#fff" stroke="#0e0d14" stroke-width="1.4" stroke-linejoin="round"></path></svg>
+      </div>
+    </div>
+  </div>
+  <slot />
+</div>
+
+<script>
+  import { boot } from '../../lib/demo/boot';
+  boot();
+</script>
+
+<style>
+  .demo {
+    position: relative;
+  }
+
+  .screen {
+    position: relative;
+    padding: 10px 12px 12px;
+    min-height: calc(34 * 8.4px * 2.08 + 22px);
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+  }
+
+  .demo-flow .screen {
+    min-height: calc(28 * 7.4px * 2.08 + 22px);
+  }
+
+  .screen :global(.fallback) {
+    position: absolute;
+    inset: 10px 12px auto;
+  }
+
+  .demo[data-ready] :global(.fallback) {
+    display: none;
+  }
+
+  .demo:not([data-ready]) canvas {
+    visibility: hidden;
+  }
+
+  canvas {
+    display: block;
+    touch-action: pan-y;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  .keys {
+    position: absolute;
+    left: 12px;
+    top: 10px;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    border: 0;
+    opacity: 0;
+    resize: none;
+    font-size: 16px;
+    caret-color: transparent;
+    pointer-events: none;
+  }
+
+  .live {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--green);
+    letter-spacing: 0.04em;
+  }
+
+  .live i {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 0 0 rgb(88 230 160 / 0.6);
+    animation: pulse 2.2s infinite;
+  }
+
+  @keyframes pulse {
+    0% {
+      box-shadow: 0 0 0 0 rgb(88 230 160 / 0.55);
+    }
+    70% {
+      box-shadow: 0 0 0 7px rgb(88 230 160 / 0);
+    }
+    100% {
+      box-shadow: 0 0 0 0 rgb(88 230 160 / 0);
+    }
+  }
+
+  .pointer {
+    position: absolute;
+    left: 0;
+    top: 0;
+    z-index: 3;
+    width: 0;
+    height: 0;
+    pointer-events: none;
+    transition: transform 0.6s cubic-bezier(0.3, 0.7, 0.2, 1);
+    filter: drop-shadow(0 3px 6px rgb(0 0 0 / 0.55));
+  }
+
+  .pointer svg {
+    position: absolute;
+    left: -3px;
+    top: -2px;
+  }
+
+  .pointer::after {
+    content: '';
+    position: absolute;
+    left: -14px;
+    top: -14px;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 2px solid var(--cyan);
+    opacity: 0;
+    transform: scale(0.3);
+  }
+
+  .pointer.right::after {
+    border-color: var(--purple-2);
+  }
+
+  .pointer.tap::after {
+    animation: tap 0.5s ease-out;
+  }
+
+  @keyframes tap {
+    0% {
+      opacity: 0.9;
+      transform: scale(0.3);
+    }
+    100% {
+      opacity: 0;
+      transform: scale(1.4);
+    }
+  }
+
+  @media (max-width: 899px) {
+    .screen {
+      min-height: calc(30 * 7.6px * 2.08 + 22px);
+      padding: 8px;
+    }
+
+    .keys {
+      left: 8px;
+      top: 8px;
+    }
+
+    .screen :global(.fallback) {
+      inset: 8px 8px auto;
+    }
+
+    :global(.js) .demo:not([data-ready]) :global(.fallback) {
+      visibility: hidden;
+    }
+  }
+
+  @media (max-width: 559px) {
+    .screen {
+      min-height: calc(34 * 7.4px * 2.08 + 16px);
+    }
+
+    .demo-flow .screen {
+      min-height: calc(30 * 7.2px * 2.08 + 16px);
+    }
+  }
+</style>

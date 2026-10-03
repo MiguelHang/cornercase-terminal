@@ -1,0 +1,132 @@
+---
+title: First steps
+description: A ten-minute tour of cornercase — open projects, start a workspace, add tabs, split panes, copy text and detach.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+import Screen from '../../../components/Screen.astro';
+
+This tour takes you through a normal session: opening projects, starting a line of work, splitting a tab and leaving everything running. You only need the mouse; keys always go to the shell in front of you.
+
+## Start in a project folder
+
+Open your terminal in a project and run `cornercase`:
+
+```sh
+cd ~/code/shop
+cornercase
+```
+
+The first time, cornercase starts its background server and opens the folder you started from as your first project, with one tab running your shell:
+
+<Screen
+  name="first-run"
+  alt="cornercase right after starting in the shop folder: the shop project in the sidebar, its main workspace with a bash tab, an existing worktree called feat/dark-mode, and the shell on the right"
+  caption="A fresh start in ~/code/shop. The feat/dark-mode worktree already existed, so it shows up on its own."
+/>
+
+The screen has three columns and a pane:
+
+| Area | What it holds |
+| --- | --- |
+| Top left | The logo and the **search bar**: click it to jump to any project, workspace or tab. |
+| **projects** | Every project you opened, with its number of workspaces. `+ new project` at the end of the list; `settings` and `quit` at the bottom. |
+| **workspaces** | The workspaces of the active project, each with its tabs. `+ tab` adds a tab to a workspace, `+ new workspace` starts a new one, `issues` opens the issue browser. |
+| The pane | The active tab: one shell, or several in splits. |
+
+The active project and tab are marked with a cyan bar `▌` and a highlighted background.
+
+## Open another project
+
+<Steps>
+
+1. Click **`+ new project`**. A folder picker opens in the folder above your current project.
+
+2. Type to filter the folders. Folders that are git repositories show their branch on the right.
+
+   <Screen
+     name="picker-filter"
+     crop={[19, 3, 72, 24]}
+     alt="The new project folder picker in ~/code with the filter a: api, infra and playground match, api is selected"
+     caption="Typing filters the folders; the best match is selected."
+   />
+
+3. Press `Enter` to go into the selected folder, then `Enter` again — or click **open** — to open the folder you are in.
+
+</Steps>
+
+You can also click a folder to go into it, `←` or `Backspace` to go up, and type `~` or a path to jump straight there. Opening a folder that is already a project just switches to it. All the picker's tricks are in [Projects, workspaces and tabs](../guides/projects-workspaces-tabs/#open-a-project).
+
+## Start a line of work
+
+A **workspace** is a line of work in a project: a feature, a bug, an experiment. Every project starts with one, the project folder itself.
+
+<Steps>
+
+1. Click **`+ new workspace`** in the workspaces column.
+
+2. Type a name. When the project folder is the root of a git repository, the name is also a branch and **with its own worktree** is ticked: the workspace gets its own checkout of the repository, so its files don't mix with your other work.
+
+   <Screen
+     name="new-workspace"
+     crop={[23, 10, 64, 10]}
+     alt="The new workspace dialog: name feat/login, in ~/.cornercase/worktrees/shop/feat-login, with its own worktree ticked, create and cancel buttons"
+   />
+
+3. Click **create** or press `Enter`. cornercase runs `git worktree add` and opens a shell in the new checkout.
+
+</Steps>
+
+Untick the box (click it or press `Tab`) to create a workspace in the project folder itself instead. Worktrees have a page of their own: [Git worktrees](../guides/worktrees/).
+
+## Add tabs and split them
+
+Click **`+ tab`** under a workspace to open another shell in its folder. Tabs are named after the program running in them, so a tab where you start `nvim` is called `nvim`.
+
+To split a tab, **right-click** inside a pane:
+
+<Screen
+  name="pane-menu"
+  crop={[48, 6, 62, 12]}
+  alt="The pane menu opened with a right-click on a pane: split right, split down, send right-clicks to the pane, close pane"
+/>
+
+- **split right** and **split down** open a new shell next to the pane, in the same folder.
+- **close pane** ends the shell in that pane.
+- Drag a divider to resize the panes; double-click it to make them equal again.
+- Click a pane to make it the active one: inactive panes are dimmed.
+
+## Copy and paste
+
+Drag over text in a pane to select it. When you release the button, cornercase copies the text to your clipboard and confirms it with a small toast. Programs that use the mouse themselves, such as htop or an editor with mouse support turned on, get the drag instead.
+
+Paste with your terminal's usual paste keys; the text goes to the program in the active pane.
+
+<Aside type="note" title="Clipboard access">
+cornercase copies through your terminal with the OSC 52 escape sequence, so it also works over SSH. Some terminals ask you to allow it first: in iTerm2, enable *Applications in terminal may access clipboard*; in tmux, `set -g set-clipboard on`.
+</Aside>
+
+## Close things
+
+Hover a project, workspace or tab: a `×` appears at the end of its row. Clicking it closes it and ends the programs inside. Closing a workspace that has its own worktree asks first, because it also deletes the worktree's folder (never the branch).
+
+To rename something, right-click its row.
+
+## Leave and come back
+
+Click **`quit`** at the bottom of the projects column, or simply close the terminal window. cornercase detaches, but your shells, editors and agents keep running in the background server.
+
+Run `cornercase` again, from any terminal, and you are back where you left off. You can even attach from two terminals at once: they show the same session.
+
+```sh
+cornercase              # attach again
+cornercase kill-server  # stop the server and every shell in it
+```
+
+After `kill-server` or a reboot, the next `cornercase` brings back your projects, workspaces, tabs and splits, each pane with a fresh shell in its folder. See [Sessions and the server](../guides/sessions/).
+
+## Where to go next
+
+- Let an agent work on an issue: [Issues and agents](../guides/issues-and-agents/).
+- Tune cornercase in **settings**: [Settings and config.json](../reference/configuration/).
+- Every click and key, in one place: [Keyboard and mouse](../reference/keyboard-and-mouse/).

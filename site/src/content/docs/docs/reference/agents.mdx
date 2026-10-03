@@ -1,0 +1,135 @@
+---
+title: Agents
+description: The coding agents cornercase knows, how it picks and starts one, and how to configure modes, arguments and your own agents.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Screen from '../../../../components/Screen.astro';
+
+cornercase starts coding agents for you when you start an [issue](../../guides/issues-and-agents/). An agent is just a command-line program that runs in a tab; cornercase knows the common ones, and you can add your own.
+
+## Known agents
+
+| Kind | Command | Built-in modes |
+| --- | --- | --- |
+| `claude` | `claude` | yes |
+| `codex` | `codex` | yes |
+| `gemini` | `gemini` | yes |
+| `opencode` | `opencode` | |
+| `cursor` | `cursor-agent` | |
+| `copilot` | `copilot` | |
+| `amp` | `amp` | |
+| `droid` | `droid` | |
+| `pi` | `pi` | |
+| `qwen` | `qwen` | |
+| `kimi` | `kimi` | |
+| `cline` | `cline` | |
+| `goose` | `goose` | |
+| `aider` | `aider` | |
+
+The **kind** is the name you use in settings and in `config.json`; the **command** is what cornercase types in the shell. The command must be installed and on your shell's `PATH`.
+
+## Which agent takes an issue
+
+When you press **start**, cornercase uses, in this order:
+
+1. the agent you picked for this issue with **agent…**;
+2. the default agent, `agent` in `config.json` (**settings → Agents → default agent**), unless it is `auto`;
+3. with `auto`, the agent running in your current tab;
+4. if there is none, it asks you to pick one.
+
+<Screen
+  name="settings-default-agent"
+  crop={[2, 1, 106, 20]}
+  alt="Which agent takes an issue by default? auto, the agent in your tab, otherwise ask; then claude, codex, gemini, opencode, cursor and the other agents with their commands"
+/>
+
+### How the running agent is recognised
+
+cornercase looks at the program in the foreground of the active pane, and compares the file names of its first two arguments with each agent's command. That way it recognises `/usr/local/bin/claude --resume` as `claude`, and also agents started through an interpreter, like `node …/gemini-cli/bin/gemini`, as `gemini`.
+
+## Modes and arguments
+
+Each agent starts with its command followed by its arguments, `agent_args` in `config.json`. To make the common choices easy, some agents have **modes**: named sets of arguments you pick from a list in **settings → Agents**.
+
+| Agent | Mode | Arguments |
+| --- | --- | --- |
+| `claude` | accept edits | `--permission-mode acceptEdits` |
+| | auto | `--permission-mode auto` |
+| | plan | `--permission-mode plan` |
+| | skip permissions (dangerous) | `--dangerously-skip-permissions` |
+| `codex` | read only | `--sandbox read-only` |
+| | workspace write | `--sandbox workspace-write` |
+| | no sandbox, no approvals (dangerous) | `--dangerously-bypass-approvals-and-sandbox` |
+| `gemini` | auto edit | `--approval-mode auto_edit` |
+| | yolo (dangerous) | `--yolo` |
+
+Every agent also has a **default** mode, which adds no arguments. Modes whose name contains *dangerous* are shown in red, in settings and in the issue browser, so you never pick one by accident.
+
+Whatever is in `agent_args` beyond the mode's arguments is the agent's **extra arguments**, set with **extra arguments…** in the same list. When you pick another mode, cornercase swaps the mode's arguments and keeps your extras. For example:
+
+```json
+"agent_args": {
+  "claude": ["--permission-mode", "plan", "--add-dir", "../shared"]
+}
+```
+
+starts `claude --permission-mode plan --add-dir ../shared`: mode *plan*, extra arguments `--add-dir ../shared`.
+
+### Your own modes
+
+`agent_modes` adds modes, replaces built-in ones with the same name, or hides them with an empty list:
+
+```json
+"agent_modes": {
+  "claude": {
+    "plan": ["--permission-mode", "plan", "--verbose"],
+    "auto": []
+  },
+  "mine": {
+    "fast": ["--fast"],
+    "careful": ["--careful", "--run-tests"]
+  }
+}
+```
+
+Here Claude Code's `plan` mode gets an extra flag and its `auto` mode disappears from the list, while `mine`, a custom agent (see below), gets two modes of its own. Any agent can have modes this way, not only the three with built-in ones.
+
+## Your own agents
+
+`agent_commands` changes the program behind a kind, or adds a new kind:
+
+```json
+"agent_commands": {
+  "cursor": "/opt/cursor/bin/cursor-agent",
+  "mine": "~/bin/my-agent"
+}
+```
+
+The value is a single program, a name on your `PATH` or a path; put its arguments in `agent_args`. A new kind like `mine` shows up everywhere agents are listed, can be your default agent, and is recognised when it runs in a tab.
+
+## How cornercase starts an agent
+
+Starting an agent is done by driving the shell in a new tab, the same way you would by hand. Each step waits for the terminal to settle before going on:
+
+| Step | Waits until | Then |
+| --- | --- | --- |
+| 1. Shell | The shell's output has been quiet for 0.3 s (at most 5 s). | Types the command line and `Enter`. |
+| 2. Agent | The agent is in the foreground and its screen has been quiet for 1 s (at most 30 s). | Answers a trust question, if there is one, and waits again; otherwise pastes the prompt. |
+| 3. Send | The screen has been quiet for 0.3 s after pasting. | Presses `Enter`, only when **send the prompt** is on. |
+
+If the shell is still in the foreground 3 s after the command was typed, the agent didn't start (for example, the command doesn't exist), and cornercase stops there. The reason goes to the server log.
+
+The prompt is pasted with bracketed paste when the agent supports it. When the prompt is left for you to send, or the agent doesn't support bracketed paste, it is put on a single line first.
+
+## Trust prompts
+
+Many agents ask whether you trust a folder the first time they run in it, and a new worktree is always a new folder. With **trust prompts** on (`auto_accept_trust_prompt`), cornercase answers yes for you:
+
+- It recognises the question with `trust_prompt_pattern`, a regular expression matched without regard to case against the agent's screen. The default matches phrases like *trust the files*, *trust this folder*, *do you trust* and *yes, proceed*.
+- If the screen shows a menu, marked with `❯`, `›`, `>`, `▸` or `→`, and the marked option isn't the *yes* one, cornercase moves the selection to the nearest option containing the word *yes* with the arrow keys, then presses `Enter`. Some agents highlight *No* by default, which is why.
+- It answers at most four times per launch, and never the same screen twice.
+
+<Aside type="caution">
+A trust prompt is there to protect you from running an agent in a folder you don't know. cornercase only answers it for agents it starts itself, in your own projects. Turn it off in **settings → Agents → trust prompts** if you prefer to answer yourself. An invalid `trust_prompt_pattern` never matches.
+</Aside>

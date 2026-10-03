@@ -1,0 +1,60 @@
+---
+title: FAQ
+description: Short answers to the questions people ask about cornercase.
+---
+
+### Why is everything a mouse click?
+
+So that every key belongs to your programs. Terminal multiplexers usually reserve a prefix key and a set of shortcuts, which then collide with your shell, your editor or your agent, and which you have to learn. In cornercase there is nothing to learn: you see a button, you click it. Your keyboard goes, untouched, to the program in front of you.
+
+### Can I add keyboard shortcuts?
+
+Not at the moment, on purpose. Inside cornercase's own dialogs, `Enter` confirms and `Esc` cancels, and lists can be driven with the arrow keys. If you have a strong case for a shortcut, [open an issue](https://github.com/usecornercase/cornercase-terminal/issues) to discuss it.
+
+### Does it replace tmux?
+
+It overlaps: both keep shells running after you detach and split them into panes. cornercase is organised around **projects, workspaces and git worktrees**, can start **coding agents** on issues, and is driven by the mouse. If you rely on tmux's scripting or scrollback, keep using it; you can even run cornercase inside a tmux window.
+
+### Does it work over SSH?
+
+Yes. Run `cornercase` on the remote machine: the server lives there, your shells keep running when the connection drops, and you reattach when you log in again. Copying uses OSC 52, so the text lands in your local clipboard.
+
+### Do my shells survive a reboot?
+
+No. Programs live in the server, and the server doesn't survive a reboot or `cornercase kill-server`. What survives is the layout: your projects, workspaces, tabs and splits come back, each pane with a fresh shell in its folder.
+
+### Which coding agents does it support?
+
+Claude Code, Codex, Gemini CLI, opencode, Cursor's agent, GitHub Copilot CLI, Amp, Droid, pi, Qwen Code, Kimi, Cline, Goose and Aider out of the box, and any other command-line agent you add with [`agent_commands`](../../reference/agents/#your-own-agents).
+
+### Which issue trackers?
+
+GitHub (through the `gh` CLI), Shortcut and Linear.
+
+### Will it delete my branches?
+
+Never. Removing a worktree workspace deletes the worktree's folder, after asking you, and leaves the branch and its commits in the repository.
+
+### Where are my tokens stored?
+
+In `secrets.json` next to your `config.json`, readable only by you, or in the `SHORTCUT_API_TOKEN` and `LINEAR_API_KEY` environment variables if you prefer. They are never written to logs, to the issue cache or to the screen.
+
+### Does it respect my terminal's colour theme?
+
+Yes. cornercase asks your terminal for its colours when it starts and draws its interface with palette colours, so it follows light and dark themes. The programs in your panes get the same colours.
+
+### Which platforms does it run on?
+
+Linux and macOS.
+
+### Can I run two independent sessions?
+
+Yes, with `CORNERCASE_SOCKET`: each socket gets its own server, with its own settings and session. See [A separate server](../../guides/sessions/#a-separate-server).
+
+### Can I scroll back through a pane's output?
+
+Not yet. See [Known limitations](../limitations/).
+
+### What license is it under?
+
+MIT or Apache-2.0, at your option.

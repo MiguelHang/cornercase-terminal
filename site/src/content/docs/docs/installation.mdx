@@ -1,0 +1,108 @@
+---
+title: Installation
+description: Build cornercase from source on Linux or macOS with Rust and Zig 0.15.2.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+
+cornercase is built from source with Cargo. The build also compiles Ghostty's terminal core, which is written in Zig, so you need a Zig compiler of exactly the right version next to Rust.
+
+## Requirements
+
+| You need | Why |
+| --- | --- |
+| **Linux** or **macOS** | The only supported platforms. On macOS, install the Xcode Command Line Tools: `xcode-select --install`. |
+| [rustup](https://rustup.rs) | The Rust version is pinned in `rust-toolchain.toml`; rustup installs it by itself on the first build. |
+| [Zig **0.15.2**](https://ziglang.org/download/) on your `PATH` | It builds Ghostty's terminal core, which refuses any other Zig version. |
+| `git` | To clone the repository. cornercase also uses it for worktrees. |
+| Network access | Only for the first build, which downloads Ghostty's sources. |
+
+<Aside type="caution" title="Exactly Zig 0.15.2">
+Package managers such as Homebrew may ship a newer Zig. If `zig version` doesn't print `0.15.2`, download that release from [ziglang.org/download](https://ziglang.org/download/), unpack it and put its folder first on your `PATH`.
+</Aside>
+
+Optional, for some features:
+
+- [`gh`](https://cli.github.com), logged in with `gh auth login`, to browse GitHub issues.
+- A coding agent such as Claude Code, Codex or Gemini CLI, to start agents on issues. See [Agents](../reference/agents/) for the full list.
+
+## Install
+
+<Steps>
+
+1. Check that Zig is the right version:
+
+   ```sh
+   zig version
+   # 0.15.2
+   ```
+
+2. Clone the repository:
+
+   ```sh
+   git clone https://github.com/usecornercase/cornercase-terminal.git
+   cd cornercase-terminal
+   ```
+
+3. Build and install the `cornercase` binary:
+
+   ```sh
+   cargo install --path . --locked
+   ```
+
+   The first build takes a couple of minutes: it fetches Ghostty's sources and compiles them. Cargo puts the binary in `~/.cargo/bin`, which rustup already added to your `PATH`.
+
+4. Open a terminal in a project folder and start it:
+
+   ```sh
+   cd ~/code/my-project
+   cornercase
+   ```
+
+   The folder you start from becomes your first project. Continue with [First steps](../first-steps/).
+
+</Steps>
+
+<Aside type="tip" title="Building offline">
+If you already have a checkout of Ghostty, point `GHOSTTY_SOURCE_DIR` at it before building and the download is skipped.
+</Aside>
+
+## Update
+
+Pull the latest changes and install again:
+
+```sh
+cd cornercase-terminal
+git pull
+cargo install --path . --locked
+```
+
+A client never attaches to a server from another build, so after updating, the next `cornercase` stops with:
+
+```text
+the running cornercase server comes from another build. Run `cornercase kill-server` (it closes all its terminals) and start cornercase again
+```
+
+Finish what is running in your panes, then restart the server:
+
+```sh
+cornercase kill-server
+cornercase
+```
+
+Your projects, workspaces, tabs and splits come back, each pane with a fresh shell in its folder. See [Sessions and the server](../guides/sessions/) for what is kept.
+
+## Uninstall
+
+```sh
+cornercase kill-server
+cargo uninstall cornercase
+```
+
+Then remove what cornercase saved, if you don't want to keep it:
+
+```sh
+rm -rf ~/.config/cornercase ~/.local/state/cornercase
+```
+
+If you set `XDG_CONFIG_HOME` or `XDG_STATE_HOME`, the folders are there instead. [Files and environment](../reference/files-and-environment/) lists everything cornercase writes. Git worktrees it created stay in `~/.cornercase/worktrees` until you remove them with `git worktree remove`.

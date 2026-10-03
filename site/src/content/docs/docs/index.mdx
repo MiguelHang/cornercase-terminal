@@ -1,0 +1,87 @@
+---
+title: Introduction
+description: cornercase is a terminal multiplexer for working on several projects at once, each with its own git worktrees and coding agents. Every action is a mouse click.
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import Screen from '../../../components/Screen.astro';
+
+cornercase is a terminal multiplexer for working on several things at once. It keeps your **projects** in a sidebar, gives each line of work its own **workspace** (optionally its own git worktree and branch), and runs as many **tabs** and **split panes** of real shells as you need. It can also read an issue from GitHub, Shortcut or Linear and start a coding agent on it, in a fresh worktree, in a few clicks.
+
+Everything is a button. There is no prefix key to learn and no shortcut that steals keys from your shell, your editor or your agent: every key you type goes to the program in front of you.
+
+<Screen
+  name="overview"
+  alt="cornercase with four projects in the sidebar, the shop project's workspaces in the second column, and a tab split in two: an agent working on issue 482 above, the failing tests below"
+  caption="Four projects, four lines of work in shop, and an agent fixing issue #482 next to its failing test."
+/>
+
+## How it is organised
+
+Each level lives inside the one before it, and each one has its own column or area on screen:
+
+```text
+shop                       project     a folder
+├── main                   workspace   the folder itself
+│   ├── nvim               tab
+│   └── bash               tab
+├── feat/login             workspace   its own worktree
+│   └── bash               tab
+└── #482 Returns page …    workspace   from an issue
+    └── claude             tab         split in two panes
+```
+
+- **Projects** are folders. The sidebar on the left lists them, with the number of workspaces each one has.
+- **Workspaces** are lines of work inside a project. The first one is the project folder itself; you can add more, and in a git repository each one can get its own [worktree](guides/worktrees/).
+- **Tabs** are shells inside a workspace. A tab is named after whatever runs in it: `bash`, `nvim`, `claude`.
+- **Panes** split a tab, right or down, like in Ghostty. Each pane is a real terminal.
+
+## What you can do with it
+
+<CardGrid>
+  <Card title="Click, don't chord" icon="list-format">
+    Projects, workspaces and tabs are rows you click. `+` adds one, `×` closes it, right-click renames it.
+    [More about the layout →](guides/projects-workspaces-tabs/)
+  </Card>
+  <Card title="Split like Ghostty" icon="window">
+    Right-click a pane to split it right or down, drag the dividers, drag over text to copy it.
+    [More about panes →](guides/panes-and-splits/)
+  </Card>
+  <Card title="A worktree per task" icon="code-branch">
+    Tick a box and a new workspace gets its own checkout and branch. Your `.env` comes along.
+    [More about worktrees →](guides/worktrees/)
+  </Card>
+  <Card title="Issue in, agent out" icon="rocket">
+    Read a GitHub issue, Shortcut story or Linear issue, press **start**, and an agent picks it up in its own worktree.
+    [More about issues →](guides/issues-and-agents/)
+  </Card>
+  <Card title="Shells outlive the UI" icon="server">
+    A background server owns every shell. Close the window, come back later, attach from several terminals.
+    [More about sessions →](guides/sessions/)
+  </Card>
+  <Card title="Fits any terminal" icon="laptop">
+    Below 90 columns the sidebars fold into a menu bar, so cornercase works in a narrow split too.
+    [More about small terminals →](guides/small-terminals/)
+  </Card>
+</CardGrid>
+
+## A few deliberate choices
+
+**Mouse buttons only.** cornercase has no keyboard shortcuts of its own. Keys always reach the program in the active pane, so `Ctrl+B`, `Alt` combinations and everything your editor or agent uses keep working. Inside a dialog, `Enter` confirms and `Esc` cancels.
+
+**A real terminal inside.** Panes are emulated with [libghostty-vt](https://github.com/ghostty-org/ghostty), the core of the Ghostty terminal. It answers the queries that programs like nvim, fzf, htop and full-screen agents wait for, supports the kitty keyboard protocol, and reflows text when a pane is resized.
+
+**The server owns your shells.** The `cornercase` command is a thin client that only draws what the server sends it. Quitting detaches; the shells keep running until you stop the server.
+
+**Your colours.** cornercase asks your terminal for its colours when it starts and draws everything with palette colours, so it looks right in light and dark themes alike.
+
+:::note
+cornercase is young and moving fast. It runs on **Linux** and **macOS**.
+:::
+
+## Next steps
+
+<CardGrid>
+  <LinkCard title="Install cornercase" description="Build it from source with Rust and Zig." href="installation/" />
+  <LinkCard title="Take the tour" description="Open a project, add a workspace, split a pane, detach." href="first-steps/" />
+</CardGrid>
