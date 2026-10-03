@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use std::net::Shutdown;
 use std::ops::ControlFlow;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -87,6 +87,7 @@ struct Server {
     started: bool,
     build: String,
     saver: Saver,
+    restart: Option<PathBuf>,
     tx: Sender<ServerEvent>,
 }
 
@@ -111,6 +112,7 @@ pub fn run() -> Result<()> {
         started: false,
         build: protocol::build_id(),
         saver: Saver::new(state::path(), None),
+        restart: None,
         tx,
     };
     server.serve(&rx);
@@ -242,6 +244,9 @@ impl Server {
             ServerEvent::Incompatible(id) => self.reject(id, OTHER_BUILD),
             ServerEvent::Gone(id) => self.remove(id),
         }
+        if self.restart.is_some() {
+            return ControlFlow::Break(());
+        }
         ControlFlow::Continue(())
     }
 
@@ -307,6 +312,7 @@ impl Server {
         if let Err(e) = self.app.handle_event(AppEvent::Input(ev), area) {
             eprintln!("cornercase server: {e}");
         }
+        self.restart = self.app.take_restart();
         if self.app.take_detach() {
             if let Some(client) = self.client_mut(id) {
                 client.send(ServerMessage::Detached);
@@ -346,8 +352,14 @@ impl Server {
     }
 
     fn shutdown(&mut self) {
+        if self.restart.is_some()
+            && self.started
+            && let Err(e) = state::save(&state::path(), &self.app.state())
+        {
+            eprintln!("cornercase server: failed to save the session: {e}");
+        }
         for client in self.clients.drain(..) {
-            client.send(ServerMessage::Shutdown);
+            client.send(self.restart.clone().map_or(ServerMessage::Shutdown, ServerMessage::Restart));
             let Client { out, screen, writer, .. } = client;
             drop((out, screen));
             let _ = writer.join();

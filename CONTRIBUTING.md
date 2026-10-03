@@ -51,4 +51,6 @@ UI changes usually change a snapshot. `cargo test` then writes `src/snapshots/*.
 
 Keep them focused: one change per pull request. Describe what changed and why, how you tested it, and add a screenshot or a recording for anything visible.
 
+A pull request that changes the app (`src/`, `Cargo.toml`, `Cargo.lock`, the toolchain) ships as a release of its own once merged. So it bumps `version` in `Cargo.toml` above the last release (usually the patch number) and adds a `## <version>` section to [CHANGELOG.md](CHANGELOG.md) saying what changed, written for users: it becomes the release notes and the text of the update dialog in the app. CI checks both. Changes to docs, tests or the website alone need neither.
+
 By contributing, you agree that your contributions are dual licensed under MIT and Apache-2.0, like the rest of the project.

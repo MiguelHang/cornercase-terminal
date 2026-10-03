@@ -782,7 +782,10 @@ export class App {
       }
       return rows;
     }
-    return [{ id: 'dim', section: '', label: 'inactive panes', value: c.dim ? '[x] dimmed' : '[ ] as bright as the active one', note: 'in a split tab' }];
+    return [
+      { id: 'dim', section: '', label: 'inactive panes', value: c.dim ? '[x] dimmed' : '[ ] as bright as the active one', note: 'in a split tab' },
+      { id: 'updates', section: '', label: 'check for updates', value: c.updates ? '[x] once a day' : '[ ] never', note: 'asks GitHub for the latest release' },
+    ];
   }
 
   settingsHint(o: SettingsOverlay): string {
@@ -816,6 +819,9 @@ export class App {
     } else if (row.id === 'dim') {
       c.dim = !c.dim;
       o.notice = c.dim ? 'inactive panes are dimmed' : 'every pane looks the same';
+    } else if (row.id === 'updates') {
+      c.updates = !c.updates;
+      o.notice = c.updates ? 'cornercase looks for new versions' : 'cornercase no longer looks for new versions';
     } else if (row.id === 'agent') {
       o.pick = {
         row: row.id,

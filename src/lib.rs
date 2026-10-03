@@ -25,6 +25,7 @@ pub mod split;
 pub mod state;
 pub mod term;
 pub mod ui;
+pub mod update;
 pub mod upstream;
 pub mod worktree;
 

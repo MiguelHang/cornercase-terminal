@@ -28,6 +28,7 @@ const FORM_HEIGHT: u16 = 10;
 const FORM_PADDING: u16 = 1;
 const PICKER_WIDTH: u16 = 72;
 const PICKER_HEIGHT: u16 = 24;
+const UPDATE_MESSAGE_HEIGHT: u16 = 3;
 const ISSUES_WIDTH: u16 = 110;
 const ISSUES_HEIGHT: u16 = 30;
 const INPUT_PROMPT: &str = "› ";
@@ -564,6 +565,11 @@ fn button_width(label: &str) -> u16 {
     u16::try_from(label.chars().count()).unwrap_or(u16::MAX).saturating_add(2)
 }
 
+pub fn update_button(settings: Rect, label: &str) -> Rect {
+    let width = button_width(label).min(settings.width);
+    Rect { x: settings.right() - width, width, ..settings }
+}
+
 pub fn form_buttons(form: Rect, submit: &str) -> [Rect; 2] {
     buttons_in(form_rows(form)[5], submit)
 }
@@ -613,6 +619,30 @@ fn picker_rows(picker: Rect) -> [Rect; 4] {
     ])
     .areas(form_inner(picker));
     [input, list, note, buttons]
+}
+
+fn update_rows(update: Rect) -> [Rect; 4] {
+    let [message, _, notes, note, buttons] = Layout::vertical([
+        Constraint::Length(UPDATE_MESSAGE_HEIGHT),
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(form_inner(update));
+    [message, notes, note, buttons]
+}
+
+pub fn update_notes(area: Rect) -> Rect {
+    update_rows(picker_area(area))[1]
+}
+
+pub fn update_buttons(area: Rect, submit: &str) -> [Rect; 2] {
+    buttons_in(update_rows(picker_area(area))[3], submit)
+}
+
+pub fn update_scroll(area: Rect, lines: usize, scroll: usize) -> usize {
+    scroll.min(lines.saturating_sub(usize::from(update_notes(area).height)))
 }
 
 pub fn picker_list(picker: Rect) -> Rect {
@@ -981,6 +1011,14 @@ pub struct Confirm {
     pub submit: &'static str,
 }
 
+pub struct Update {
+    pub message: String,
+    pub notes: Vec<Line<'static>>,
+    pub scroll: usize,
+    pub note: Option<Note>,
+    pub submit: &'static str,
+}
+
 pub struct Picker {
     pub title: &'static str,
     pub path: String,
@@ -1081,6 +1119,7 @@ pub enum Overlay {
     Menu { at: Position, items: Vec<&'static str> },
     Form(Form),
     Confirm(Confirm),
+    Update(Update),
     Picker(Picker),
     Issues(Issues),
     Settings(Settings),
@@ -1129,6 +1168,7 @@ pub struct View<'a> {
     pub overlay: Option<Overlay>,
     pub toast: Option<&'a str>,
     pub nav: Option<Nav>,
+    pub update: Option<String>,
 }
 
 impl View<'_> {
@@ -1180,6 +1220,7 @@ pub fn draw(f: &mut Frame, view: &View) {
         Some(Overlay::Menu { at, items }) => draw_menu(f, view, *at, items),
         Some(Overlay::Form(form)) => draw_form(f, view, form),
         Some(Overlay::Confirm(confirm)) => draw_confirm(f, view, confirm),
+        Some(Overlay::Update(update)) => draw_update(f, view, update),
         Some(Overlay::Picker(picker)) => draw_picker(f, view, picker),
         Some(Overlay::Issues(issues)) => draw_issues(f, view, issues),
         Some(Overlay::Settings(settings)) => draw_settings(f, view, settings),
@@ -1395,6 +1436,19 @@ fn draw_confirm(f: &mut Frame, view: &View, confirm: &Confirm) {
     f.render_widget(Paragraph::new(confirm.message.as_str()).wrap(Wrap { trim: true }), message);
     draw_note(f, confirm.note.as_ref(), note);
     draw_dialog_buttons(f, view, form_buttons(r, confirm.submit), confirm.submit);
+}
+
+fn draw_update(f: &mut Frame, view: &View, update: &Update) {
+    let r = picker_area(f.area());
+    f.render_widget(Clear, r);
+    f.render_widget(overlay_block("update"), r);
+    let [message, notes, note, _] = update_rows(r);
+    f.render_widget(Paragraph::new(update.message.as_str()).wrap(Wrap { trim: true }), message);
+    let scroll = update_scroll(f.area(), update.notes.len(), update.scroll);
+    let visible: Vec<Line> = update.notes.iter().skip(scroll).take(usize::from(notes.height)).cloned().collect();
+    f.render_widget(Paragraph::new(visible), notes);
+    draw_note(f, update.note.as_ref(), note);
+    draw_dialog_buttons(f, view, update_buttons(f.area(), update.submit), update.submit);
 }
 
 fn draw_dialog_buttons(f: &mut Frame, view: &View, [submit, cancel]: [Rect; 2], label: &str) {
@@ -1725,7 +1779,14 @@ fn draw_sidebar(f: &mut Frame, view: &View, areas: &Areas) {
     let r = rows.button();
     draw_button(f, r, " ", "+ new project", button_style(view, r, Style::default().fg(Color::Cyan), Color::Cyan));
     draw_separator(f, areas.separator);
-    draw_settings_button(f, view, areas.settings);
+    let mut settings = areas.settings;
+    if let Some(label) = &view.update {
+        let r = update_button(areas.settings, label);
+        let idle = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+        draw_button(f, r, "", label, button_style(view, r, idle, Color::Cyan));
+        settings.width -= r.width;
+    }
+    draw_settings_button(f, view, settings);
     draw_quit_button(f, view, areas.quit);
 }
 
@@ -2123,6 +2184,7 @@ mod tests {
             overlay: None,
             toast: None,
             nav: None,
+            update: None,
         }
     }
 
@@ -2676,6 +2738,31 @@ mod tests {
         fn close_button_out_of_view_is_empty() {
             assert!(close_button(list(), 1, 50, 0, 49).is_empty());
         }
+
+        fn with_update(hover: Option<Position>) -> View<'static> {
+            View { update: Some("↑ 9.0.0".into()), hover, ..view(&["~"]) }
+        }
+
+        fn settings_row(v: &View) -> String {
+            let t = render(v);
+            let r = areas().settings;
+            (r.x..r.right()).map(|x| t.backend().buffer()[(x, r.y)].symbol().to_string()).collect()
+        }
+
+        #[test]
+        fn an_update_sits_at_the_end_of_the_settings_row() {
+            let row = settings_row(&with_update(None));
+            assert!(row.starts_with("  settings ") && row.ends_with(" ↑ 9.0.0 "), "{row:?}");
+        }
+
+        #[test]
+        fn hovering_the_update_leaves_settings_alone() {
+            let r = update_button(areas().settings, "↑ 9.0.0");
+            let t = render(&with_update(Some(r.as_position())));
+            let buffer = t.backend().buffer();
+            let settings = areas().settings.as_position().offset(ratatui::layout::Offset { x: 2, y: 0 });
+            assert_eq!((buffer[r.as_position()].bg, buffer[settings].bg), (Color::Cyan, Color::Reset));
+        }
     }
 
     mod workspaces_column {
@@ -2854,6 +2941,21 @@ mod tests {
                 submit: "remove anyway",
             };
             insta::assert_snapshot!(render(&with(Overlay::Confirm(confirm))).backend());
+        }
+
+        #[test]
+        fn renders_an_update_with_its_notes() {
+            let notes = (1..=40).map(|i| Line::from(format!("• change {i}"))).collect();
+            let update = Update {
+                message: "cornercase 9.0.0 is out (you have 0.1.0). Updating replaces ~/.local/bin/cornercase; \
+                    your terminals keep running until you restart."
+                    .into(),
+                notes,
+                scroll: 30,
+                note: Some(Note::Busy("downloading…")),
+                submit: "update",
+            };
+            insta::assert_snapshot!(render(&with(Overlay::Update(update))).backend());
         }
     }
 

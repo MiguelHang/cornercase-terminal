@@ -1,8 +1,9 @@
 use std::fs::OpenOptions;
-use std::io::{self, Write, stdin, stdout};
+use std::io::{self, BufRead, IsTerminal, Write, stdin, stdout};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -27,12 +28,32 @@ const SERVER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(20);
 const INCOMPATIBLE: &str = "the running cornercase server is incompatible with this build. \
     Run `cornercase kill-server` (it closes all its terminals) and start cornercase again";
+const RESTART_QUESTION: &str = "The running cornercase server comes from another build; cornercase was probably updated.\n\
+    Restart it now? Its terminals close, and your session comes back with new shells in the same folders. [y/N] ";
 
 pub fn run() -> Result<()> {
     if std::env::var_os(protocol::NESTED_ENV).is_some() {
         return Err(Error::Nested);
     }
-    let stream = connect_or_start(&protocol::socket_path())?;
+    match open() {
+        Err(Error::Rejected(_)) if stdin().is_terminal() && confirm(RESTART_QUESTION) => {
+            kill_server()?;
+            open()
+        }
+        result => result,
+    }
+}
+
+fn confirm(question: &str) -> bool {
+    print!("{question}");
+    let _ = stdout().flush();
+    let mut answer = String::new();
+    stdin().lock().read_line(&mut answer).is_ok() && matches!(answer.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
+fn open() -> Result<()> {
+    let path = protocol::socket_path();
+    let stream = connect_or_start(&path)?;
 
     let terminal = ratatui::init();
     let _ = execute!(
@@ -45,7 +66,13 @@ pub fn run() -> Result<()> {
     let result = attach(stream, &terminal);
     restore_input_modes();
     ratatui::restore();
-    result
+    match result? {
+        Some(exe) => {
+            wait_for_exit(&path);
+            Err(Command::new(exe).exec().into())
+        }
+        None => Ok(()),
+    }
 }
 
 pub fn kill_server() -> Result<bool> {
@@ -53,11 +80,15 @@ pub fn kill_server() -> Result<bool> {
     let Ok(mut stream) = UnixStream::connect(&path) else { return Ok(false) };
     protocol::send(&mut stream, &ClientMessage::KillServer)?;
     while let Ok(Some(_)) = protocol::recv::<ServerMessage>(&mut stream) {}
+    wait_for_exit(&path);
+    Ok(true)
+}
+
+fn wait_for_exit(path: &Path) {
     let deadline = Instant::now() + SERVER_EXIT_TIMEOUT;
-    while matches!(protocol::try_lock(&path), Ok(None)) && Instant::now() < deadline {
+    while matches!(protocol::try_lock(path), Ok(None)) && Instant::now() < deadline {
         thread::sleep(POLL);
     }
-    Ok(true)
 }
 
 fn connect_or_start(path: &Path) -> Result<UnixStream> {
@@ -111,7 +142,7 @@ fn restore_input_modes() {
     let _ = execute!(stdout(), PopKeyboardEnhancementFlags, DisableBracketedPaste, DisableMouseCapture);
 }
 
-fn attach(stream: UnixStream, terminal: &DefaultTerminal) -> Result<()> {
+fn attach(stream: UnixStream, terminal: &DefaultTerminal) -> Result<Option<PathBuf>> {
     let theme = query_host_theme();
     let size = terminal.size()?;
     let mut writer = stream.try_clone()?;
@@ -123,7 +154,7 @@ fn attach(stream: UnixStream, terminal: &DefaultTerminal) -> Result<()> {
     receive(stream)
 }
 
-fn receive(mut stream: UnixStream) -> Result<()> {
+fn receive(mut stream: UnixStream) -> Result<Option<PathBuf>> {
     let mut out = stdout();
     loop {
         match protocol::recv::<ServerMessage>(&mut stream) {
@@ -133,7 +164,8 @@ fn receive(mut stream: UnixStream) -> Result<()> {
             }
             Ok(Some(ServerMessage::Rejected(reason))) => return Err(Error::Rejected(reason)),
             Err(e) if e.kind() == io::ErrorKind::InvalidData => return Err(Error::Rejected(INCOMPATIBLE.into())),
-            Ok(Some(ServerMessage::Detached | ServerMessage::Shutdown) | None) | Err(_) => return Ok(()),
+            Ok(Some(ServerMessage::Restart(exe))) => return Ok(Some(exe)),
+            Ok(Some(ServerMessage::Detached | ServerMessage::Shutdown) | None) | Err(_) => return Ok(None),
         }
     }
 }

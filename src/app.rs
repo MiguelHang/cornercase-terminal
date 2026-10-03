@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
+use ratatui::text::Line;
 
 use crate::agents;
 use crate::clipboard;
@@ -30,6 +31,7 @@ use crate::split::{self, Dir};
 use crate::state::{self, IssuesState, PaneState, ProjectState, State, TabState, WorkspaceState};
 use crate::term::{SpawnOptions, Term};
 use crate::ui::{self, FormHit, PickerHit, SidebarHit, WorkspaceHit, WorkspaceRow};
+use crate::update::{self, Install, Release, Updates};
 use crate::upstream;
 use crate::worktree;
 
@@ -45,6 +47,8 @@ pub enum AppEvent {
     TokenChecked { source: Source, token: Secret, result: Result<Account> },
     PeopleLoaded { project: u64, source: Source, result: Result<Vec<Person>> },
     Behind { project: u64, behind: Vec<(u64, u32)> },
+    UpdateChecked(Result<Option<Release>>),
+    Updated(Result<()>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +114,21 @@ const COUNT_BEHIND_EVERY: Duration = Duration::from_secs(3);
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const TOAST_FOR: Duration = Duration::from_secs(2);
 const COPIED: &str = "copied to clipboard";
+const UPDATE_AVAILABLE: &str = "a new cornercase is out";
+const UPDATE_SUBMIT: &str = "update";
+const RETRY_UPDATE_SUBMIT: &str = "try again";
+const RESTART_SUBMIT: &str = "restart now";
+const COPY_COMMAND_SUBMIT: &str = "copy command";
+const RESTART_LABEL: &str = "↻ restart";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UpdateStep {
+    Ask,
+    Updating,
+    Failed(String),
+    Installed,
+    Manual(&'static str),
+}
 
 #[derive(Debug)]
 enum Overlay {
@@ -122,6 +141,7 @@ enum Overlay {
     Picker(Picker),
     Issues(Box<Browser>),
     Search(Search),
+    Update(UpdateStep),
 }
 
 impl Overlay {
@@ -130,6 +150,10 @@ impl Overlay {
             Self::Rename { .. } => RENAME_SUBMIT,
             Self::RemoveWorkspace { force: true, .. } => FORCE_REMOVE_SUBMIT,
             Self::RemoveWorkspace { .. } => REMOVE_SUBMIT,
+            Self::Update(UpdateStep::Failed(_)) => RETRY_UPDATE_SUBMIT,
+            Self::Update(UpdateStep::Installed) => RESTART_SUBMIT,
+            Self::Update(UpdateStep::Manual(_)) => COPY_COMMAND_SUBMIT,
+            Self::Update(_) => UPDATE_SUBMIT,
             _ => WORKSPACE_SUBMIT,
         }
     }
@@ -149,6 +173,7 @@ impl Overlay {
         matches!(self, Self::NewWorkspace { creating: true, .. } | Self::RemoveWorkspace { removing: true, .. })
             || matches!(self, Self::Issues(b) if b.starting)
             || matches!(self, Self::Settings(s) if s.busy())
+            || matches!(self, Self::Update(UpdateStep::Updating))
     }
 }
 
@@ -207,6 +232,9 @@ pub struct App {
     fetched: HashMap<u64, Instant>,
     counting: HashSet<u64>,
     counted: Option<Instant>,
+    updates: Updates,
+    update_scroll: usize,
+    restart: bool,
 }
 
 struct Apis {
@@ -278,11 +306,21 @@ impl App {
             fetched: HashMap::new(),
             counting: HashSet::new(),
             counted: None,
+            updates: Updates::from_env(),
+            update_scroll: 0,
+            restart: false,
         }
     }
 
     pub fn take_detach(&mut self) -> bool {
         std::mem::take(&mut self.detach)
+    }
+
+    pub fn take_restart(&mut self) -> Option<PathBuf> {
+        match (std::mem::take(&mut self.restart), &self.updates.install) {
+            (true, Install::Replace(exe)) => Some(exe.clone()),
+            _ => None,
+        }
     }
 
     pub fn set_theme(&mut self, theme: HostTheme) {
@@ -321,6 +359,7 @@ impl App {
 
     pub fn refresh(&mut self, now: Instant) {
         self.drive_launches(now);
+        self.check_updates(now);
         if self.synced.is_some_and(|at| now.duration_since(at) < SYNC_EVERY) {
             return;
         }
@@ -697,6 +736,8 @@ impl App {
             AppEvent::TokenChecked { source, token, result } => self.token_checked(source, &token, result, area)?,
             AppEvent::PeopleLoaded { project, source, result } => self.people_loaded(project, source, result),
             AppEvent::Behind { project, behind } => self.behind_counted(project, &behind),
+            AppEvent::UpdateChecked(result) => self.update_checked(result),
+            AppEvent::Updated(result) => self.updated(result),
             AppEvent::Output(id, bytes) => {
                 if let Some(launch) = self.launches.iter_mut().find(|l| l.term == id) {
                     launch.output(Instant::now());
@@ -788,18 +829,7 @@ impl App {
             }
             return Ok(());
         }
-        if areas.quit.contains(pos) {
-            if left {
-                self.detach = true;
-                self.nav = None;
-            }
-            return Ok(());
-        }
-        if areas.settings.contains(pos) {
-            if left {
-                self.nav = None;
-                self.open_settings();
-            }
+        if self.footer_mouse(&areas, pos, left) {
             return Ok(());
         }
         if areas.list.contains(pos) {
@@ -1749,6 +1779,9 @@ impl App {
             self.settings_mouse(ev, pos, area);
             return Ok(());
         }
+        if matches!(self.overlay, Some(Overlay::Update(_))) {
+            return self.update_mouse(ev, pos, area);
+        }
         let MouseEventKind::Down(button) = ev.kind else { return Ok(()) };
         if let Some(Overlay::PaneMenu { at, pane, actions }) = &self.overlay {
             let (at, pane) = (*at, *pane);
@@ -1793,6 +1826,8 @@ impl App {
             KeyCode::Esc => self.cancel_form(),
             KeyCode::Enter => self.submit_form(area)?,
             KeyCode::Tab => self.toggle_worktree(),
+            KeyCode::Up => self.scroll_update(-1, area),
+            KeyCode::Down => self.scroll_update(1, area),
             KeyCode::Backspace => {
                 if let Some(input) = self.overlay.as_mut().and_then(Overlay::input) {
                     input.pop();
@@ -1828,9 +1863,171 @@ impl App {
             Overlay::RemoveWorkspace { project, workspace, force, removing: false, .. } => {
                 self.remove_worktree(project, workspace, force)
             }
+            Overlay::Update(step) => self.submit_update(step),
             busy => Some(busy),
         };
         Ok(())
+    }
+
+    fn footer_mouse(&mut self, areas: &ui::Areas, pos: Position, left: bool) -> bool {
+        let update = self.update_label().is_some_and(|label| ui::update_button(areas.settings, &label).contains(pos));
+        let hit = update || areas.quit.contains(pos) || areas.settings.contains(pos);
+        if hit && left {
+            self.nav = None;
+            if update {
+                self.open_update();
+            } else if areas.quit.contains(pos) {
+                self.detach = true;
+            } else {
+                self.open_settings();
+            }
+        }
+        hit
+    }
+
+    fn check_updates(&mut self, now: Instant) {
+        if !self.config.check_updates || !self.updates.due(now) {
+            return;
+        }
+        self.updates.checked = Some(now);
+        let (url, tx) = (self.updates.url.clone(), self.tx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(AppEvent::UpdateChecked(update::check(&url, update::CURRENT)));
+        });
+    }
+
+    fn update_checked(&mut self, result: Result<Option<Release>>) {
+        match result {
+            Ok(Some(release)) if !self.updates.installed => {
+                if self.updates.available.as_ref().is_none_or(|known| known.version != release.version) {
+                    self.toast = Some((UPDATE_AVAILABLE, Instant::now()));
+                }
+                self.updates.available = Some(release);
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("cornercase server: the update check failed: {e}"),
+        }
+    }
+
+    fn update_label(&self) -> Option<String> {
+        if self.updates.installed {
+            return Some(RESTART_LABEL.into());
+        }
+        self.updates.available.as_ref().map(|release| format!("↑ {}", release.version))
+    }
+
+    fn open_update(&mut self) {
+        let step = match &self.updates.install {
+            _ if self.updates.installed => UpdateStep::Installed,
+            Install::Replace(_) => UpdateStep::Ask,
+            Install::Command(command) => UpdateStep::Manual(command),
+        };
+        self.update_scroll = 0;
+        self.overlay = Some(Overlay::Update(step));
+    }
+
+    fn update_mouse(&mut self, ev: MouseEvent, pos: Position, area: Rect) -> Result<()> {
+        if let Some(delta) = wheel(ev.kind) {
+            self.scroll_update(delta, area);
+            return Ok(());
+        }
+        let Some(overlay) = &self.overlay else { return Ok(()) };
+        if ev.kind != MouseEventKind::Down(MouseButton::Left) {
+            return Ok(());
+        }
+        let [submit, cancel] = ui::update_buttons(area, overlay.submit_label());
+        if submit.contains(pos) {
+            self.submit_form(area)?;
+        } else if cancel.contains(pos) {
+            self.cancel_form();
+        }
+        Ok(())
+    }
+
+    fn scroll_update(&mut self, delta: isize, area: Rect) {
+        if matches!(self.overlay, Some(Overlay::Update(_))) {
+            let lines = self.update_notes(area).len();
+            self.update_scroll = ui::update_scroll(area, lines, self.update_scroll.saturating_add_signed(delta));
+        }
+    }
+
+    fn update_notes(&self, area: Rect) -> Vec<Line<'static>> {
+        let Some(release) = self.updates.available.as_ref().filter(|r| !r.notes.is_empty()) else {
+            return Vec::new();
+        };
+        let width = usize::from(ui::update_notes(area).width);
+        markdown::render(&format!("**What's new in {}**\n\n{}", release.version, release.notes), width)
+    }
+
+    fn submit_update(&mut self, step: UpdateStep) -> Option<Overlay> {
+        match step {
+            UpdateStep::Ask | UpdateStep::Failed(_) => {
+                let (Some(release), Install::Replace(exe), Some(target)) =
+                    (self.updates.available.clone(), self.updates.install.clone(), update::target())
+                else {
+                    return None;
+                };
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(AppEvent::Updated(update::update(&release, target, &exe)));
+                });
+                Some(Overlay::Update(UpdateStep::Updating))
+            }
+            UpdateStep::Installed => {
+                self.restart = true;
+                None
+            }
+            UpdateStep::Manual(command) => {
+                copy(&mut self.host_writes, &mut self.toast, command);
+                None
+            }
+            UpdateStep::Updating => Some(Overlay::Update(step)),
+        }
+    }
+
+    fn updated(&mut self, result: Result<()>) {
+        let step = match result {
+            Ok(()) => {
+                self.updates.installed = true;
+                UpdateStep::Installed
+            }
+            Err(e) => UpdateStep::Failed(e.to_string()),
+        };
+        if let Some(Overlay::Update(current)) = &mut self.overlay {
+            *current = step;
+        }
+    }
+
+    fn update_view(&self, step: &UpdateStep, area: Rect) -> ui::Overlay {
+        let version = self.updates.available.as_ref().map_or("", |r| r.version.as_str());
+        let current = update::CURRENT;
+        let message = match step {
+            UpdateStep::Installed => format!(
+                "cornercase {version} is installed. Restart to use it: your session comes back, \
+                 with new shells in the same folders."
+            ),
+            UpdateStep::Manual(command) => {
+                format!("cornercase {version} is out (you have {current}). Update it with:\n{command}")
+            }
+            UpdateStep::Ask | UpdateStep::Updating | UpdateStep::Failed(_) => {
+                let exe = match &self.updates.install {
+                    Install::Replace(exe) => ui::display_path(exe, self.home.as_deref()),
+                    Install::Command(_) => String::new(),
+                };
+                format!(
+                    "cornercase {version} is out (you have {current}). Updating replaces {exe}; \
+                     your terminals keep running until you restart."
+                )
+            }
+        };
+        let note = match step {
+            UpdateStep::Updating => Some(ui::Note::Busy("downloading…")),
+            UpdateStep::Failed(error) => Some(ui::Note::Error(error.clone())),
+            _ => None,
+        };
+        let submit = Overlay::Update(step.clone()).submit_label();
+        let notes = self.update_notes(area);
+        ui::Overlay::Update(ui::Update { message, notes, scroll: self.update_scroll, note, submit })
     }
 
     fn open_settings(&mut self) {
@@ -2144,6 +2341,7 @@ impl App {
             overlay,
             toast: self.toast.map(|(message, _)| message),
             nav: self.nav,
+            update: self.update_label(),
         };
         ui::draw(f, &view);
     }
@@ -2203,6 +2401,7 @@ impl App {
             Overlay::Picker(picker) => Self::picker_view(picker, home),
             Overlay::Issues(b) => b.view(area, issues::now()),
             Overlay::Search(search) => self.search_view(search),
+            Overlay::Update(step) => self.update_view(step, area),
         }
     }
 
@@ -3822,7 +4021,7 @@ mod tests {
         fn a_click_on_a_tab_shows_its_rows() {
             let mut s = open();
             show(&mut s.app, Page::Tui);
-            assert_eq!(form(&s.app).rows(), [Row::DimPanes]);
+            assert_eq!(form(&s.app).rows(), [Row::DimPanes, Row::Updates]);
         }
 
         #[test]
@@ -5059,6 +5258,189 @@ mod tests {
                 assert_eq!(secrets::read(&secrets_file(&s), "shortcut_token"), None);
                 assert!(!browser(&s.app).connections.contains_key(&Source::Shortcut));
             }
+        }
+    }
+
+    mod updates {
+        use super::*;
+        use crate::error::Error;
+        use crate::test_util::FakeHttp;
+
+        const LATEST: &str = r#"{"tag_name": "v9.0.0", "assets": []}"#;
+
+        fn release() -> Release {
+            update::release(&serde_json::json!({"tag_name": "v9.0.0", "assets": []})).expect("a release")
+        }
+
+        fn found(install: Install) -> (App, Receiver<AppEvent>) {
+            let (mut app, rx) = empty_app();
+            app.updates.install = install;
+            app.handle_event(AppEvent::UpdateChecked(Ok(Some(release()))), AREA).expect("handle check");
+            (app, rx)
+        }
+
+        fn replaced() -> Install {
+            Install::Replace(PathBuf::from("/opt/cc/bin/cornercase"))
+        }
+
+        fn open(app: &mut App) {
+            let label = app.update_label().expect("an update is shown");
+            click(app, ui::update_button(areas().settings, &label).as_position());
+        }
+
+        fn step(app: &App) -> Option<&UpdateStep> {
+            match &app.overlay {
+                Some(Overlay::Update(step)) => Some(step),
+                _ => None,
+            }
+        }
+
+        fn submit(app: &mut App) {
+            send_key(app, KeyCode::Enter, KeyModifiers::NONE);
+        }
+
+        #[test]
+        fn a_newer_release_shows_a_button_and_a_toast() {
+            let (app, _rx) = found(replaced());
+            assert_eq!(app.update_label().as_deref(), Some("↑ 9.0.0"));
+            assert_eq!(app.toast.map(|(message, _)| message), Some(UPDATE_AVAILABLE));
+        }
+
+        #[test]
+        fn nothing_new_shows_nothing() {
+            let (mut app, _rx) = empty_app();
+            app.handle_event(AppEvent::UpdateChecked(Ok(None)), AREA).expect("handle check");
+            assert_eq!((app.update_label(), app.toast), (None, None));
+        }
+
+        #[test]
+        fn the_button_asks_before_updating() {
+            let (mut app, _rx) = found(replaced());
+            open(&mut app);
+            assert_eq!(step(&app), Some(&UpdateStep::Ask));
+        }
+
+        #[test]
+        fn the_settings_button_still_opens_settings() {
+            let (mut app, _rx) = found(replaced());
+            click(&mut app, areas().settings.as_position());
+            assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
+        }
+
+        fn with_notes(notes: &str) -> (App, Receiver<AppEvent>) {
+            let (mut app, rx) = found(replaced());
+            let body = format!("## Release Notes\n\n{notes}\n\n## Install cornercase 9.0.0\n");
+            let json = serde_json::json!({"tag_name": "v9.0.0", "assets": [], "body": body});
+            app.updates.available = update::release(&json);
+            open(&mut app);
+            (app, rx)
+        }
+
+        fn shown_notes(app: &App) -> Vec<String> {
+            app.update_notes(AREA).iter().map(ToString::to_string).collect()
+        }
+
+        #[test]
+        fn the_dialog_shows_the_release_notes() {
+            let (app, _rx) = with_notes("- Faster startup.");
+            assert_eq!(shown_notes(&app), ["What's new in 9.0.0", "", "• Faster startup."]);
+        }
+
+        #[test]
+        fn the_wheel_scrolls_long_notes() {
+            let notes: Vec<String> = (0..60).map(|i| format!("- change {i}")).collect();
+            let (mut app, _rx) = with_notes(&notes.join("\n"));
+
+            mouse(&mut app, MouseEventKind::ScrollDown, ui::update_notes(AREA).as_position());
+
+            assert_eq!(app.update_scroll, 3);
+        }
+
+        #[test]
+        fn the_dialog_buttons_update_and_cancel() {
+            let (mut app, _rx) = found(replaced());
+            open(&mut app);
+            let [_, cancel] = ui::update_buttons(AREA, UPDATE_SUBMIT);
+            click(&mut app, cancel.as_position());
+            assert!(app.overlay.is_none());
+
+            open(&mut app);
+            let [submit, _] = ui::update_buttons(AREA, UPDATE_SUBMIT);
+            click(&mut app, submit.as_position());
+            assert_eq!(step(&app), Some(&UpdateStep::Updating));
+        }
+
+        #[test]
+        fn a_homebrew_install_offers_to_copy_the_command() {
+            let (mut app, _rx) = found(Install::Command(update::BREW));
+            open(&mut app);
+
+            submit(&mut app);
+
+            assert_eq!(app.take_host_writes(), [clipboard::osc52(update::BREW)]);
+            assert!(app.overlay.is_none());
+        }
+
+        #[test]
+        fn a_finished_update_offers_a_restart() {
+            let (mut app, _rx) = found(replaced());
+            open(&mut app);
+            app.overlay = Some(Overlay::Update(UpdateStep::Updating));
+
+            app.handle_event(AppEvent::Updated(Ok(())), AREA).expect("handle update");
+            submit(&mut app);
+
+            assert_eq!(app.take_restart(), Some(PathBuf::from("/opt/cc/bin/cornercase")));
+            assert_eq!(app.update_label().as_deref(), Some(RESTART_LABEL));
+        }
+
+        #[test]
+        fn a_failed_update_can_be_tried_again() {
+            let (mut app, _rx) = found(replaced());
+            app.overlay = Some(Overlay::Update(UpdateStep::Updating));
+
+            app.handle_event(AppEvent::Updated(Err(Error::Api("no network".into()))), AREA).expect("handle update");
+
+            assert_eq!(step(&app), Some(&UpdateStep::Failed("no network".into())));
+            assert_eq!(app.overlay.as_ref().map(Overlay::submit_label), Some(RETRY_UPDATE_SUBMIT));
+            assert_eq!(app.take_restart(), None);
+        }
+
+        #[test]
+        fn an_update_in_progress_cannot_be_dismissed() {
+            let (mut app, _rx) = found(replaced());
+            app.overlay = Some(Overlay::Update(UpdateStep::Updating));
+
+            send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+            assert_eq!(step(&app), Some(&UpdateStep::Updating));
+        }
+
+        #[test]
+        fn the_check_asks_github_once_a_day() {
+            let server = FakeHttp::start(vec![("GET /releases/latest", 200, LATEST)]);
+            let (mut app, rx) = empty_app();
+            app.updates.enabled = true;
+            app.updates.url = format!("{}/releases/latest", server.url());
+            let now = Instant::now();
+
+            app.refresh(now);
+            pump_until(&mut app, &rx, "the update is found", |app| app.update_label().is_some());
+            app.refresh(now + Duration::from_secs(60));
+
+            assert_eq!(server.requests().len(), 1);
+        }
+
+        #[test]
+        fn the_check_can_be_turned_off() {
+            let (mut app, _rx) = empty_app();
+            app.updates.enabled = true;
+            app.updates.url = "http://127.0.0.1:1/never".into();
+            app.config.check_updates = false;
+
+            app.refresh(Instant::now());
+
+            assert_eq!(app.updates.checked, None);
         }
     }
 }

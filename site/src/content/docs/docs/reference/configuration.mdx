@@ -68,13 +68,14 @@ Modes whose name says *dangerous* are shown in red. Extra arguments are split li
 
 <Screen
   name="settings-tui"
-  crop={[2, 1, 106, 5]}
-  alt="The TUI tab: inactive panes dimmed, in a split tab"
+  crop={[2, 1, 106, 6]}
+  alt="The TUI tab: inactive panes dimmed, in a split tab; check for updates once a day, asks GitHub for the latest release"
 />
 
 | Row | What it sets |
 | --- | --- |
 | **inactive panes** | Dim the panes you aren't typing in, in a split tab. |
+| **check for updates** | *Once a day*: ask GitHub for the latest release when the server starts and then daily, and offer to [update](../../installation/#update) when there is a newer one. *Never*: don't ask. |
 
 ### Keys in the settings modal
 
@@ -115,7 +116,8 @@ Every key is optional: a missing key takes its default. Here is a complete file,
   "auto_accept_trust_prompt": true,
   "trust_prompt_pattern": "trust the files|trust this (folder|directory|workspace|repository)|do you trust|yes, proceed",
   "gh": "gh",
-  "dim_inactive_panes": true
+  "dim_inactive_panes": true,
+  "check_updates": true
 }
 ```
 
@@ -136,6 +138,7 @@ Every key is optional: a missing key takes its default. Here is a complete file,
 | [`trust_prompt_pattern`](#trust_prompt_pattern) | string | see below |
 | [`gh`](#gh) | string | `"gh"` |
 | [`dim_inactive_panes`](#dim_inactive_panes) | boolean | `true` |
+| [`check_updates`](#check_updates) | boolean | `true` |
 
 #### `worktrees_dir`
 
@@ -192,6 +195,10 @@ The GitHub CLI to run for GitHub issues: a name looked up in your `PATH`, or a p
 #### `dim_inactive_panes`
 
 Whether panes you aren't typing in are dimmed, in tabs split into several panes.
+
+#### `check_updates`
+
+Whether cornercase asks GitHub for the latest release, when the server starts and then once a day, to offer an [update](../../installation/#update). Only a request for the latest release is sent, nothing about you. Builds made with `cargo run` never check.
 
 [Agents](../agents/) explains `agent`, `agent_args`, `agent_modes`, `agent_commands` and the trust prompt in depth.
 

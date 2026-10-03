@@ -24,6 +24,7 @@ pub enum Row {
     Folder,
     Fetch,
     DimPanes,
+    Updates,
     Token(Source),
     Tab(&'static str),
     DefaultAgent,
@@ -36,7 +37,7 @@ pub enum Row {
 impl Row {
     pub fn section(&self) -> &'static str {
         match self {
-            Self::Folder | Self::Fetch | Self::DimPanes => "",
+            Self::Folder | Self::Fetch | Self::DimPanes | Self::Updates => "",
             Self::Token(_) => "Accounts",
             Self::Tab(_) => "Sources shown",
             Self::DefaultAgent | Self::Submit | Self::Trust => "Agent",
@@ -49,7 +50,7 @@ impl Row {
             Self::Folder | Self::Fetch => Page::Worktrees,
             Self::DefaultAgent | Self::Submit | Self::Trust | Self::Kind(_) | Self::AddAgent => Page::Agents,
             Self::Token(_) | Self::Tab(_) => Page::Issues,
-            Self::DimPanes => Page::Tui,
+            Self::DimPanes | Self::Updates => Page::Tui,
         }
     }
 }
@@ -185,7 +186,7 @@ impl Settings {
         rows.extend(shown.iter().copied().chain(hidden).map(Row::Tab));
         rows.extend([Row::DefaultAgent, Row::Submit, Row::Trust]);
         rows.extend(self.listed_kinds().into_iter().map(Row::Kind));
-        rows.extend([Row::AddAgent, Row::DimPanes]);
+        rows.extend([Row::AddAgent, Row::DimPanes, Row::Updates]);
         rows.retain(|row| row.page() == self.page);
         rows
     }
@@ -263,6 +264,15 @@ impl Settings {
                 let on = !self.config.dim_inactive_panes;
                 let notice = if on { "inactive panes are dimmed" } else { "every pane looks the same" };
                 self.save(Config { dim_inactive_panes: on, ..self.config.clone() }, notice.into())
+            }
+            Row::Updates => {
+                let on = !self.config.check_updates;
+                let notice = if on {
+                    "cornercase looks for new versions"
+                } else {
+                    "cornercase no longer looks for new versions"
+                };
+                self.save(Config { check_updates: on, ..self.config.clone() }, notice.into())
             }
             Row::Trust => {
                 let on = !self.config.auto_accept_trust_prompt;
@@ -612,6 +622,10 @@ impl Settings {
             Row::DimPanes => {
                 let value = if config.dim_inactive_panes { "[x] dimmed" } else { "[ ] as bright as the active one" };
                 ("inactive panes".into(), value.into(), "in a split tab".into(), false)
+            }
+            Row::Updates => {
+                let value = if config.check_updates { "[x] once a day" } else { "[ ] never" };
+                ("check for updates".into(), value.into(), "asks GitHub for the latest release".into(), false)
             }
             Row::Trust => {
                 let value = if config.auto_accept_trust_prompt { "[x] accepted for you" } else { "[ ] left to you" };
@@ -988,6 +1002,17 @@ mod tests {
             let mut s = settings();
             go_to(&mut s, &Row::DimPanes);
             assert!(!saved(press(&mut s, KeyCode::Enter)).dim_inactive_panes);
+        }
+    }
+
+    mod updates {
+        use super::*;
+
+        #[test]
+        fn checking_for_them_is_a_switch() {
+            let mut s = settings();
+            go_to(&mut s, &Row::Updates);
+            assert!(!saved(press(&mut s, KeyCode::Enter)).check_updates);
         }
     }
 

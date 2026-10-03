@@ -18,6 +18,24 @@ A terminal multiplexer for working on several projects at once, each with its ow
 
 ## Install
 
+```sh
+curl -fsSL https://usecornercase.dev/install.sh | sh
+```
+
+or with Homebrew:
+
+```sh
+brew install usecornercase/tap/cornercase
+```
+
+Prebuilt binaries cover Linux and macOS on x86_64 and arm64.
+
+### Updates
+
+Once a day cornercase asks GitHub for the latest release. When there is a newer one, a ` ↑ 0.2.0 ` button shows up next to ` settings `: it shows what is new, downloads the new binary, checks its checksum and replaces the old one, then offers to restart. Your session comes back after the restart, with new shells in the same folders. Homebrew installs show `brew upgrade cornercase` instead. Turn the check off in ` settings ` → TUI.
+
+### From source
+
 You need:
 
 - Linux or macOS (on macOS, the Xcode Command Line Tools: `xcode-select --install`)
@@ -38,6 +56,7 @@ The first build takes a couple of minutes.
 ```sh
 cornercase              # open the UI (starts the server if needed)
 cornercase kill-server  # stop the server and every shell in it
+cornercase --version    # print the version
 ```
 
 On a fresh server, cornercase reopens your last session: the same projects, workspaces, tabs and splits, each pane with a new shell in its folder.
@@ -61,6 +80,7 @@ Environment variables:
 
 - `SHORTCUT_API_TOKEN`, `LINEAR_API_KEY`: tokens for the issues modal, taking precedence over saved ones.
 - `CORNERCASE_SOCKET`: run a separate server on another socket (its config and session live next to it).
+- `CORNERCASE_RELEASES_URL`: where the update check looks for the latest release (GitHub's API by default).
 
 GitHub issues are read with the [`gh`](https://cli.github.com) CLI, using its login.
 

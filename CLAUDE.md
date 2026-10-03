@@ -22,6 +22,8 @@ npx -y jscpd@4.3.0                          # copy-paste detector, reads .jscpd.
 - **Before calling a task done, run fmt, clippy, tests, `cargo-machete` and jscpd, and fix what fails.** If one cannot pass, say so.
 - **A change that adds, removes or changes a feature updates the website in the same change** (see Website below).
 - `jscpd` fails above 1 % duplication (50-token clones) in `src/` and `tests/`. It is a ratchet: extract the shared code, do not raise the threshold. `cargo-machete` is a text search; a false positive goes in `[package.metadata.cargo-machete] ignored`.
+- **Every pull request that changes the app bumps `version` in `Cargo.toml` and adds a `## <version>` section to `CHANGELOG.md`** (a patch unless told otherwise; the section is written for users, it becomes the release notes and the update dialog's text). "The app" is `src/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.cargo/`; docs, tests and `site/` alone need no bump. CI checks it (`.github/version.sh check`, in the guardrails job). Main requires branches to be up to date, so two pull requests cannot ship the same version.
+- **Releases are automatic**: on a push to `main`, `.github/workflows/version.yml` runs `.github/version.sh release`, which tags `v<version>` if it is new and dispatches `.github/workflows/release.yml` (`dist`, `dispatch-releases`, because a tag pushed with `GITHUB_TOKEN` triggers no workflow). That builds the four targets, makes the GitHub Release (notes from `CHANGELOG.md`) with `cornercase-installer.sh`, and pushes the formula to `usecornercase/homebrew-tap` (secret `HOMEBREW_TAP_TOKEN`, a fine-grained token that expires). If the app changed but the version was already released, the job fails. `release.yml` is generated: change `dist-workspace.toml` or `.github/build-setup.yml` (the Zig step), then run `dist generate`; never edit it by hand. `site/public/install.sh` (served at `usecornercase.dev/install.sh`) runs the latest release's installer.
 - **CI** (`.github/workflows/ci.yml`) runs the same checks: clippy + tests on Linux and macOS (one job per OS so clippy and tests share the Ghostty build; `target/` cached by `Swatinem/rust-cache`, saved from `main` only), and fmt + machete + jscpd on Linux. Dependabot groups action and crate updates monthly; `libghostty-vt` is pinned with `=` (pre-1.0 API), so bumping it needs a manual check.
 
 ## Code conventions
@@ -67,6 +69,7 @@ src/keys.rs       KeyEvent -> bytes (Ghostty's encoder for special keys, legacy 
 src/mouse.rs      MouseEvent -> bytes in the protocol the program asked for
 src/host_theme.rs asks the outer terminal for its colours
 src/git.rs        branch from .git/HEAD, repo roots, linked worktrees (no git process)
+src/update.rs     update check against GitHub releases, download, checksum, binary swap
 src/error.rs      library error type
 ```
 
@@ -145,6 +148,11 @@ src/error.rs      library error type
 - Every shell gets `CORNERCASE=1`; a client seeing it refuses to start (no nesting).
 - `Hello` carries a protocol version and build id; a server from another build rejects the client. Keep `ClientMessage::KillServer` and `ServerMessage::Rejected` as the first variants (`protocol::tests::compatibility`).
 - Socket: `$XDG_RUNTIME_DIR/cornercase/server.sock` or `$TMPDIR/cornercase-<uid>/server.sock`; `CORNERCASE_SOCKET` overrides it. Paths must fit in 108 bytes.
+
+**Updates (`update.rs`)**
+- Release builds only (`debug_assertions` off), so `cargo run` and tests never call GitHub. The server asks `releases/latest` once a day (`check_updates` in config); a newer one shows ` ↑ x.y.z ` at the end of the settings row and a toast. The dialog shows the `## Release Notes` part of the release body (from `CHANGELOG.md`), scrolled by wheel or ↑/↓.
+- Updating downloads `cornercase-<target>.tar.gz` and its `.sha256`, unpacks with `tar` next to the binary, runs `--version` on it (a binary that cannot run here never replaces a working one), then renames it over the old one. Homebrew installs (`/Cellar/`…), a folder we cannot write and unknown platforms get a command to copy instead.
+- The running server keeps the old code. ` restart now ` saves the session, sends `ServerMessage::Restart(path)`, and each client `exec`s the new binary, which starts a new server that restores the session. A new client rejected by an older server asks `[y/N]` on the plain terminal before running `kill-server`.
 
 **Saved session (`state.rs`)**
 - Projects, workspaces, tabs, panes (cwd), split layouts, custom names, active children and column widths, in `$XDG_STATE_HOME/cornercase/session.json` (or next to the socket). Processes are not restored; each pane gets a new shell in its folder.
