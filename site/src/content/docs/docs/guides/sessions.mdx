@@ -44,7 +44,7 @@ It saves once your layout has stayed the same for two seconds, so the burst of s
 
 ## What is restored
 
-Processes can't be saved. When a **new** server starts, after `cornercase kill-server` or a reboot, its first client restores the saved layout: the same projects, workspaces, tabs and splits, each pane with a **fresh shell in its saved folder**. Folders that no longer exist are skipped; a pane whose folder is gone starts in its workspace's folder.
+Processes can't be saved. When a **new** server starts, after `cornercase kill-server`, a reboot or a restart after an [update](../../installation/#update), its first client restores the saved layout: the same projects, workspaces, tabs and splits, each pane with a **fresh shell in its saved folder**. Folders that no longer exist are skipped; a pane whose folder is gone starts in its workspace's folder.
 
 A server that is already running never restores: reattaching just shows what is there.
 
@@ -58,13 +58,16 @@ This ends every shell and program in every pane, and closes all attached clients
 
 ## Updating cornercase
 
-A client only attaches to a server built from the same binary. After you rebuild or update cornercase, the old server is still running, and the new client stops with:
+When you [update](../../installation/#update) from the app, its last step, **restart now**, saves your session, restarts the server on the new binary and reopens every attached terminal on it. Your layout comes back from the saved session; programs that were running, agents included, are stopped, and each pane starts a new shell in its folder.
+
+A client only attaches to a server built from the same binary. If you skip the restart, or update with Homebrew or by rebuilding, the old server keeps running and the next `cornercase` asks:
 
 ```text
-the running cornercase server comes from another build. Run `cornercase kill-server` (it closes all its terminals) and start cornercase again
+The running cornercase server comes from another build; cornercase was probably updated.
+Restart it now? Its terminals close, and your session comes back with new shells in the same folders. [y/N]
 ```
 
-Save your work in the panes, run `cornercase kill-server`, then `cornercase`. Your layout comes back from the saved session.
+Save your work in the panes and answer `y`. Answer anything else to keep the old server for now; restart it later with `cornercase kill-server`, then `cornercase`.
 
 ## A separate server
 

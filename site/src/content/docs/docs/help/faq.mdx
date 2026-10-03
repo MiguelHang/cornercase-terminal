@@ -21,7 +21,7 @@ Yes. Run `cornercase` on the remote machine: the server lives there, your shells
 
 ### Do my shells survive a reboot?
 
-No. Programs live in the server, and the server doesn't survive a reboot or `cornercase kill-server`. What survives is the layout: your projects, workspaces, tabs and splits come back, each pane with a fresh shell in its folder.
+No. Programs live in the server, and the server doesn't survive a reboot, `cornercase kill-server` or a restart after an update. What survives is the layout: your projects, workspaces, tabs and splits come back, each pane with a fresh shell in its folder.
 
 ### Which coding agents does it support?
 
@@ -45,7 +45,15 @@ Yes. cornercase asks your terminal for its colours when it starts and draws its 
 
 ### Which platforms does it run on?
 
-Linux and macOS.
+Linux and macOS, on x86_64 and arm64. The prebuilt Linux binaries need glibc 2.35 or newer; elsewhere, [build from source](../../installation/#from-source).
+
+### How do I update it?
+
+From the app: when a new version is out, a button with its number appears next to `settings`. Click it to update, then restart; your layout comes back with new shells. Homebrew installs update with `brew upgrade cornercase`. See [Update](../../installation/#update).
+
+### Does it phone home?
+
+It asks GitHub for the latest release when the server starts and then once a day. Nothing about you or your projects is sent. Turn it off in **settings → TUI → check for updates**, or with `"check_updates": false` in [`config.json`](../../reference/configuration/#check_updates).
 
 ### Can I run two independent sessions?
 

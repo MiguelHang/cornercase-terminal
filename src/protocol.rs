@@ -39,6 +39,7 @@ pub enum ServerMessage {
     Frame(Vec<u8>),
     Detached,
     Shutdown,
+    Restart(PathBuf),
 }
 
 pub fn send<T: Serialize>(w: &mut impl Write, msg: &T) -> io::Result<()> {

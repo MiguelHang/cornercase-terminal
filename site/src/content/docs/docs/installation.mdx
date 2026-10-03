@@ -1,32 +1,75 @@
 ---
 title: Installation
-description: Build cornercase from source on Linux or macOS with Rust and Zig 0.15.2.
+description: Install cornercase on Linux or macOS with one command or Homebrew, keep it up to date from the app, or build it from source.
 ---
 
 import { Steps, Aside } from '@astrojs/starlight/components';
 
-cornercase is built from source with Cargo. The build also compiles Ghostty's terminal core, which is written in Zig, so you need a Zig compiler of exactly the right version next to Rust.
+cornercase ships as a single binary for Linux and macOS, on x86_64 and arm64. Install it with the install script or with Homebrew; building from source is there for contributors and for platforms without a prebuilt binary.
 
 ## Requirements
+
+| To install | You need |
+| --- | --- |
+| **A prebuilt binary** | **Linux** with glibc 2.35 or newer (Ubuntu 22.04 or later, and similar), or **macOS**. `curl` or `wget` for the install script. |
+| **From source** | Linux or macOS, [rustup](https://rustup.rs), [Zig **0.15.2**](https://ziglang.org/download/) on your `PATH`, `git`, and network access for the first build. See [From source](#from-source). |
+
+Optional, for some features:
+
+- `git`, for [worktrees](../guides/worktrees/).
+- [`gh`](https://cli.github.com), logged in with `gh auth login`, to browse GitHub issues.
+- A coding agent such as Claude Code, Codex or Gemini CLI, to start agents on issues. See [Agents](../reference/agents/) for the full list.
+
+## Install
+
+<Steps>
+
+1. Run the install script:
+
+   ```sh
+   curl -fsSL https://usecornercase.dev/install.sh | sh
+   ```
+
+   It downloads the binary for your system from the latest [GitHub release](https://github.com/usecornercase/cornercase-terminal/releases), puts it in `~/.local/bin` and adds that folder to the `PATH` in your shell profile. Open a new terminal so your shell picks it up.
+
+   Or, with [Homebrew](https://brew.sh):
+
+   ```sh
+   brew install usecornercase/tap/cornercase
+   ```
+
+2. Check that it runs:
+
+   ```sh
+   cornercase --version
+   ```
+
+3. Open a terminal in a project folder and start it:
+
+   ```sh
+   cd ~/code/my-project
+   cornercase
+   ```
+
+   The folder you start from becomes your first project. Continue with [First steps](../first-steps/).
+
+</Steps>
+
+### From source
+
+cornercase is built with Cargo. The build also compiles Ghostty's terminal core, which is written in Zig, so you need a Zig compiler of exactly the right version next to Rust.
 
 | You need | Why |
 | --- | --- |
 | **Linux** or **macOS** | The only supported platforms. On macOS, install the Xcode Command Line Tools: `xcode-select --install`. |
 | [rustup](https://rustup.rs) | The Rust version is pinned in `rust-toolchain.toml`; rustup installs it by itself on the first build. |
 | [Zig **0.15.2**](https://ziglang.org/download/) on your `PATH` | It builds Ghostty's terminal core, which refuses any other Zig version. |
-| `git` | To clone the repository. cornercase also uses it for worktrees. |
+| `git` | To clone the repository. |
 | Network access | Only for the first build, which downloads Ghostty's sources. |
 
 <Aside type="caution" title="Exactly Zig 0.15.2">
 Package managers such as Homebrew may ship a newer Zig. If `zig version` doesn't print `0.15.2`, download that release from [ziglang.org/download](https://ziglang.org/download/), unpack it and put its folder first on your `PATH`.
 </Aside>
-
-Optional, for some features:
-
-- [`gh`](https://cli.github.com), logged in with `gh auth login`, to browse GitHub issues.
-- A coding agent such as Claude Code, Codex or Gemini CLI, to start agents on issues. See [Agents](../reference/agents/) for the full list.
-
-## Install
 
 <Steps>
 
@@ -52,15 +95,6 @@ Optional, for some features:
 
    The first build takes a couple of minutes: it fetches Ghostty's sources and compiles them. Cargo puts the binary in `~/.cargo/bin`, which rustup already added to your `PATH`.
 
-4. Open a terminal in a project folder and start it:
-
-   ```sh
-   cd ~/code/my-project
-   cornercase
-   ```
-
-   The folder you start from becomes your first project. Continue with [First steps](../first-steps/).
-
 </Steps>
 
 <Aside type="tip" title="Building offline">
@@ -69,7 +103,34 @@ If you already have a checkout of Ghostty, point `GHOSTTY_SOURCE_DIR` at it befo
 
 ## Update
 
-Pull the latest changes and install again:
+cornercase updates itself. When the server starts, and then once a day, it asks GitHub for the latest release. That is a single request to GitHub's API; nothing about you or your projects is sent.
+
+When a newer version is out, a toast says *a new cornercase is out* and a button with the new version, such as ` ↑ 0.2.0 `, appears at the right end of the ` settings ` row in the sidebar (in a [small terminal](../guides/small-terminals/), in the same row of the menu's footer). Click it:
+
+<Steps>
+
+1. The **update** dialog tells you which version is out and which one you have, and what is new in it. Scroll long release notes with the wheel or `↑` `↓`.
+
+2. Click **update**. cornercase downloads the binary for your system, checks it against its checksum, makes sure the new binary runs on this machine, and only then replaces the old one. If something fails, the error shows in red, the old binary stays, and the button becomes **try again**.
+
+3. Click **restart now**. cornercase saves your session, restarts the server on the new binary, and every attached terminal reopens on it. Your projects, workspaces, tabs and splits come back, but running programs don't survive: each pane gets a new shell in its folder, so an agent at work is stopped.
+
+</Steps>
+
+Not ready to restart? Click **cancel**: the old version keeps running, and the sidebar button becomes ` ↻ restart ` for later. The next natural restart of the server, after `cornercase kill-server` or a reboot, also starts the new version, and running `cornercase` from another terminal against the old server asks whether to restart it (see [Command line](../reference/command-line/#a-server-from-another-build)).
+
+When cornercase can't replace its own binary, because Homebrew installed it, because you can't write to its folder, or because it doesn't know your platform, the dialog shows the command to run instead, with a **copy command** button:
+
+```sh
+brew upgrade cornercase                              # Homebrew
+curl -fsSL https://usecornercase.dev/install.sh | sh  # everything else
+```
+
+To turn the check off, set **settings → TUI → check for updates** to *never*, or `check_updates` to `false` in [`config.json`](../reference/configuration/#check_updates).
+
+### Builds from source
+
+Pull the latest changes and install again; the next `cornercase` offers to restart the old server:
 
 ```sh
 cd cornercase-terminal
@@ -77,27 +138,20 @@ git pull
 cargo install --path . --locked
 ```
 
-A client never attaches to a server from another build, so after updating, the next `cornercase` stops with:
-
-```text
-the running cornercase server comes from another build. Run `cornercase kill-server` (it closes all its terminals) and start cornercase again
-```
-
-Finish what is running in your panes, then restart the server:
-
-```sh
-cornercase kill-server
-cornercase
-```
-
-Your projects, workspaces, tabs and splits come back, each pane with a fresh shell in its folder. See [Sessions and the server](../guides/sessions/) for what is kept.
+A build from source checks for updates too, and updating from the app replaces it with the prebuilt binary. To stay on your own builds, turn the check off. Builds made with `cargo run` never check.
 
 ## Uninstall
 
+Stop the server, then remove the binary the way you installed it:
+
 ```sh
 cornercase kill-server
-cargo uninstall cornercase
+rm ~/.local/bin/cornercase    # install script
+brew uninstall cornercase     # Homebrew
+cargo uninstall cornercase    # from source
 ```
+
+The install script also added `~/.local/bin` to the `PATH` in your shell profile; you can leave that line, other programs install there too.
 
 Then remove what cornercase saved, if you don't want to keep it:
 

@@ -103,6 +103,7 @@ export interface Config {
   submit: boolean;
   trust: boolean;
   dim: boolean;
+  updates: boolean;
   agentArgs: Record<string, string[]>;
   sources: string[];
   accounts: { shortcut: boolean; linear: boolean };
@@ -114,6 +115,7 @@ export const defaultConfig = (): Config => ({
   submit: false,
   trust: true,
   dim: true,
+  updates: true,
   agentArgs: { claude: ['--permission-mode', 'plan'] },
   sources: ['all', 'github', 'shortcut', 'linear'],
   accounts: { shortcut: false, linear: false },

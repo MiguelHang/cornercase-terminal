@@ -9,6 +9,7 @@ import { Aside } from '@astrojs/starlight/components';
 
 | File | What it holds | Default location |
 | --- | --- | --- |
+| `cornercase` | The program itself. An [update](../../installation/#update) from the app replaces it in place. | `~/.local/bin/` with the install script; Homebrew's or Cargo's `bin` folder otherwise |
 | `config.json` | Your [settings](../configuration/). | `~/.config/cornercase/` |
 | `secrets.json` | Shortcut and Linear tokens typed in the app. Readable only by you (mode `0600`); removed when its last token is. | Next to `config.json` |
 | `session.json` | The [saved session](../../guides/sessions/#what-is-saved): projects, workspaces, tabs, splits, widths. | `~/.local/state/cornercase/` |
@@ -33,6 +34,7 @@ When `CORNERCASE_SOCKET` is set, everything moves next to that socket, so a sepa
 ### Elsewhere on disk
 
 - **Worktrees** that cornercase creates go in `~/.cornercase/worktrees/<repository>/<branch>`, or in the folder set in [settings](../configuration/#worktrees). They are ordinary git worktrees: `git worktree list` shows them.
+- While it [updates](../../installation/#update), cornercase unpacks the download in a hidden `.cornercase-update-<pid>` folder next to its binary, and removes it when done.
 - Inside your projects, cornercase only changes what you ask for: the worktrees you create (which git records in the repository's `.git` folder) and the files `.worktreeinclude` copies into them.
 
 ## Environment variables
@@ -49,10 +51,11 @@ When `CORNERCASE_SOCKET` is set, everything moves next to that socket, so a sepa
 | `XDG_CONFIG_HOME` | Folder for `config.json` and `secrets.json`. |
 | `XDG_STATE_HOME` | Folder for `session.json` and `issues.json`. |
 | `XDG_RUNTIME_DIR`, `TMPDIR` | Folder for the socket, lock and log. |
+| `CORNERCASE_RELEASES_URL` | Where the update check asks for the latest release. Meant for testing; the default is `https://api.github.com/repos/usecornercase/cornercase-terminal/releases/latest`. |
 | `CORNERCASE_SHORTCUT_API`, `CORNERCASE_LINEAR_API` | Base URL of the Shortcut REST API and of the Linear GraphQL API. Meant for testing; the defaults are `https://api.app.shortcut.com/api/v3` and `https://api.linear.app/graphql`. |
 
 <Aside type="caution" title="The server keeps the environment it started with">
-The server is started by the first `cornercase` you run, and keeps that command's environment for as long as it runs. Variables such as `SHELL`, `SHORTCUT_API_TOKEN` or `LINEAR_API_KEY` are read then. After changing them, run `cornercase kill-server` and start again.
+The server is started by the first `cornercase` you run, and keeps that command's environment for as long as it runs. Variables such as `SHELL`, `SHORTCUT_API_TOKEN`, `LINEAR_API_KEY` or `CORNERCASE_RELEASES_URL` are read then. After changing them, run `cornercase kill-server` and start again.
 </Aside>
 
 ### Set by cornercase in every pane

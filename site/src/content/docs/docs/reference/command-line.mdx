@@ -10,6 +10,7 @@ cornercase has a deliberately small command line. Everything else happens in the
 ```sh
 cornercase              # open the UI, starting the server if needed
 cornercase kill-server  # stop the server and every shell in it
+cornercase --version    # print the version
 ```
 
 ### `cornercase`
@@ -18,9 +19,24 @@ Attaches to the server, starting it first if none is running. A new server resto
 
 When it starts, the client asks your terminal for its colours (it waits at most a second for the answer), then turns on mouse reporting, bracketed paste and unambiguous key reporting. It puts your terminal back the way it was when it exits.
 
+### A server from another build
+
+A client only attaches to a server started from the same binary. After an update, the old server may still be running, so `cornercase` asks on the plain terminal before opening the UI:
+
+```text
+The running cornercase server comes from another build; cornercase was probably updated.
+Restart it now? Its terminals close, and your session comes back with new shells in the same folders. [y/N]
+```
+
+Answer `y` to stop the old server and start one on the new binary: your projects, workspaces, tabs and splits come back, each pane with a new shell in its folder. Any other answer leaves the old server running and exits with the [message](#messages) below. When the input isn't a terminal, as in a script, it doesn't ask.
+
 ### `cornercase kill-server`
 
 Stops the server: every shell and program in every pane ends, and every attached client exits. It waits for the server to be gone before returning. If no server is running on the socket, it prints `no cornercase server is running`.
+
+### `cornercase --version`
+
+Prints the version, such as `cornercase 0.1.0`, and exits. It doesn't touch the server.
 
 ### `cornercase server`
 
@@ -28,7 +44,7 @@ Runs the server itself. You don't need it: `cornercase` starts it in the backgro
 
 ## The socket
 
-All three commands find the server through the same socket: `CORNERCASE_SOCKET` if it is set, otherwise `$XDG_RUNTIME_DIR/cornercase/server.sock` or `$TMPDIR/cornercase-<uid>/server.sock`. Set `CORNERCASE_SOCKET` on every command to work with a [separate server](../../guides/sessions/#a-separate-server):
+The commands find the server through the same socket: `CORNERCASE_SOCKET` if it is set, otherwise `$XDG_RUNTIME_DIR/cornercase/server.sock` or `$TMPDIR/cornercase-<uid>/server.sock`. Set `CORNERCASE_SOCKET` on every command to work with a [separate server](../../guides/sessions/#a-separate-server):
 
 ```sh
 CORNERCASE_SOCKET=/tmp/cc-demo/server.sock cornercase
@@ -40,10 +56,10 @@ CORNERCASE_SOCKET=/tmp/cc-demo/server.sock cornercase kill-server
 | Message | Meaning |
 | --- | --- |
 | `cornercase is already running in this terminal; nesting it is not supported` | You ran `cornercase` inside one of its own panes. Use another terminal. |
-| `the running cornercase server comes from another build. Run cornercase kill-server (it closes all its terminals) and start cornercase again` | You updated or rebuilt cornercase while the old server kept running. |
+| `the running cornercase server comes from another build. Run cornercase kill-server (it closes all its terminals) and start cornercase again` | You updated or rebuilt cornercase while the old server kept running, and didn't [restart it](#a-server-from-another-build). |
 | `the running cornercase server is incompatible with this build. Run cornercase kill-server …` | Same cause, detected while talking to the server. |
 | `failed to start the cornercase server; see <log>` | The server didn't come up within a few seconds. The log next to the socket says why. |
 | `a cornercase server is already running on <socket>` | Printed by `cornercase server` when another server holds the socket's lock. |
-| ``unknown command `…`; use `cornercase` or `cornercase kill-server` `` | Only those two forms exist. |
+| ``unknown command `…`; use `cornercase`, `cornercase kill-server` or `cornercase --version` `` | Only those three forms exist. |
 
 On any of these, `cornercase` exits with a non-zero status.

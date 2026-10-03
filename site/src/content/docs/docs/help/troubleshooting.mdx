@@ -1,6 +1,6 @@
 ---
 title: Troubleshooting
-description: Fixes for the problems you are most likely to meet when building, starting and using cornercase.
+description: Fixes for the problems you are most likely to meet when installing, updating, starting and using cornercase.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -9,7 +9,35 @@ import { Aside } from '@astrojs/starlight/components';
 Most things cornercase can't do are written to `server.log`, next to the socket: usually `$XDG_RUNTIME_DIR/cornercase/server.log`. See [Files and environment](../../reference/files-and-environment/).
 </Aside>
 
-## Building
+## Installing and updating
+
+### `cornercase: command not found` after installing
+
+The install script puts cornercase in `~/.local/bin` and adds that folder to the `PATH` in your shell profile, which only new shells read. Open a new terminal, or run `~/.local/bin/cornercase` directly.
+
+### `GLIBC_2.35' not found`
+
+The prebuilt Linux binaries need glibc 2.35 or newer (Ubuntu 22.04 or later, and similar). On an older system, [build from source](../../installation/#from-source).
+
+### An update fails
+
+The update dialog shows what went wrong in red, keeps the old binary, and offers **try again**:
+
+- *the download does not match its checksum*: the download was cut short or altered on the way. Try again.
+- *the new cornercase does not run here: …*: the new binary was downloaded but couldn't start on this machine, for instance because glibc is older than 2.35. The old one stays in place.
+- *GitHub answered … for …*, or a network error: the download didn't get through. Check your connection and try again later.
+
+You can always update by hand with the install script or `brew upgrade cornercase`; see [Update](../../installation/#update).
+
+### No update shows up
+
+cornercase checks when the server starts and then once a day, and only if **settings → TUI → check for updates** is on; builds made with `cargo run` never check. A server that has been running for less than a day since a release may not have asked yet. When the check itself fails, `server.log` says why, in a line starting with `cornercase server: the update check failed`.
+
+### Turning update checks off
+
+Set **settings → TUI → check for updates** to *never*, or `"check_updates": false` in [`config.json`](../../reference/configuration/#check_updates). cornercase then never contacts GitHub, and you update with the install script or Homebrew when you choose.
+
+## Building from source
 
 ### The build fails in Ghostty or Zig
 
@@ -29,16 +57,18 @@ The first build downloads Ghostty's sources and compiles them, which takes a cou
 
 ## Starting
 
-### "the running cornercase server comes from another build"
+### "The running cornercase server comes from another build"
 
-You installed a new version while the old server is still running, and a client never attaches to a server from another build. Save your work in the panes, then:
+You installed a new version while the old server is still running, and a client never attaches to a server from another build, so `cornercase` asks whether to restart it. Save your work in the panes and answer `y`: your layout comes back, with new shells.
+
+If you answered no, or ran it without a terminal, it stops with *the running cornercase server comes from another build* instead. Restart the server yourself when you're ready:
 
 ```sh
 cornercase kill-server
 cornercase
 ```
 
-Your layout comes back; the shells are new. The same goes for "the running cornercase server is incompatible with this build".
+The same goes for "the running cornercase server is incompatible with this build".
 
 ### "cornercase is already running in this terminal; nesting it is not supported"
 

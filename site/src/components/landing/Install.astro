@@ -1,10 +1,6 @@
 ---
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
-const commands = [
-  'git clone https://github.com/usecornercase/cornercase-terminal.git',
-  'cd cornercase-terminal',
-  'cargo install --path . --locked',
-];
+const install = 'curl -fsSL https://usecornercase.dev/install.sh | sh';
 ---
 
 <section class="section install" id="install" aria-labelledby="install-title">
@@ -12,24 +8,24 @@ const commands = [
     <div class="panel reveal">
       <div class="copy">
         <p class="eyebrow">Install</p>
-        <h2 class="h2" id="install-title">Three commands. <em>Then click.</em></h2>
-        <p class="lead">cornercase builds from source with Cargo. The first build fetches Ghostty's terminal core and takes a couple of minutes.</p>
+        <h2 class="h2" id="install-title">One command. <em>Then click.</em></h2>
+        <p class="lead">A single binary for Linux and macOS, on x86_64 and arm64. Once it's in, cornercase keeps itself up to date.</p>
         <ul class="needs">
-          <li><strong>Linux or macOS</strong><span>on macOS, the Xcode Command Line Tools: <code>xcode-select --install</code></span></li>
-          <li><strong>rustup</strong><span>it installs the pinned Rust version on the first build</span></li>
-          <li><strong>Zig 0.15.2</strong><span>exactly this version, on your <code>PATH</code>: it builds Ghostty's core</span></li>
-          <li><strong>git</strong><span>and network access for the first build</span></li>
+          <li><strong>install script</strong><span>puts <code>cornercase</code> in <code>~/.local/bin</code> and adds it to your <code>PATH</code></span></li>
+          <li><strong>Homebrew</strong><span><code>brew install usecornercase/tap/cornercase</code></span></li>
+          <li><strong>updates</strong><span>a button in the sidebar when a new version is out: one click to update, one to restart</span></li>
+          <li><strong>from source</strong><span>with Rust and Zig 0.15.2: see <a href={`${base}/docs/installation/#from-source`}>building from source</a></span></li>
         </ul>
       </div>
       <div class="term">
         <div class="term-bar">
           <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
           <span>install</span>
-          <button class="copy-btn" type="button" data-copy={commands.join('\n')}>
+          <button class="copy-btn" type="button" data-copy={install}>
             <span class="idle">copy</span><span class="done">copied</span>
           </button>
         </div>
-        <pre><code>{commands.map((c) => <span class="cmd"><span class="ps">$</span>{c}</span>)}<span class="out">   Compiling cornercase v0.1.0</span><span class="out ok">    Finished `release` profile [optimized]</span><span class="cmd"><span class="ps">$</span>cornercase</span><span class="out dim"># opens the UI and starts the server if needed</span><span class="cmd"><span class="ps">$</span>cornercase kill-server</span><span class="out dim"># stops the server and every shell in it</span></code></pre>
+        <pre><code><span class="cmd"><span class="ps">$</span>{install}</span><span class="out dim"># downloads the latest release into ~/.local/bin</span><span class="cmd"><span class="ps">$</span>cornercase --version</span><span class="out ok">cornercase 0.1.0</span><span class="cmd"><span class="ps">$</span>cornercase</span><span class="out dim"># opens the UI and starts the server if needed</span><span class="cmd"><span class="ps">$</span>cornercase kill-server</span><span class="out dim"># stops the server and every shell in it</span></code></pre>
       </div>
     </div>
     <p class="after reveal">
@@ -92,6 +88,16 @@ const commands = [
 
   .needs span {
     color: var(--text-2);
+  }
+
+  .needs code {
+    overflow-wrap: anywhere;
+  }
+
+  .needs a {
+    color: var(--text);
+    text-underline-offset: 4px;
+    text-decoration-color: var(--purple);
   }
 
   .term {
