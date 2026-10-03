@@ -1650,7 +1650,7 @@ export class App {
   paste(text: string): void {
     const o = this.overlay;
     if (o) {
-      if (o.kind === 'newWorkspace' || o.kind === 'rename') o.input += text.replace(/\s+/g, ' ');
+      if (o.kind === 'newWorkspace' || o.kind === 'rename' || o.kind === 'newGroup') o.input += text.replace(/\s+/g, ' ');
       else if (o.kind === 'search') o.query += text;
       else if (o.kind === 'picker') o.filter += text;
       else if (o.kind === 'settings' && o.edit) o.edit.input += o.edit.token ? text.replace(/\s/g, '') : text;
