@@ -1,7 +1,7 @@
 import type { Cursor } from '../term/canvas';
 import { BOLD, Grid, type Rect, contains } from '../term/grid';
 import { AGENTS, FOLDERS, ISSUES, type Issue, MODES, type Tree } from './data';
-import { GROUP_COLOURS, GROUP_ICONS, type Rows, type SidebarRow, dragged, sidebarRows } from './layout';
+import { GROUP_COLOURS, GROUP_ICONS, type Rows, type SidebarRow, activeRow, dragged, layout, sidebarLayout, sidebarRows } from './layout';
 import { render as markdown } from './markdown';
 import {
   type Config,
@@ -65,6 +65,13 @@ type Listener = (event: string, detail?: string) => void;
 
 const SOURCE_NAMES: Record<string, string> = { all: 'All', github: 'GitHub', shortcut: 'Shortcut', linear: 'Linear' };
 const DOUBLE_CLICK = 400;
+
+const RENAME: Record<Target['kind'], { label: string; hint: string }> = {
+  group: { label: 'rename group', hint: 'leave it empty to keep the current name' },
+  project: { label: 'rename project', hint: 'leave it empty to use the folder name' },
+  workspace: { label: 'rename workspace', hint: 'leave it empty to use the branch name' },
+  tab: { label: 'rename tab', hint: 'leave it empty to use the program name' },
+};
 
 export class App {
   cols = 120;
@@ -172,6 +179,7 @@ export class App {
   render(): { grid: Grid; cursor: Cursor | null } {
     if (this.toast && this.toast.until < this.now()) this.toast = null;
     this.grid.reset();
+    this.follow();
     this.frame = new Painter(this, this.grid).draw();
     this.needsDraw = false;
     return { grid: this.grid, cursor: this.frame.cursor };
@@ -258,6 +266,10 @@ export class App {
     this.dirty();
   }
 
+  group(id: number | undefined): Group | undefined {
+    return this.groups.find((g) => g.id === id);
+  }
+
   groupIndex(id: number | undefined): number | null {
     const g = this.groups.findIndex((x) => x.id === id);
     return g >= 0 ? g : null;
@@ -270,14 +282,14 @@ export class App {
     );
   }
 
-  follow(rows: Rows, sidebar: SidebarRow[]): void {
+  private follow(): void {
     const p = this.project();
     if (!p || p.id === this.followed) return;
     this.followed = p.id;
-    const g = this.groupIndex(p.group);
-    let i = sidebar.findIndex((r) => r.kind === 'project' && r.p === this.active);
-    if (i < 0) i = sidebar.findIndex((r) => r.kind === 'group' && r.g === g);
-    if (i >= 0) this.projectsScroll = rows.reveal(i);
+    const { list, pitch } = layout(this.cols, this.rows, this.widths, 'projects');
+    const sidebar = this.sidebarRows();
+    const i = activeRow(sidebar, this.active, this.groupIndex(p.group));
+    if (i >= 0) this.projectsScroll = sidebarLayout(list, pitch, sidebar, this.projectsScroll).reveal(i);
   }
 
   toggleGroup(g: number): void {
@@ -287,9 +299,9 @@ export class App {
     this.dirty();
   }
 
-  addGroup(name: string, icon?: string, colour?: number): Group {
+  addGroup(name: string, colour?: number): Group {
     const n = this.groups.length;
-    const group = { id: this.id(), name, icon: icon ?? GROUP_ICONS[n % GROUP_ICONS.length], colour: colour ?? GROUP_COLOURS[n % GROUP_COLOURS.length], collapsed: false };
+    const group = { id: this.id(), name, icon: GROUP_ICONS[n % GROUP_ICONS.length], colour: colour ?? GROUP_COLOURS[n % GROUP_COLOURS.length], collapsed: false };
     this.groups.push(group);
     return group;
   }
@@ -297,7 +309,7 @@ export class App {
   setGroupStyle(icon?: string, colour?: number): void {
     const o = this.overlay;
     if (o?.kind !== 'groupStyle') return;
-    const g = this.groups.find((x) => x.id === o.group);
+    const g = this.group(o.group);
     if (!g) return this.closeOverlay();
     if (icon !== undefined) g.icon = icon;
     if (colour !== undefined) g.colour = colour;
@@ -490,24 +502,18 @@ export class App {
   }
 
   renameLabel(t: Target): string {
-    return t.kind === 'group' ? 'rename group' : t.kind === 'project' ? 'rename project' : t.kind === 'workspace' ? 'rename workspace' : 'rename tab';
+    return RENAME[t.kind].label;
   }
 
   renameHint(t: Target): string {
-    return t.kind === 'group'
-      ? 'leave it empty to keep the current name'
-      : t.kind === 'project'
-        ? 'leave it empty to use the folder name'
-        : t.kind === 'workspace'
-          ? 'leave it empty to use the branch name'
-          : 'leave it empty to use the program name';
+    return RENAME[t.kind].hint;
   }
 
   menuLabel(a: MenuAction): string {
     if (a.kind === 'rename') return this.renameLabel(a.target);
     if (a.kind === 'moveToGroup') return 'move to group';
     if (a.kind === 'setGroup') {
-      const g = this.groups.find((x) => x.id === a.group);
+      const g = a.group === null ? undefined : this.group(a.group);
       return a.group === null ? 'no group' : g ? `${g.icon} ${g.name}` : '';
     }
     if (a.kind === 'groupStyle') return 'icon and colour';
@@ -517,13 +523,30 @@ export class App {
     return a.action;
   }
 
-  private resolveTarget(t: Target): { p?: Project; w?: Workspace; tab?: Tab } {
-    if (t.kind === 'group') return {};
+  private resolveTarget(t: Exclude<Target, { kind: 'group' }>): { p?: Project; w?: Workspace; tab?: Tab } {
     const p = this.projects.find((x) => x.id === t.project);
     if (t.kind === 'project') return { p };
     const w = p?.workspaces.find((x) => x.id === t.workspace);
     if (t.kind === 'workspace') return { p, w };
     return { p, w, tab: w?.tabs.find((x) => x.id === t.tab) };
+  }
+
+  private currentName(t: Target): string | undefined {
+    if (t.kind === 'group') return this.group(t.group)?.name;
+    const { p, w, tab } = this.resolveTarget(t);
+    return t.kind === 'project' ? p?.name : t.kind === 'workspace' ? w?.name : tab?.name;
+  }
+
+  private rename(t: Target, name: string | undefined): void {
+    if (t.kind === 'group') {
+      const g = this.group(t.group);
+      if (g && name) g.name = name;
+      return;
+    }
+    const { p, w, tab } = this.resolveTarget(t);
+    if (t.kind === 'project' && p) p.name = name;
+    if (t.kind === 'workspace' && w) w.name = name;
+    if (t.kind === 'tab' && tab) tab.name = name;
   }
 
   chooseMenu(i: number): void {
@@ -533,10 +556,7 @@ export class App {
     this.overlay = null;
     if (!a) return this.dirty();
     if (a.kind === 'rename') {
-      const t = a.target;
-      const { p, w, tab } = this.resolveTarget(t);
-      const current = t.kind === 'group' ? this.groups.find((g) => g.id === t.group)?.name : t.kind === 'project' ? p?.name : t.kind === 'workspace' ? w?.name : tab?.name;
-      this.overlay = { kind: 'rename', target: t, input: current ?? '' };
+      this.overlay = { kind: 'rename', target: a.target, input: this.currentName(a.target) ?? '' };
     } else if (a.kind === 'moveToGroup') {
       const current = this.projects.find((x) => x.id === a.project)?.group;
       const actions: MenuAction[] = this.groups.filter((g) => g.id !== current).map((g) => ({ kind: 'setGroup', project: a.project, group: g.id }));
@@ -618,14 +638,7 @@ export class App {
       return;
     }
     if (o.kind === 'rename') {
-      const t = o.target;
-      const { p, w, tab } = this.resolveTarget(t);
-      const name = o.input.trim() || undefined;
-      const group = t.kind === 'group' ? this.groups.find((g) => g.id === t.group) : undefined;
-      if (group && name) group.name = name;
-      if (o.target.kind === 'project' && p) p.name = name;
-      if (o.target.kind === 'workspace' && w) w.name = name;
-      if (o.target.kind === 'tab' && tab) tab.name = name;
+      this.rename(o.target, o.input.trim() || undefined);
       this.overlay = null;
       this.dirty();
       return;
@@ -764,7 +777,7 @@ export class App {
     });
     this.projects.forEach((p, pi) => {
       const project = projectLabel(p);
-      const group = this.groups.find((g) => g.id === p.group)?.name ?? '';
+      const group = this.group(p.group)?.name ?? '';
       all.push({ kind: 0, name: project, context: group, keys: [project], go: () => this.selectProject(pi), order: order++ });
       p.workspaces.forEach((w, wi) => {
         const label = workspaceLabel(w);
@@ -815,7 +828,7 @@ export class App {
   }
 
   private gotoGroup(id: number): void {
-    const g = this.groups.find((x) => x.id === id);
+    const g = this.group(id);
     if (g) g.collapsed = false;
     const first = this.projects.findIndex((p) => p.group === id);
     if (first >= 0) this.active = first;

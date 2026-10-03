@@ -210,11 +210,15 @@ impl Harness {
         self.send(format!("\x1b[<2;{x};{y}M\x1b[<2;{x};{y}m").as_bytes());
     }
 
+    fn pick(&mut self, at: Position, items: &[&str], i: usize) {
+        self.click(ui::menu_item(ui::menu_area(AREA, at, items), i).as_position());
+    }
+
     fn open_new_menu(&mut self, entries: usize, item: usize) {
         let at = ui::new_project_button(list(), 1, &plain(entries)).as_position();
         self.click(at);
         self.wait_for("the new menu opens", |s| s.contains("open project") && s.contains("new group"));
-        self.click(ui::menu_item(ui::menu_area(AREA, at, &NEW_MENU), item).as_position());
+        self.pick(at, &NEW_MENU, item);
     }
 
     fn open_picker(&mut self, entries: usize) {
@@ -859,7 +863,7 @@ fn right_click_renames_a_project() {
 
     app.right_click(at);
     app.wait_for("the menu opens", |s| s.contains("rename project"));
-    app.click(ui::menu_item(ui::menu_area(AREA, at, &["rename project"]), 0).as_position());
+    app.pick(at, &["rename project"], 0);
     app.wait_for("the form opens", |s| s.contains("leave it empty"));
     app.send(&[0x7f; 64]);
     app.send(b"my-api\r");
@@ -884,7 +888,7 @@ fn a_project_moves_into_a_new_group() {
     app.wait_for("the group shows", |s| s.contains(&format!("  ▾ {} work", ui::GROUP_ICONS[0])));
     app.right_click(at);
     app.wait_for("the menu opens", |s| s.contains("move to group"));
-    app.click(ui::menu_item(ui::menu_area(AREA, at, &["rename project", "move to group"]), 1).as_position());
+    app.pick(at, &["rename project", "move to group"], 1);
     let group = format!("{} work", ui::GROUP_ICONS[0]);
     app.wait_for("the groups are listed", |s| s.contains(&format!(" {group} ")) && !s.contains("move to group"));
     app.click(ui::menu_item(ui::menu_area(AREA, at, &[group.as_str()]), 0).as_position());
@@ -903,7 +907,7 @@ fn a_pane_splits_from_its_menu_and_closes_on_exit() {
 
     app.right_click(at);
     app.wait_for("the pane menu opens", |s| s.contains("split right"));
-    app.click(ui::menu_item(ui::menu_area(AREA, at, &items), 0).as_position());
+    app.pick(at, &items, 0);
     app.wait_for("the divider shows", |s| screen_column(s, divider.x).iter().all(|c| *c == '│'));
     app.send(b"stty size\r");
 

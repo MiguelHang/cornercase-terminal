@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::split::{self, Dir, Node};
 use crate::term::Term;
+use crate::ui::GroupEntry;
 
 pub struct Tab {
     pub id: u64,
@@ -143,10 +144,7 @@ impl Workspace {
 
 pub struct Group {
     pub id: u64,
-    pub name: String,
-    pub icon: char,
-    pub colour: u8,
-    pub collapsed: bool,
+    pub entry: GroupEntry,
 }
 
 pub struct Project {

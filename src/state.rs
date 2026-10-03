@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::issues::People;
 use crate::protocol;
 use crate::split::Node;
-use crate::ui::Widths;
+use crate::ui::{GroupEntry, Widths};
 
 pub const VERSION: u32 = 4;
 pub const SETTLE: Duration = Duration::from_secs(2);
@@ -16,7 +16,7 @@ pub const SETTLE: Duration = Duration::from_secs(2);
 pub struct State {
     pub version: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub groups: Vec<GroupState>,
+    pub groups: Vec<GroupEntry>,
     pub projects: Vec<ProjectState>,
     pub active: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -33,15 +33,6 @@ pub struct IssuesState {
     pub closed: bool,
     #[serde(default)]
     pub people: People,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GroupState {
-    pub name: String,
-    pub icon: char,
-    pub colour: u8,
-    #[serde(default)]
-    pub collapsed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -301,8 +292,8 @@ mod tests {
             let path = tmp.path().join("session.json");
             let mut saved = state(&["/a", "/b"]);
             saved.groups = vec![
-                GroupState { name: "work".into(), icon: '●', colour: 4, collapsed: false },
-                GroupState { name: "oss".into(), icon: '★', colour: 99, collapsed: true },
+                GroupEntry { name: "work".into(), icon: '●', colour: 4, collapsed: false },
+                GroupEntry { name: "oss".into(), icon: '★', colour: 99, collapsed: true },
             ];
             saved.projects[1].group = Some(1);
 

@@ -3,10 +3,11 @@ import { BOLD, DIM, INVERSE, type Grid, type Rect, type Style, contains, rect } 
 import type { App } from './app';
 import {
   type Areas,
+  activeRow,
   GROUP_COLOURS,
   GROUP_ICONS,
   Rows,
-  STYLE_DONE,
+  DONE,
   bottom,
   buttonWidth,
   closeButton,
@@ -21,6 +22,7 @@ import {
   pickerArea,
   right,
   rightAligned,
+  sidebarLayout,
   styleColour,
   styleDone,
   styleIcon,
@@ -337,9 +339,8 @@ export class Painter {
     const app = this.app;
     this.title(areas.title, 'projects');
     const sidebar = app.sidebarRows();
-    const scrolled = (scroll: number) => new Rows(areas.list, sidebar.map((s) => (s.kind === 'gap' ? 1 : areas.pitch)), areas.pitch, scroll);
-    app.follow(scrolled(app.projectsScroll), sidebar);
-    const rows = scrolled(app.projectsScroll);
+    const rows = sidebarLayout(areas.list, areas.pitch, sidebar, app.projectsScroll);
+    const marked = activeRow(sidebar, app.active, app.groupIndex(app.project()?.group));
     this.region({ r: areas.list, wheel: (dy) => app.scrollProjects(rows, dy) });
     sidebar.forEach((spec, i) => {
       const r = rows.item(i);
@@ -347,10 +348,9 @@ export class Painter {
       if (spec.kind === 'group') {
         const group = app.groups[spec.g];
         const inside = app.projects.filter((p) => p.group === group.id).length;
-        const holdsActive = app.project()?.group === group.id;
         const count = group.collapsed ? ` (${inside})` : '';
         const max = r.w - 8 - count.length;
-        const line = [seg(group.collapsed && holdsActive ? '▌ ' : '  ', CYAN), seg(group.collapsed ? '▸ ' : '▾ ', DARK), this.groupHeader(group, max), seg(count, DARK)];
+        const line = [seg(i === marked ? '▌ ' : '  ', CYAN), seg(group.collapsed ? '▸ ' : '▾ ', DARK), this.groupHeader(group, max), seg(count, DARK)];
         this.band(r, line, {});
         this.region({ r, click: () => app.toggleGroup(spec.g), right: (x, y) => app.openGroupMenu({ x, y }, spec.g), cursor: 'pointer' });
         return;
@@ -359,7 +359,7 @@ export class Painter {
       const p = app.projects[pi];
       const active = pi === app.active;
       const bg: Style = active ? { bg: this.surface } : {};
-      const indent = p.group !== undefined && app.groups.some((g) => g.id === p.group) ? '  ' : '';
+      const indent = p.group !== undefined ? '  ' : '';
       const reserved = 6 + indent.length + (closeButton(r).w - 3);
       const count = ` (${p.workspaces.length})`;
       const name = truncateRight(projectLabel(p), r.w - reserved - count.length);
@@ -488,10 +488,14 @@ export class Painter {
   private dialogButtons(row: Rect, submit: string, onSubmit: () => void, onCancel: () => void): void {
     const cancel = intersect(rect(right(row) - buttonWidth('cancel'), row.y, buttonWidth('cancel'), 1), row);
     const ok = intersect(rect(cancel.x - buttonWidth(submit) - 1, row.y, buttonWidth(submit), 1), row);
-    this.span(ok.x, ok.y, ` ${submit} `, this.hovered(ok) ? PRESSED : { fg: 6, add: BOLD });
+    this.submitButton(ok, submit, onSubmit);
     this.span(cancel.x, cancel.y, ' cancel ', this.hovered(cancel) ? { fg: 0, bg: 7 } : DARK);
-    this.region({ r: ok, click: onSubmit, cursor: 'pointer' });
     this.region({ r: cancel, click: onCancel, cursor: 'pointer' });
+  }
+
+  private submitButton(r: Rect, label: string, onClick: () => void): void {
+    this.span(r.x, r.y, ` ${label} `, this.hovered(r) ? PRESSED : { fg: 6, add: BOLD }, r.w);
+    this.region({ r, click: onClick, cursor: 'pointer' });
   }
 
   private input(row: Rect, label: string, value: string): void {
@@ -533,7 +537,8 @@ export class Painter {
 
   private groupStyle(id: number): void {
     const app = this.app;
-    const group = app.groups.find((g) => g.id === id) ?? { id, name: '', icon: GROUP_ICONS[0], colour: GROUP_COLOURS[0], collapsed: false };
+    const group = app.group(id);
+    if (!group) return;
     const { cols, rows } = app;
     this.backdrop(false);
     this.box(formArea(cols, rows), group.name);
@@ -558,8 +563,7 @@ export class Painter {
     const done = styleDone(cols, rows);
     const max = Math.max(0, last.w - done.w - 5);
     this.line(last, [seg('▾ ', DARK), this.groupHeader(group, max)]);
-    this.span(done.x, done.y, ` ${STYLE_DONE} `, this.hovered(done) ? PRESSED : { fg: 6, add: BOLD }, done.w);
-    this.region({ r: done, click: () => app.closeOverlay(), cursor: 'pointer' });
+    this.submitButton(done, DONE, () => app.closeOverlay());
   }
 
   private confirm(): void {
@@ -680,9 +684,7 @@ export class Painter {
     const note = o.busy ?? o.edit?.error ?? o.notice ?? app.settingsHint(o);
     this.span(noteRow.x, noteRow.y, truncateRight(note, noteRow.w), o.edit?.error && !o.busy ? { fg: 1 } : DARK);
     if (o.busy) this.cursor = null;
-    const done = rightAligned(buttonsRow, ['done'], buttonWidth, 1)[0];
-    this.span(done.x, done.y, ' done ', this.hovered(done) ? PRESSED : { fg: 6, add: BOLD });
-    this.region({ r: done, click: () => app.closeOverlay(), cursor: 'pointer' });
+    this.submitButton(rightAligned(buttonsRow, [DONE], buttonWidth, 1)[0], DONE, () => app.closeOverlay());
   }
 
   private issues(o: IssuesOverlay): void {

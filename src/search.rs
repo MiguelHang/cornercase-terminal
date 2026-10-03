@@ -6,12 +6,10 @@ pub enum Kind {
     Tab,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Goto {
-    pub group: Option<u64>,
-    pub project: Option<u64>,
-    pub workspace: Option<u64>,
-    pub tab: Option<u64>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Goto {
+    Group(u64),
+    Place { project: u64, workspace: Option<u64>, tab: Option<u64> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,7 +120,7 @@ mod tests {
     fn candidate(kind: Kind, name: &str, keys: &[&str]) -> Candidate {
         Candidate {
             kind,
-            goto: Goto { project: Some(1), ..Goto::default() },
+            goto: Goto::Group(1),
             name: name.into(),
             context: String::new(),
             keys: keys.iter().map(|k| (*k).to_string()).collect(),

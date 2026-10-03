@@ -51,7 +51,6 @@ const BEHIND_ICON: &str = "↓";
 const GROUP_INDENT: &str = "  ";
 pub const GROUP_ICONS: [char; 12] = ['●', '◉', '◐', '◆', '■', '▲', '▼', '★', '✦', '♥', '♣', '♠'];
 pub const GROUP_COLOURS: [u8; 16] = [1, 9, 208, 214, 3, 11, 2, 10, 6, 14, 4, 12, 99, 5, 13, 205];
-pub const STYLE_DONE: &str = "done";
 const ICONS_PER_ROW: usize = 6;
 const COLOURS_PER_ROW: usize = 8;
 const ICON_CELL: u16 = 3;
@@ -441,14 +440,26 @@ pub fn sidebar_rows(groups: &[Option<usize>], collapsed: &[bool]) -> Vec<Sidebar
     rows
 }
 
-pub fn project_rows(list: Rect, pitch: u16, rows: &[SidebarRow], scroll: usize) -> Rows {
-    let heights = rows.iter().map(|r| if *r == SidebarRow::Gap { GAP } else { pitch }).collect();
+pub fn active_row(rows: &[SidebarRow], project: usize, group: Option<usize>) -> Option<usize> {
+    let find = |row: SidebarRow| rows.iter().position(|r| *r == row);
+    find(SidebarRow::Project(project)).or_else(|| find(SidebarRow::Group(group?)))
+}
+
+fn gapped_rows<R: PartialEq>(list: Rect, pitch: u16, rows: &[R], gap: &R, scroll: usize) -> Rows {
+    let heights = rows.iter().map(|r| if r == gap { GAP } else { pitch }).collect();
     Rows { list, heights, button: pitch, scroll }
 }
 
+fn row_rect<R: PartialEq>(layout: &Rows, rows: &[R], row: &R) -> Rect {
+    rows.iter().position(|r| r == row).map_or_else(Rect::default, |i| layout.item(i))
+}
+
+pub fn project_rows(list: Rect, pitch: u16, rows: &[SidebarRow], scroll: usize) -> Rows {
+    gapped_rows(list, pitch, rows, &SidebarRow::Gap, scroll)
+}
+
 pub fn entry_row(list: Rect, pitch: u16, rows: &[SidebarRow], scroll: usize, row: SidebarRow) -> Rect {
-    let Some(i) = rows.iter().position(|r| *r == row) else { return Rect::default() };
-    project_rows(list, pitch, rows, scroll).item(i)
+    row_rect(&project_rows(list, pitch, rows, scroll), rows, &row)
 }
 
 pub fn close_button(list: Rect, pitch: u16, rows: &[SidebarRow], scroll: usize, p: usize) -> Rect {
@@ -507,8 +518,7 @@ pub fn workspace_rows(tabs: &[usize]) -> Vec<WorkspaceRow> {
 }
 
 pub fn workspace_layout(list: Rect, pitch: u16, tabs: &[usize], scroll: usize) -> Rows {
-    let heights = workspace_rows(tabs).iter().map(|r| if *r == WorkspaceRow::Gap { GAP } else { pitch }).collect();
-    Rows { list, heights, button: pitch, scroll }
+    gapped_rows(list, pitch, &workspace_rows(tabs), &WorkspaceRow::Gap, scroll)
 }
 
 pub fn new_workspace_button(list: Rect, pitch: u16, tabs: &[usize]) -> Rect {
@@ -516,8 +526,7 @@ pub fn new_workspace_button(list: Rect, pitch: u16, tabs: &[usize]) -> Rect {
 }
 
 pub fn workspace_row(list: Rect, pitch: u16, tabs: &[usize], scroll: usize, row: WorkspaceRow) -> Rect {
-    let Some(i) = workspace_rows(tabs).iter().position(|r| *r == row) else { return Rect::default() };
-    workspace_layout(list, pitch, tabs, scroll).item(i)
+    row_rect(&workspace_layout(list, pitch, tabs, scroll), &workspace_rows(tabs), &row)
 }
 
 pub fn row_close_button(row: Rect) -> Rect {
@@ -670,9 +679,7 @@ pub fn style_colour(area: Rect, i: usize) -> Rect {
 }
 
 pub fn style_done(area: Rect) -> Rect {
-    let last = style_rows(area)[4];
-    let width = button_width(STYLE_DONE).min(last.width);
-    Rect { x: last.right() - width, width, ..last }
+    update_button(style_rows(area)[4], crate::settings::DONE)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -683,13 +690,14 @@ pub enum StyleHit {
 }
 
 pub fn style_hit(area: Rect, pos: Position) -> Option<StyleHit> {
-    if style_done(area).contains(pos) {
+    let [_, icons, _, colours, last] = style_rows(area);
+    if update_button(last, crate::settings::DONE).contains(pos) {
         return Some(StyleHit::Done);
     }
-    (0..GROUP_ICONS.len())
-        .find(|&i| style_icon(area, i).contains(pos))
+    let cell = |grid, per_row, width, count| (0..count).find(|&i| grid_cell(grid, per_row, width, i).contains(pos));
+    cell(icons, ICONS_PER_ROW, ICON_CELL, GROUP_ICONS.len())
         .map(StyleHit::Icon)
-        .or_else(|| (0..GROUP_COLOURS.len()).find(|&i| style_colour(area, i).contains(pos)).map(StyleHit::Colour))
+        .or_else(|| cell(colours, COLOURS_PER_ROW, COLOUR_CELL, GROUP_COLOURS.len()).map(StyleHit::Colour))
 }
 
 pub fn picker_area(area: Rect) -> Rect {
@@ -1227,11 +1235,19 @@ pub struct ProjectEntry {
     pub group: Option<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupEntry {
     pub name: String,
     pub icon: char,
     pub colour: u8,
+    #[serde(default)]
     pub collapsed: bool,
+}
+
+impl GroupEntry {
+    pub fn label(&self) -> String {
+        format!("{} {}", self.icon, self.name)
+    }
 }
 
 pub struct WorkspaceEntry {
@@ -1530,13 +1546,13 @@ fn draw_group_style(f: &mut Frame, view: &View, group: &GroupEntry) {
     let r = form_area(area);
     f.render_widget(Clear, r);
     f.render_widget(overlay_block(&group.name), r);
-    let [icon_label, _, colour_label, _, last] = style_rows(area);
+    let [icon_label, icons, colour_label, colours, last] = style_rows(area);
     let dim = Style::default().fg(Color::DarkGray);
     f.render_widget(Paragraph::new(Span::styled("icon", dim)), icon_label);
     f.render_widget(Paragraph::new(Span::styled("colour", dim)), colour_label);
     let selected = Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD);
     for (i, &icon) in GROUP_ICONS.iter().enumerate() {
-        let cell = style_icon(area, i);
+        let cell = grid_cell(icons, ICONS_PER_ROW, ICON_CELL, i);
         let style = if icon == group.icon {
             selected
         } else if hovered(view, cell) {
@@ -1547,7 +1563,7 @@ fn draw_group_style(f: &mut Frame, view: &View, group: &GroupEntry) {
         f.render_widget(Paragraph::new(Span::styled(format!(" {icon} "), style)), cell);
     }
     for (i, &colour) in GROUP_COLOURS.iter().enumerate() {
-        let cell = style_colour(area, i);
+        let cell = grid_cell(colours, COLOURS_PER_ROW, COLOUR_CELL, i);
         let (open, close, edge) = if colour == group.colour {
             ("[", "]", Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
         } else if hovered(view, cell) {
@@ -1562,13 +1578,11 @@ fn draw_group_style(f: &mut Frame, view: &View, group: &GroupEntry) {
         ]);
         f.render_widget(Paragraph::new(line), cell);
     }
-    let done = style_done(area);
+    let done = update_button(last, crate::settings::DONE);
     let max = usize::from(last.width.saturating_sub(done.width)).saturating_sub(5);
     let preview = Line::from(vec![Span::styled("▾ ", dim), group_header(group, max)]);
     f.render_widget(Paragraph::new(preview), last);
-    let style =
-        if hovered(view, done) { selected } else { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) };
-    f.render_widget(Paragraph::new(Span::styled(format!(" {STYLE_DONE} "), style)), done);
+    draw_submit(f, view, done, crate::settings::DONE);
 }
 
 fn draw_note(f: &mut Frame, note: Option<&Note>, r: Rect) {
@@ -1608,15 +1622,19 @@ fn draw_update(f: &mut Frame, view: &View, update: &Update) {
     draw_dialog_buttons(f, view, update_buttons(f.area(), update.submit), update.submit);
 }
 
-fn draw_dialog_buttons(f: &mut Frame, view: &View, [submit, cancel]: [Rect; 2], label: &str) {
-    let dim = Style::default().fg(Color::DarkGray);
-    let submit_style = if hovered(view, submit) {
+fn draw_submit(f: &mut Frame, view: &View, r: Rect, label: &str) {
+    let style = if hovered(view, r) {
         Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
     };
+    f.render_widget(Paragraph::new(Span::styled(format!(" {label} "), style)), r);
+}
+
+fn draw_dialog_buttons(f: &mut Frame, view: &View, [submit, cancel]: [Rect; 2], label: &str) {
+    let dim = Style::default().fg(Color::DarkGray);
     let cancel_style = if hovered(view, cancel) { Style::default().fg(Color::Black).bg(Color::Gray) } else { dim };
-    f.render_widget(Paragraph::new(Span::styled(format!(" {label} "), submit_style)), submit);
+    draw_submit(f, view, submit, label);
     f.render_widget(Paragraph::new(Span::styled(format!(" {CANCEL_LABEL} "), cancel_style)), cancel);
 }
 
@@ -1754,13 +1772,7 @@ fn draw_settings(f: &mut Frame, view: &View, settings: &Settings) {
         None => (settings.hint.as_str(), dim),
     };
     f.render_widget(Paragraph::new(Span::styled(truncate_right(text, usize::from(note.width)), style)), note);
-    let done = settings_done(r);
-    let done_style = if hovered(view, done) {
-        Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-    };
-    f.render_widget(Paragraph::new(Span::styled(format!(" {} ", settings.submit), done_style)), done);
+    draw_submit(f, view, settings_done(r), settings.submit);
     if let Some(pos) = cursor.filter(|_| !matches!(settings.note, Some(Note::Busy(_)))) {
         f.set_cursor_position(pos);
     }
@@ -2255,6 +2267,8 @@ fn draw_quit_button(f: &mut Frame, view: &View, r: Rect) {
 }
 
 fn draw_entries(f: &mut Frame, view: &View, rows: &Rows, sidebar: &[SidebarRow]) {
+    let group = view.projects.get(view.active).and_then(|p| p.group);
+    let active = active_row(sidebar, view.active, group).filter(|_| view.has_project);
     for (i, &row) in sidebar.iter().enumerate() {
         let r = rows.item(i);
         if r.is_empty() {
@@ -2262,16 +2276,15 @@ fn draw_entries(f: &mut Frame, view: &View, rows: &Rows, sidebar: &[SidebarRow])
         }
         match row {
             SidebarRow::Gap => {}
-            SidebarRow::Group(g) => draw_group(f, view, g, r),
+            SidebarRow::Group(g) => draw_group(f, view, g, r, active == Some(i)),
             SidebarRow::Project(p) => draw_project(f, view, p, r),
         }
     }
 }
 
-fn draw_group(f: &mut Frame, view: &View, g: usize, r: Rect) {
+fn draw_group(f: &mut Frame, view: &View, g: usize, r: Rect, holds_active: bool) {
     let group = &view.groups[g];
-    let holds_active = view.has_project && view.projects.get(view.active).is_some_and(|p| p.group == Some(g));
-    let marker = if group.collapsed && holds_active { "▌ " } else { "  " };
+    let marker = if holds_active { "▌ " } else { "  " };
     let (arrow, count) = if group.collapsed {
         ("▸ ", format!(" ({})", view.projects.iter().filter(|p| p.group == Some(g)).count()))
     } else {

@@ -19,7 +19,7 @@ const ISSUES_HEIGHT = 30;
 
 export const GROUP_ICONS = ['●', '◉', '◐', '◆', '■', '▲', '▼', '★', '✦', '♥', '♣', '♠'];
 export const GROUP_COLOURS = [1, 9, 208, 214, 3, 11, 2, 10, 6, 14, 4, 12, 99, 5, 13, 205];
-export const STYLE_DONE = 'done';
+export const DONE = 'done';
 const ICONS_PER_ROW = 6;
 const COLOURS_PER_ROW = 8;
 const ICON_CELL = 3;
@@ -39,6 +39,14 @@ export function sidebarRows(groups: (number | null)[], collapsed: boolean[]): Si
     if (!folded) rows.push(...inGroup(g));
   });
   return rows;
+}
+
+export const sidebarLayout = (list: Rect, pitch: number, rows: SidebarRow[], scroll: number) =>
+  new Rows(list, rows.map((s) => (s.kind === 'gap' ? GAP : pitch)), pitch, scroll);
+
+export function activeRow(rows: SidebarRow[], active: number, group: number | null): number {
+  const own = rows.findIndex((r) => r.kind === 'project' && r.p === active);
+  return own >= 0 ? own : rows.findIndex((r) => r.kind === 'group' && r.g === group);
 }
 
 export interface Widths {
@@ -335,8 +343,4 @@ export const styleLabels = (cols: number, rows: number): [Rect, Rect, Rect] => {
 export const styleIcon = (cols: number, rows: number, i: number) => gridCell(styleRows(cols, rows)[1], ICONS_PER_ROW, ICON_CELL, i);
 export const styleColour = (cols: number, rows: number, i: number) => gridCell(styleRows(cols, rows)[3], COLOURS_PER_ROW, COLOUR_CELL, i);
 
-export function styleDone(cols: number, rows: number): Rect {
-  const last = styleRows(cols, rows)[4];
-  const w = Math.min(buttonWidth(STYLE_DONE), last.w);
-  return rect(right(last) - w, last.y, w, last.h);
-}
+export const styleDone = (cols: number, rows: number): Rect => rightAligned(styleRows(cols, rows)[4], [DONE], buttonWidth, 1)[0];
