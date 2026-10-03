@@ -1,6 +1,6 @@
 # cornercase
 
-A terminal multiplexer TUI in Rust. A sidebar of **projects** (folders, optionally in **groups** with an icon and a colour), a column with the active project's **workspaces** (lines of work, optionally each in its own git worktree) and their **tabs** (one or more shells, split like Ghostty), and the active tab's panes. Everything is driven by mouse buttons. An issues modal (GitHub, Shortcut, Linear) reads an issue and starts a coding agent on it in its own worktree. A background server owns the shells, so closing the UI leaves them running and the next `cornercase` reattaches.
+A terminal multiplexer TUI in Rust. A sidebar of **projects** (folders, optionally in **groups** with an icon and a colour), a column with the active project's **workspaces** (lines of work, optionally each in its own git worktree) and their **tabs** (one or more shells, split like Ghostty), the active tab's panes, and an optional **changes** panel on the right with the workspace's git diff. Everything is driven by mouse buttons. An issues modal (GitHub, Shortcut, Linear) reads an issue and starts a coding agent on it in its own worktree. A background server owns the shells, so closing the UI leaves them running and the next `cornercase` reattaches.
 
 ## Commands
 
@@ -57,6 +57,7 @@ src/issues/       issue model and clients: github.rs (gh CLI), shortcut.rs (REST
 src/clipboard.rs  OSC 52
 src/worktree.rs   `git worktree add`/`remove`, checkout path, `.worktreeinclude`
 src/upstream.rs   `git fetch` and commits to pull per workspace (`↓n`)
+src/changes/      changes panel: mod.rs (panel state, refresh pacing, folds, viewed, branch picker, tints), git.rs (git commands, base, merge-base), diff.rs (patch parser, word emphasis, highlighting)
 src/search.rs     global search: candidates, ranking, state
 src/picker.rs     folder picker state
 src/process.rs    a pid's cwd, name and arguments: /proc on Linux, libproc and sysctl on macOS
@@ -65,7 +66,7 @@ src/split.rs      a tab's split tree: rects, dividers, splitting, removing, rati
 src/app.rs        App state; turns AppEvents into actions; builds the View
 src/term.rs       a shell in a PTY, its Emulator, and the reader thread
 src/emulator.rs   wraps libghostty-vt; takes plain Snapshots for ui
-src/ui.rs         layout, hit testing and drawing from a plain View (no PTYs)
+src/ui.rs         layout, hit testing and drawing from a plain View (no PTYs); ui/changes.rs draws the changes panel
 src/keys.rs       KeyEvent -> bytes (Ghostty's encoder for special keys, legacy encoder for the rest)
 src/mouse.rs      MouseEvent -> bytes in the protocol the program asked for
 src/host_theme.rs asks the outer terminal for its colours
@@ -118,6 +119,14 @@ src/error.rs      library error type
 - `.worktreeinclude`: files matching it **and** ignored by git are copied into a new checkout. Matching is delegated to git (`ls-files`, `check-ignore`).
 - **Commits to pull** (`↓n` at the end of a workspace row, before the `×`): every 3 s a thread per project counts `HEAD..@{upstream}` in each workspace and answers with `AppEvent::Behind`; it runs `git fetch --all` first once `fetch_minutes` (default 5, 0 turns all of it off) have passed. One thread per project at a time. Git never prompts (`GIT_TERMINAL_PROMPT=0`, empty `GIT_ASKPASS`, `SSH_ASKPASS_REQUIRE=never`); failures count as 0.
 
+**Changes panel (`changes/`, `ui/changes.rs`)**
+- Git workspaces only: ` changes n ` next to ` issues ` (` ± ` in the compact bar) opens a fourth column right of the pane (full screen in compact mode). Its border drags; its width is `Widths::changes` (`None` = half the free space, at most `DEFAULT_WIDTH`).
+- Tabs: uncommitted (`git diff HEAD` + untracked), commits (`git diff <merge-base> HEAD`), all (`git diff <merge-base>` + untracked). The base is `Workspace::base` (saved per workspace) or the default branch: `origin/HEAD`, else `main`/`master`. Comparing from the merge-base keeps commits made on the base later out of the diff.
+- Git runs on a thread, one job at a time, every second while open and every 3 s while closed (for the button's count). Flags matter: `--no-optional-locks` and `-c diff.autoRefreshIndex=false`, because a plain `git diff` rewrites `.git/index` (takes `index.lock`) even with `--no-optional-locks` and would fight an agent's `git commit`. `--relative` keeps paths inside the workspace folder. Untracked files are read directly (never `git add -N`), capped at 1 MiB, NUL in the first 8000 bytes means binary; a symlink shows its target path, like git, never the file it points to. The branch list and "unchanged lines" also run on threads and answer with `AppEvent::Branches` / `AppEvent::Gap`.
+- The job hashes git's output; an unchanged hash answers without a diff, and files whose patch section did not change are reused, so highlighting runs only for what changed. syntect costs ~150-200 µs per line, far more than computing the diff.
+- Rendering: lines paired delta-style (word tokens, changed share ≤ 60 %) get word emphasis; each hunk side (context + removed, context + added) is highlighted separately. Tints blend the host background with palette red/green when the client has `COLORTERM=truecolor` and the background is known; otherwise palette colours, and on dark themes only the `▎` bar, coloured numbers and word emphasis (palette greens and reds are too loud as line backgrounds).
+- Hunk actions on hover: open (new tab running `/bin/sh -c 'exec ${VISUAL:-${EDITOR:-vi}} "+$1" "$2"'`), ask agent (pastes `path:lines ` into the workspace's agent pane, found with `agents::detect`; without one it copies the reference), copy (the hunk as a patch, OSC 52). Viewed marks are keyed by the file's patch digest, so they clear when the file changes.
+
 **Issues (`issues/`)**
 - `Browser` is pure state that returns `Action`s; `App` does the I/O on threads. Answers carry their query and issue key so stale ones are dropped. Lists are cached in memory and in `issues.json` (titles and metadata only, never tokens).
 - GitHub goes through `gh` in the project folder. Shortcut (REST v3) and Linear (GraphQL) go through `ureq`, capped at 100 issues. People filters go into each tracker's query.
@@ -159,7 +168,7 @@ src/error.rs      library error type
 - The running server keeps the old code. ` restart now ` saves the session, sends `ServerMessage::Restart(path)`, and each client `exec`s the new binary, which starts a new server that restores the session. A new client rejected by an older server asks `[y/N]` on the plain terminal before running `kill-server`.
 
 **Saved session (`state.rs`)**
-- Groups (name, icon, colour, collapsed), projects (with their group's index), workspaces, tabs, panes (cwd), split layouts, custom names, active children and column widths, in `$XDG_STATE_HOME/cornercase/session.json` (or next to the socket). Processes are not restored; each pane gets a new shell in its folder.
+- Groups (name, icon, colour, collapsed), projects (with their group's index), workspaces (with their changes base), tabs, panes (cwd), split layouts, custom names, active children, column widths and the changes panel (open, tab), in `$XDG_STATE_HOME/cornercase/session.json` (or next to the socket). Processes are not restored; each pane gets a new shell in its folder.
 - Saved only once the state is stable for 2 s, so the burst of `Exited` events at logout does not save an empty session.
 - Only a fresh server restores, on its first client's `Hello`. Missing folders are skipped. `VERSION` is 4; older versions are migrated (a version 3 file is read as is, every project ungrouped).
 

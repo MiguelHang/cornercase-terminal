@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::changes::Mode;
 use crate::issues::People;
 use crate::protocol;
 use crate::split::Node;
@@ -23,6 +24,16 @@ pub struct State {
     pub widths: Option<Widths>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issues: Option<IssuesState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes: Option<ChangesState>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangesState {
+    #[serde(default)]
+    pub open: bool,
+    #[serde(default)]
+    pub mode: Mode,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +68,8 @@ pub struct WorkspaceState {
     pub tabs: Vec<TabState>,
     #[serde(default)]
     pub active: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -85,7 +98,7 @@ impl WorkspaceState {
             active: 0,
             layout: None,
         });
-        Self { path, name: None, worktree: false, tabs: tabs.collect(), active }
+        Self { path, name: None, worktree: false, tabs: tabs.collect(), active, base: None }
     }
 }
 
@@ -121,7 +134,15 @@ impl From<V2State> for State {
                 ProjectState { path: w.path, name: w.name, group: None, workspaces: vec![workspace], active: 0 }
             })
             .collect();
-        Self { version: VERSION, groups: Vec::new(), projects, active: old.active, widths: None, issues: None }
+        Self {
+            version: VERSION,
+            groups: Vec::new(),
+            projects,
+            active: old.active,
+            widths: None,
+            issues: None,
+            changes: None,
+        }
     }
 }
 
@@ -233,6 +254,7 @@ mod tests {
             active: 0,
             widths: None,
             issues: None,
+            changes: None,
         }
     }
 
@@ -253,7 +275,8 @@ mod tests {
         fn round_trips_the_column_widths() {
             let tmp = TempDir::new();
             let path = tmp.path().join("session.json");
-            let saved = State { widths: Some(Widths { projects: 40, workspaces: 20 }), ..state(&["/a"]) };
+            let saved =
+                State { widths: Some(Widths { projects: 40, workspaces: 20, ..Widths::default() }), ..state(&["/a"]) };
 
             save(&path, &saved).expect("save");
 

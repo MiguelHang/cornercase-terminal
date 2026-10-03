@@ -31,6 +31,8 @@ pub struct Term {
 pub struct SpawnOptions<'a> {
     pub id: u64,
     pub shell: &'a str,
+    pub args: &'a [String],
+    pub env: &'a [(String, String)],
     pub rows: u16,
     pub cols: u16,
     pub cwd: Option<PathBuf>,
@@ -43,12 +45,16 @@ fn pty_size(rows: u16, cols: u16) -> PtySize {
 
 impl Term {
     pub fn spawn(opts: SpawnOptions, tx: Sender<AppEvent>) -> Result<Self> {
-        let SpawnOptions { id, shell, rows, cols, cwd, theme } = opts;
+        let SpawnOptions { id, shell, args, env, rows, cols, cwd, theme } = opts;
         let pair = native_pty_system().openpty(pty_size(rows, cols)).map_err(|e| Error::OpenPty(e.into()))?;
 
         let mut cmd = CommandBuilder::new(shell);
+        cmd.args(args);
         cmd.env("TERM", "xterm-256color");
         cmd.env(protocol::NESTED_ENV, "1");
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
         if let Some(dir) = cwd.or_else(|| std::env::current_dir().ok()) {
             cmd.cwd(dir);
         }
@@ -159,7 +165,16 @@ mod tests {
 
     fn spawn_sh_in(cwd: Option<PathBuf>) -> (Term, Receiver<AppEvent>) {
         let (tx, rx) = mpsc::channel();
-        let opts = SpawnOptions { id: 1, shell: "/bin/sh", rows: 24, cols: 80, cwd, theme: &HostTheme::default() };
+        let opts = SpawnOptions {
+            id: 1,
+            shell: "/bin/sh",
+            args: &[],
+            env: &[],
+            rows: 24,
+            cols: 80,
+            cwd,
+            theme: &HostTheme::default(),
+        };
         (Term::spawn(opts, tx).expect("spawn /bin/sh"), rx)
     }
 
@@ -185,6 +200,8 @@ mod tests {
             let opts = SpawnOptions {
                 id: 1,
                 shell: "/nonexistent/shell",
+                args: &[],
+                env: &[],
                 rows: 24,
                 cols: 80,
                 cwd: None,

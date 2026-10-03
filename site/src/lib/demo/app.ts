@@ -1,7 +1,8 @@
 import type { Cursor } from '../term/canvas';
 import { BOLD, Grid, type Rect, contains } from '../term/grid';
 import { AGENTS, FOLDERS, ISSUES, type Issue, MODES, type Tree } from './data';
-import { GROUP_COLOURS, GROUP_ICONS, type Rows, type SidebarRow, activeRow, dragged, layout, sidebarLayout, sidebarRows } from './layout';
+import { BASES, type ChangesMode, type FileDiff, type HunkAction, hasChanges, workspaceDiff } from './changes';
+import { type Border, GROUP_COLOURS, GROUP_ICONS, type Rows, type SidebarRow, type Widths, activeRow, dragged, layout, mainWidth, sidebarLayout, sidebarRows } from './layout';
 import { render as markdown } from './markdown';
 import {
   type Config,
@@ -24,7 +25,7 @@ import {
   tabLabel,
   workspaceLabel,
 } from './model';
-import { AGENT_KINDS, Agent, type Host, type Key, type Place, Shell } from './programs';
+import { AGENT_KINDS, Agent, Editor, type Host, type Key, type Place, Shell } from './programs';
 import { type Node, fits, panes, ratioAt, remove, setRatio, split } from './split';
 import { type Line, folderSlug, seg, slug, truncateRight } from './text';
 import { type Drag, type Frame, Painter, type Region } from './ui';
@@ -76,7 +77,13 @@ const RENAME: Record<Target['kind'], { label: string; hint: string }> = {
 export class App {
   cols = 120;
   rows = 34;
-  widths = { projects: 32, workspaces: 26 };
+  widths: Widths = { projects: 32, workspaces: 26 };
+  changesOpen = false;
+  changesMode: ChangesMode = 'uncommitted';
+  changesBase = BASES[0];
+  changesScroll = 0;
+  private folded = new Map<string, boolean>();
+  private viewed = new Set<string>();
   nav: 'projects' | 'workspaces' | null = null;
   groups: Group[] = [];
   projects: Project[] = [];
@@ -458,13 +465,113 @@ export class App {
     this.dirty();
   }
 
-  resetBorder(border: 'projects' | 'workspaces'): void {
-    this.widths = { ...this.widths, [border]: border === 'projects' ? 32 : 26 };
+  resetBorder(border: Border): void {
+    this.widths = { ...this.widths, [border]: border === 'projects' ? 32 : border === 'workspaces' ? 26 : null };
     this.dirty();
   }
 
   toggleNav(): void {
     this.nav = this.nav ? null : 'projects';
+    if (this.nav) this.changesOpen = false;
+    this.dirty();
+  }
+
+  changesShown(): boolean {
+    return this.changesOpen && hasChanges(this.workspace());
+  }
+
+  changesDiff(): FileDiff[] {
+    const p = this.project();
+    const w = this.workspace();
+    return p && w ? workspaceDiff(p, w, this.changesMode) : [];
+  }
+
+  private fileKey(f: FileDiff): string {
+    return `${this.workspace()?.id}:${this.changesMode}:${f.change.path}`;
+  }
+
+  changesViewed(f: FileDiff): boolean {
+    return this.viewed.has(this.fileKey(f));
+  }
+
+  changesFolded(f: FileDiff): boolean {
+    return this.folded.get(this.fileKey(f)) ?? (!!f.change.lockfile || this.changesViewed(f));
+  }
+
+  toggleChanges(): void {
+    this.changesOpen = !this.changesOpen;
+    this.nav = null;
+    if (this.changesOpen) this.emit('narrate', 'The changes of this workspace, next to its agent. Hover a hunk to open it, ask the agent about it or copy it.');
+    this.dirty();
+  }
+
+  setChangesMode(mode: ChangesMode): void {
+    this.changesMode = mode;
+    this.changesScroll = 0;
+    this.dirty();
+  }
+
+  toggleChangesFile(f: FileDiff): void {
+    this.folded.set(this.fileKey(f), !this.changesFolded(f));
+    this.dirty();
+  }
+
+  toggleChangesViewed(f: FileDiff): void {
+    const key = this.fileKey(f);
+    if (!this.viewed.delete(key)) this.viewed.add(key);
+    this.folded.delete(key);
+    this.dirty();
+  }
+
+  foldAllChanges(): void {
+    const files = this.changesDiff();
+    const fold = files.some((f) => !this.changesFolded(f));
+    for (const f of files) this.folded.set(this.fileKey(f), fold);
+    this.dirty();
+  }
+
+  scrollChanges(dy: number, max: number): boolean {
+    const next = Math.max(0, Math.min(max, Math.min(this.changesScroll, max) + dy));
+    if (next === this.changesScroll) return false;
+    this.changesScroll = next;
+    this.dirty();
+    return true;
+  }
+
+  openChangesBase(at: Pos): void {
+    const branches = [...BASES, ...(this.project()?.workspaces.map((w) => w.branch).filter((b): b is string => !!b && !BASES.includes(b)) ?? [])];
+    this.overlay = { kind: 'menu', at, actions: branches.map((branch) => ({ kind: 'base', branch })) };
+    this.dirty();
+  }
+
+  hunkAction(action: HunkAction, f: FileDiff, h: number): void {
+    const hunk = f.hunks[h];
+    const added = hunk.lines.filter((l) => l.kind === '+').map((l) => l.new ?? 0);
+    const lines = added.length ? (added.length > 1 ? `${added[0]}-${added[added.length - 1]}` : `${added[0]}`) : `${hunk.newStart}`;
+    const p = this.project();
+    const w = this.workspace();
+    if (!p || !w) return;
+    if (action === 'copy') {
+      this.emit('copy', hunk.lines.map((l) => `${l.kind}${l.text}`).join('\n'));
+      this.notify('copied to clipboard');
+    } else if (action === 'ask agent') {
+      const tab = w.tabs.find((t) => t.panes.some((pane) => pane.shell.fg instanceof Agent));
+      const pane = tab?.panes.find((x) => x.shell.fg instanceof Agent);
+      if (!tab || !pane) {
+        this.emit('copy', `${f.change.path}:${lines}`);
+        this.notify('no agent here, so the reference is copied');
+        return;
+      }
+      w.active = w.tabs.indexOf(tab);
+      tab.active = pane.id;
+      pane.shell.paste(`${f.change.path}:${lines} `);
+      this.notify('sent to the agent');
+    } else {
+      const pane = this.newPane(p, w);
+      pane.shell.start(new Editor(this.host(p, w, () => pane.id), () => pane.shell.finish(), f.change.path, f.change.after, Number(lines.split('-')[0]) - 1));
+      w.tabs.push(this.newTab([pane]));
+      w.active = w.tabs.length - 1;
+    }
     this.dirty();
   }
 
@@ -520,6 +627,7 @@ export class App {
     if (a.kind === 'deleteGroup') return 'delete group';
     if (a.kind === 'openProject') return 'open project';
     if (a.kind === 'newGroup') return 'new group';
+    if (a.kind === 'base') return a.branch;
     return a.action;
   }
 
@@ -569,6 +677,9 @@ export class App {
     else if (a.kind === 'deleteGroup') {
       this.groups = this.groups.filter((g) => g.id !== a.group);
       for (const p of this.projects) if (p.group === a.group) p.group = undefined;
+    } else if (a.kind === 'base') {
+      this.changesBase = a.branch;
+      this.changesScroll = 0;
     } else if (a.kind === 'openProject') return this.openPicker();
     else if (a.kind === 'newGroup') {
       this.nav = null;
@@ -1549,7 +1660,10 @@ export class App {
     const prev = this.hover;
     this.hover = { x, y };
     if (this.dragging && buttons & 1) {
-      if (this.dragging.kind === 'border') this.widths = dragged(this.widths, this.dragging.border, x, this.cols);
+      if (this.dragging.kind === 'border') {
+        const total = this.dragging.border === 'changes' ? this.cols : mainWidth(this.widths, this.cols, this.changesShown());
+        this.widths = dragged(this.widths, this.dragging.border, x, total);
+      }
       else {
         const { tab, divider } = this.dragging;
         tab.layout = setRatio(tab.layout, divider.path, ratioAt(divider, x, y));

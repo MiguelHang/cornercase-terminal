@@ -1,3 +1,5 @@
+use crate::picker::Cursor;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
     Group,
@@ -97,17 +99,15 @@ impl Search {
 
     pub fn move_selection(&mut self, delta: isize, len: usize, rows: usize) {
         let Some(last) = len.checked_sub(1) else { return };
-        self.selected = self.selected.min(last).saturating_add_signed(delta).min(last);
-        if self.selected < self.scroll {
-            self.scroll = self.selected;
-        } else if rows > 0 && self.selected >= self.scroll + rows {
-            self.scroll = self.selected + 1 - rows;
-        }
+        let mut cursor = Cursor { selected: Some(self.selected.min(last)), scroll: self.scroll };
+        cursor.move_by(delta, len, rows);
+        (self.selected, self.scroll) = (cursor.selected.unwrap_or(0), cursor.scroll);
     }
 
     pub fn scroll_by(&mut self, delta: isize, len: usize, rows: usize) {
-        let max = len.saturating_sub(rows);
-        self.scroll = self.scroll.min(max).saturating_add_signed(delta).min(max);
+        let mut cursor = Cursor { selected: None, scroll: self.scroll };
+        cursor.scroll_by(delta, len, rows);
+        self.scroll = cursor.scroll;
     }
 }
 

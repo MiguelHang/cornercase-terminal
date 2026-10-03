@@ -58,6 +58,7 @@ export default defineConfig({
             { label: 'Projects, workspaces and tabs', slug: 'docs/guides/projects-workspaces-tabs' },
             { label: 'Panes and splits', slug: 'docs/guides/panes-and-splits' },
             { label: 'Git worktrees', slug: 'docs/guides/worktrees' },
+            { label: 'Changes panel', slug: 'docs/guides/changes' },
             { label: 'Issues and agents', slug: 'docs/guides/issues-and-agents' },
             { label: 'Search', slug: 'docs/guides/search' },
             { label: 'Sessions and the server', slug: 'docs/guides/sessions' },

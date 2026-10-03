@@ -158,6 +158,18 @@ export const SCENES: Record<string, Scene> = {
       return rect(0, 0, 58, app.rows);
     },
   },
+  changes: {
+    cols: 180,
+    rows: 22,
+    build: (app) => {
+      world(app);
+      app.advance(4000);
+      app.toggleChanges();
+      const area = layout(app.cols, app.rows, app.widths, null, true).changes;
+      app.hover = { x: area.x + 20, y: area.y + 7 };
+      return rect(area.x - 1, 0, area.w + 1, app.rows);
+    },
+  },
   projects: {
     cols: 104,
     rows: 18,

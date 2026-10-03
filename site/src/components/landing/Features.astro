@@ -50,6 +50,18 @@ const programs = ['nvim', 'fzf', 'htop', 'lazygit', 'btop', 'claude', 'codex', '
         <Snapshot scene="issues" label="The issues dialog listing six GitHub issues for the shop project, the first one selected." class="shot" />
       </article>
 
+      <article class="card j reveal">
+        <div class="text">
+          <h3>See what the agent changed</h3>
+          <p>
+            Every git workspace has a changes panel next to its panes: what is not committed yet, what the branch committed, or
+            both, against <code>main</code>. It follows the agent live, marks the words that changed, and a hover on a hunk opens it
+            in your editor or hands it back to the agent.
+          </p>
+        </div>
+        <Snapshot scene="changes" label="The changes panel of feat/dark-mode: the uncommitted tab, Cargo.lock folded as a lockfile and src/theme.rs open, with a hunk showing open, ask agent and copy." class="shot" />
+      </article>
+
       <article class="card d reveal">
         <div class="text">
           <h3>Splits that join up</h3>
@@ -127,6 +139,7 @@ const programs = ['nvim', 'fzf', 'htop', 'lazygit', 'btop', 'claude', 'codex', '
     grid-template-columns: repeat(3, minmax(0, 1fr));
     grid-template-areas:
       'a a b'
+      'j j j'
       'c d f'
       'e i f'
       'g h h';
@@ -157,6 +170,16 @@ const programs = ['nvim', 'fzf', 'htop', 'lazygit', 'btop', 'claude', 'codex', '
   }
   .h {
     grid-area: h;
+  }
+  .j {
+    grid-area: j;
+    display: grid;
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    align-items: center;
+    gap: 28px;
+  }
+  .j .shot {
+    margin-top: 0;
   }
   .i {
     grid-area: i;
@@ -350,6 +373,7 @@ const programs = ['nvim', 'fzf', 'htop', 'lazygit', 'btop', 'claude', 'codex', '
       grid-template-columns: repeat(2, minmax(0, 1fr));
       grid-template-areas:
         'a a'
+        'j j'
         'b c'
         'd e'
         'f i'
@@ -361,10 +385,11 @@ const programs = ['nvim', 'fzf', 'htop', 'lazygit', 'btop', 'claude', 'codex', '
   @media (max-width: 720px) {
     .bento {
       grid-template-columns: minmax(0, 1fr);
-      grid-template-areas: 'a' 'b' 'c' 'd' 'f' 'e' 'i' 'g' 'h';
+      grid-template-areas: 'a' 'b' 'c' 'j' 'd' 'f' 'e' 'i' 'g' 'h';
     }
 
-    .a {
+    .a,
+    .j {
       grid-template-columns: minmax(0, 1fr);
     }
 

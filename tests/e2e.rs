@@ -924,3 +924,26 @@ fn a_pane_splits_from_its_menu_and_closes_on_exit() {
 fn screen_column(screen: &str, x: u16) -> Vec<char> {
     screen.lines().map(|l| l.chars().nth(usize::from(x)).unwrap_or(' ')).collect()
 }
+
+#[test]
+fn the_changes_panel_shows_what_changed_in_the_repo() {
+    let repo = std::env::temp_dir().join(format!("ccch-{}", std::process::id()));
+    std::fs::create_dir_all(&repo).expect("create repo dir");
+    let repo_name = repo.file_name().and_then(|n| n.to_str()).expect("repo name").to_string();
+    git(&repo, &["init", "--quiet"]);
+    std::fs::write(repo.join("notes.txt"), "one\ntwo\n").expect("write file");
+    git(&repo, &["add", "notes.txt"]);
+    git(&repo, &["commit", "--quiet", "-m", "init"]);
+    std::fs::write(repo.join("notes.txt"), "one\nTWO\n").expect("edit file");
+    let mut app = Harness::start();
+    app.open_project(1, &repo);
+    app.wait_for("the repo opens as project 2", |s| s.contains(&entry(&repo_name)));
+    app.wait_for("the button counts the changed file", |s| s.contains("changes 1"));
+
+    app.click(ui::changes_button(areas().issues, "changes 1").as_position());
+
+    app.wait_for("the panel shows the diff", |s| {
+        s.contains("uncommitted") && s.contains("notes.txt") && s.contains("TWO")
+    });
+    let _ = std::fs::remove_dir_all(&repo);
+}

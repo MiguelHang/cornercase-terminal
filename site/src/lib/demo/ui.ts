@@ -1,8 +1,10 @@
 import type { Cursor } from '../term/canvas';
 import { BOLD, DIM, INVERSE, type Grid, type Rect, type Style, contains, rect } from '../term/grid';
 import type { App } from './app';
+import { changesLabel, drawChanges, hasChanges } from './changes';
 import {
   type Areas,
+  type Border,
   activeRow,
   GROUP_COLOURS,
   GROUP_ICONS,
@@ -33,7 +35,7 @@ import { type Group, type IssuesOverlay, type Pane, type SettingsOverlay, type T
 import { type Divider, dividers, grab, panes } from './split';
 import { type Line, drawLine, seg, truncateLeft, truncateRight, wrapAll } from './text';
 
-export type Drag = { kind: 'border'; border: 'projects' | 'workspaces' } | { kind: 'divider'; tab: Tab; divider: Divider; area: Rect };
+export type Drag = { kind: 'border'; border: Border } | { kind: 'divider'; tab: Tab; divider: Divider; area: Rect };
 
 export interface Region {
   r: Rect;
@@ -123,7 +125,7 @@ export class Painter {
       this.outer();
       return { regions: this.regions, cursor: this.cursor, areas: null };
     }
-    const areas = layout(app.cols, app.rows, app.widths, app.nav);
+    const areas = layout(app.cols, app.rows, app.widths, app.nav, app.changesShown());
     this.pane(areas);
     if (areas.compact) {
       this.bar(areas);
@@ -135,6 +137,7 @@ export class Painter {
     }
     if (!isEmpty(areas.sidebar)) this.sidebar(areas);
     if (!isEmpty(areas.workspaces)) this.workspaces(areas);
+    if (app.changesShown() && !isEmpty(areas.changes)) drawChanges(this, areas);
     this.overlay(areas);
     if (app.toast) this.toast(app.toast.text);
     return { regions: this.regions, cursor: this.cursor, areas };
@@ -290,7 +293,13 @@ export class Painter {
       this.searchBar(middle(r));
       return;
     }
-    const menu = rect(r.x, r.y, r.w - areas.searchButton.w, r.h);
+    const showChanges = hasChanges(app.workspace());
+    const menu = rect(r.x, r.y, r.w - areas.searchButton.w - (showChanges ? areas.changesButton.w : 0), r.h);
+    if (showChanges) {
+      const c = areas.changesButton;
+      this.band(c, [seg(centered('±', c.w))], app.changesOpen || this.sidebarHovered(c) ? PRESSED : { fg: 8, bg: this.surface });
+      this.region({ r: c, click: () => app.toggleChanges(), cursor: 'pointer' });
+    }
     const icon = rect(menu.x, menu.y, Math.min(7, menu.w), menu.h);
     const menuStyle = app.nav || this.sidebarHovered(menu) ? PRESSED : { fg: 6, bg: this.surface };
     this.band(icon, [seg(centered('≡', icon.w))], menuStyle);
@@ -453,6 +462,14 @@ export class Painter {
     this.line(areas.workspacesSeparator, [seg(` ${'─'.repeat(Math.max(0, areas.workspacesSeparator.w - 2))}`, DARK)]);
     this.button(areas.issues, ' ', 'issues', this.buttonStyle(areas.issues, DARK, 6));
     this.region({ r: areas.issues, click: () => app.openIssues(), cursor: 'pointer' });
+    if (!areas.compact && hasChanges(app.workspace())) {
+      const label = changesLabel(app.changesDiff());
+      const w = label.length + 2;
+      const r = intersect(rect(right(areas.issues) - w - 1, areas.issues.y, w, 1), areas.issues);
+      const idle: Style = app.changesOpen ? { fg: 6, add: BOLD } : DARK;
+      this.button(r, '', label, this.buttonStyle(r, idle, 6));
+      this.region({ r, click: () => app.toggleChanges(), cursor: 'pointer' });
+    }
   }
 
   private box(r: Rect, title: string): void {

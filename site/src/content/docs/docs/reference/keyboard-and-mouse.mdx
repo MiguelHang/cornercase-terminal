@@ -24,6 +24,7 @@ cornercase is driven with the mouse. It has **no keyboard shortcuts** of its own
 | Drag | The border at the right of a column | Resizes the column. |
 | Double-click | A column border | Resets that column's width. |
 | Click | `settings`, `quit`, `issues` | Opens the settings, detaches, opens the issue browser. |
+| Click | `changes` (or `±` in the compact bar) | Opens or closes the [changes panel](../../guides/changes/). Only in git workspaces. |
 | Click | `↑ 0.2.0` or `↻ restart` at the end of the `settings` row | Opens the [update](../../installation/#update) dialog. Only there when a new version is out. |
 | Click | The search bar | Starts a [search](../../guides/search/). |
 
@@ -39,6 +40,22 @@ cornercase is driven with the mouse. It has **no keyboard shortcuts** of its own
 | Anything | A program that uses the mouse | Passed to the program, relative to its pane. |
 
 Programs that use the mouse get clicks, releases, drags, movement and the wheel, depending on what they asked for, in the encoding they asked for (SGR, UTF-8 or the original X10 one). Right-clicks still open the pane menu unless you chose **send right-clicks to the pane** for that pane. See [Panes and splits](../../guides/panes-and-splits/).
+
+### Changes panel
+
+| Gesture | Where | Does |
+| --- | --- | --- |
+| Click | `uncommitted`, `commits`, `all` | Changes what is compared. |
+| Click | `vs main ▾` | Opens the list of branches to compare with. |
+| Click | A file row | Folds or unfolds the file. |
+| Hover, then click `✓` | A file row | Marks the file as viewed, or not. |
+| Click | `↕ n unchanged lines` | Shows the code between two hunks. |
+| Hover, then click | `open`, `ask agent`, `copy` on a hunk | Opens it in your editor, types its reference into the workspace's agent, copies it as a patch. |
+| Click | `fold all` / `unfold all`, `×` | Folds or unfolds every file, closes the panel. |
+| Wheel | The panel | Scrolls the diff. |
+| Drag, double-click | The panel's left border | Resizes it, gives it back its automatic width. |
+
+See [Changes panel](../../guides/changes/).
 
 ### Dialogs and lists
 
@@ -58,6 +75,7 @@ While a dialog, the search, the settings or the issue browser is open, the keys 
 | Issue list | Type to filter. `↑` `↓` `PgUp` `PgDn` select. `Enter` reads the issue. `Tab` / `Shift+Tab` switch sources. `Esc` closes. |
 | Issue | `Enter` starts it. `↑` `↓` `PgUp` `PgDn` `Space` `Home` `End` scroll. `Esc` or `←` go back. |
 | Agent, place and person pickers | Type to filter. `↑` `↓` select. `Enter` picks. `Esc` goes back. |
+| Branch to compare with | Type to filter. `↑` `↓` select. `Enter` picks the selected branch. `Esc` closes. |
 | Settings | `Enter` or `Space` change the selected row. `↑` `↓` select. `Tab` `→` / `Shift+Tab` `←` switch tabs. `Shift+↑` `Shift+↓` reorder sources. `Delete` removes a saved token. `Esc` closes. |
 | Update | `↑` `↓` scroll the release notes. `Enter` presses the dialog's first button: **update**, **try again**, **restart now** or **copy command**. `Esc` closes it, except while downloading. |
 | Compact menu | `Esc` closes it. |

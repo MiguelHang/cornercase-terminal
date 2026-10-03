@@ -97,11 +97,12 @@ pub struct Workspace {
     pub active: usize,
     pub closing: bool,
     pub behind: u32,
+    pub base: Option<String>,
 }
 
 impl Workspace {
     pub fn new(id: u64, path: PathBuf, name: Option<String>, worktree: bool) -> Self {
-        Self { id, path, name, worktree, tabs: Vec::new(), active: 0, closing: false, behind: 0 }
+        Self { id, path, name, worktree, tabs: Vec::new(), active: 0, closing: false, behind: 0, base: None }
     }
 
     pub fn tab(&self) -> Option<&Tab> {

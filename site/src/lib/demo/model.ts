@@ -69,7 +69,8 @@ export type MenuAction =
   | { kind: 'deleteGroup'; group: number }
   | { kind: 'openProject' }
   | { kind: 'newGroup' }
-  | { kind: 'pane'; pane: number; action: PaneAction };
+  | { kind: 'pane'; pane: number; action: PaneAction }
+  | { kind: 'base'; branch: string };
 
 export interface PickItem {
   value: string;
