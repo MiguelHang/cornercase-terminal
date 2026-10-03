@@ -1,6 +1,7 @@
 import { BOLD } from '../term/grid';
 import { App } from './app';
 import { ADDRESS_RS, COMMITS, FOLDERS } from './data';
+import type { Project } from './model';
 import { Agent, Editor } from './programs';
 import { type Line, seg } from './text';
 
@@ -37,6 +38,11 @@ function tests(root: string): Line[] {
     [],
     [seg('test result: '), seg('FAILED', { fg: 1 }), seg('. 6 passed; 1 failed; 0 ignored; finished in 0.02s')],
   ];
+}
+
+function inGroup(app: App, name: string, projects: Project[]): void {
+  const group = app.addGroup(name, '●', 12);
+  for (const p of projects) p.group = group.id;
 }
 
 export function world(app: App): App {
@@ -79,10 +85,11 @@ export function world(app: App): App {
   const fix = app.addWorkspace(api, 'fix/pagination', true);
   fix.tabs.push(app.newTab([app.newPane(api, fix)]));
 
-  app.addProject('infra', '~/code/infra', true, FOLDERS.infra.tree);
+  const infra = app.addProject('infra', '~/code/infra', true, FOLDERS.infra.tree);
   const notes = app.addProject('notes', '~/code/notes', false, FOLDERS.notes.tree);
   const notesPane = notes.workspaces[0].tabs[0].panes[0];
   notesPane.shell.run('cat todo.md');
+  inGroup(app, 'acme', [shop, api, infra]);
 
   app.active = 0;
   return app;
@@ -96,9 +103,10 @@ export function quiet(app: App): App {
   main.tabs.push(app.newTab([app.newPane(shop, main, [prompt('shop', 'git log --oneline --graph'), ...gitLog('shop', 'main')])]));
   const dark = app.addWorkspace(shop, 'feat/dark-mode', true);
   dark.tabs.push(app.newTab([app.newPane(shop, dark, [prompt('feat-dark-mode', 'git status -sb'), [seg('## feat/dark-mode')]])]));
-  app.addProject('api', '~/code/api', true, FOLDERS.api.tree);
-  app.addProject('infra', '~/code/infra', true, FOLDERS.infra.tree);
+  const api = app.addProject('api', '~/code/api', true, FOLDERS.api.tree);
+  const infra = app.addProject('infra', '~/code/infra', true, FOLDERS.infra.tree);
   app.addProject('notes', '~/code/notes', false, FOLDERS.notes.tree);
+  inGroup(app, 'acme', [shop, api, infra]);
   app.active = 0;
   return app;
 }

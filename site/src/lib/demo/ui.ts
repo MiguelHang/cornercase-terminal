@@ -3,7 +3,10 @@ import { BOLD, DIM, INVERSE, type Grid, type Rect, type Style, contains, rect } 
 import type { App } from './app';
 import {
   type Areas,
+  GROUP_COLOURS,
+  GROUP_ICONS,
   Rows,
+  STYLE_DONE,
   bottom,
   buttonWidth,
   closeButton,
@@ -18,9 +21,13 @@ import {
   pickerArea,
   right,
   rightAligned,
+  styleColour,
+  styleDone,
+  styleIcon,
+  styleLabels,
   tabsIn,
 } from './layout';
-import { type IssuesOverlay, type Pane, type SettingsOverlay, type Tab, projectLabel, tabLabel, workspaceLabel } from './model';
+import { type Group, type IssuesOverlay, type Pane, type SettingsOverlay, type Tab, projectLabel, tabLabel, workspaceLabel } from './model';
 import { type Divider, dividers, grab, panes } from './split';
 import { type Line, drawLine, seg, truncateLeft, truncateRight, wrapAll } from './text';
 
@@ -322,28 +329,50 @@ export class Painter {
     this.region({ r, click: act, cursor: 'pointer' });
   }
 
+  private groupHeader(group: Group, max: number): Line[number] {
+    return seg(`${group.icon} ${truncateRight(group.name, max)}`, { fg: group.colour, add: BOLD });
+  }
+
   private sidebar(areas: Areas): void {
     const app = this.app;
     this.title(areas.title, 'projects');
-    const rows = new Rows(areas.list, app.projects.map(() => areas.pitch), areas.pitch, app.projectsScroll);
+    const sidebar = app.sidebarRows();
+    const scrolled = (scroll: number) => new Rows(areas.list, sidebar.map((s) => (s.kind === 'gap' ? 1 : areas.pitch)), areas.pitch, scroll);
+    app.follow(scrolled(app.projectsScroll), sidebar);
+    const rows = scrolled(app.projectsScroll);
     this.region({ r: areas.list, wheel: (dy) => app.scrollProjects(rows, dy) });
-    app.projects.forEach((p, i) => {
+    sidebar.forEach((spec, i) => {
       const r = rows.item(i);
-      if (isEmpty(r)) return;
-      const active = i === app.active;
+      if (isEmpty(r) || spec.kind === 'gap') return;
+      if (spec.kind === 'group') {
+        const group = app.groups[spec.g];
+        const inside = app.projects.filter((p) => p.group === group.id).length;
+        const holdsActive = app.project()?.group === group.id;
+        const count = group.collapsed ? ` (${inside})` : '';
+        const max = r.w - 8 - count.length;
+        const line = [seg(group.collapsed && holdsActive ? '▌ ' : '  ', CYAN), seg(group.collapsed ? '▸ ' : '▾ ', DARK), this.groupHeader(group, max), seg(count, DARK)];
+        this.band(r, line, {});
+        this.region({ r, click: () => app.toggleGroup(spec.g), right: (x, y) => app.openGroupMenu({ x, y }, spec.g), cursor: 'pointer' });
+        return;
+      }
+      const pi = spec.p;
+      const p = app.projects[pi];
+      const active = pi === app.active;
       const bg: Style = active ? { bg: this.surface } : {};
-      const reserved = 6 + (closeButton(r).w - 3);
+      const indent = p.group !== undefined && app.groups.some((g) => g.id === p.group) ? '  ' : '';
+      const reserved = 6 + indent.length + (closeButton(r).w - 3);
       const count = ` (${p.workspaces.length})`;
       const name = truncateRight(projectLabel(p), r.w - reserved - count.length);
-      this.band(r, [seg(active ? '▌ ' : '  ', CYAN), seg(name, active ? { fg: 15, add: BOLD } : { fg: 7 }), seg(count, DARK)], bg);
-      this.region({ r, click: () => app.selectProject(i), right: (x, y) => app.openMenu({ x, y }, { kind: 'project', project: p.id }), cursor: 'pointer' });
-      this.closeX(r, bg, () => app.closeProject(i));
+      this.band(r, [seg(active ? '▌ ' : '  ', CYAN), seg(indent), seg(name, active ? { fg: 15, add: BOLD } : { fg: 7 }), seg(count, DARK)], bg);
+      this.region({ r, click: () => app.selectProject(pi), right: (x, y) => app.openMenu({ x, y }, { kind: 'project', project: p.id }), cursor: 'pointer' });
+      this.closeX(r, bg, () => app.closeProject(pi));
     });
     const [above, under] = rows.hidden();
-    this.more(moreAbove(areas.list), rows.moreBelow(), above, under);
+    const named = (from: number, to: number) => sidebar.slice(from, to).filter((s) => s.kind !== 'gap').length;
+    this.more(moreAbove(areas.list), rows.moreBelow(), above ? named(0, above) : 0, under ? named(sidebar.length - under, sidebar.length) : 0);
     const b = rows.buttonRect();
     this.button(b, ' ', '+ new project', this.buttonStyle(b, CYAN, 6));
-    this.region({ r: b, click: () => app.openPicker(), cursor: 'pointer' });
+    this.region({ r: b, click: (x, y) => app.openNewMenu({ x, y }), cursor: 'pointer' });
     if (!areas.compact) this.line(areas.separator, [seg(` ${'─'.repeat(Math.max(0, areas.separator.w - 2))}`, DARK)]);
     else this.line(areas.separator, [seg(` ${'─'.repeat(Math.max(0, areas.separator.w - 2))} `, DARK)]);
     this.button(areas.settings, ' ', 'settings', this.buttonStyle(areas.settings, DARK, 6));
@@ -431,8 +460,9 @@ export class Painter {
   private overlay(areas: Areas): void {
     const o = this.app.overlay;
     if (!o) return;
-    if (o.kind === 'menu' || o.kind === 'paneMenu') return this.menu();
-    if (o.kind === 'newWorkspace' || o.kind === 'rename') return this.form();
+    if (o.kind === 'menu') return this.menu();
+    if (o.kind === 'newWorkspace' || o.kind === 'rename' || o.kind === 'newGroup') return this.form();
+    if (o.kind === 'groupStyle') return this.groupStyle(o.group);
     if (o.kind === 'remove') return this.confirm();
     if (o.kind === 'picker') return this.picker();
     if (o.kind === 'settings') return this.settings(o);
@@ -443,8 +473,8 @@ export class Painter {
   private menu(): void {
     const app = this.app;
     const o = app.overlay;
-    if (!o || (o.kind !== 'menu' && o.kind !== 'paneMenu')) return;
-    const items = o.kind === 'menu' ? [app.renameLabel(o.target)] : o.actions;
+    if (o?.kind !== 'menu') return;
+    const items = o.actions.map((a) => app.menuLabel(a));
     const r = menuArea(app.cols, app.rows, o.at, items);
     this.backdrop(true);
     this.box(r, '');
@@ -477,10 +507,10 @@ export class Painter {
   private form(): void {
     const app = this.app;
     const o = app.overlay;
-    if (!o || (o.kind !== 'newWorkspace' && o.kind !== 'rename')) return;
+    if (!o || (o.kind !== 'newWorkspace' && o.kind !== 'rename' && o.kind !== 'newGroup')) return;
     const r = formArea(app.cols, app.rows);
     this.backdrop(false);
-    const title = o.kind === 'rename' ? app.renameLabel(o.target) : 'new workspace';
+    const title = o.kind === 'rename' ? app.renameLabel(o.target) : o.kind === 'newGroup' ? 'new group' : 'new workspace';
     this.box(r, title);
     const c = rect(r.x + 2, r.y + 1, r.w - 4, r.h - 2);
     this.span(c.x, c.y, 'name', DARK);
@@ -496,8 +526,40 @@ export class Painter {
         this.span(c.x, c.y + 4, 'creating…', DARK);
         this.cursor = null;
       } else if (o.error) this.span(c.x, c.y + 4, truncateRight(o.error, c.w), { fg: 1 });
-    } else this.span(c.x, c.y + 2, truncateLeft(app.renameHint(o.target), c.w), DARK);
+    } else if (o.kind === 'newGroup') this.span(c.x, c.y + 2, truncateLeft('right-click a project to move it into the group', c.w), DARK);
+    else this.span(c.x, c.y + 2, truncateLeft(app.renameHint(o.target), c.w), DARK);
     this.dialogButtons(rect(c.x, bottom(c) - 1, c.w, 1), o.kind === 'rename' ? 'rename' : 'create', () => app.submitForm(), () => app.closeOverlay());
+  }
+
+  private groupStyle(id: number): void {
+    const app = this.app;
+    const group = app.groups.find((g) => g.id === id) ?? { id, name: '', icon: GROUP_ICONS[0], colour: GROUP_COLOURS[0], collapsed: false };
+    const { cols, rows } = app;
+    this.backdrop(false);
+    this.box(formArea(cols, rows), group.name);
+    const [iconLabel, colourLabel, last] = styleLabels(cols, rows);
+    this.span(iconLabel.x, iconLabel.y, 'icon', DARK, iconLabel.w);
+    this.span(colourLabel.x, colourLabel.y, 'colour', DARK, colourLabel.w);
+    GROUP_ICONS.forEach((icon, i) => {
+      const cell = styleIcon(cols, rows, i);
+      if (isEmpty(cell)) return;
+      const style: Style = icon === group.icon ? PRESSED : this.hovered(cell) ? CYAN : { fg: group.colour };
+      this.span(cell.x, cell.y, ` ${icon} `, style, cell.w);
+      this.region({ r: cell, click: () => app.setGroupStyle(icon), cursor: 'pointer' });
+    });
+    GROUP_COLOURS.forEach((colour, i) => {
+      const cell = styleColour(cols, rows, i);
+      if (isEmpty(cell)) return;
+      const chosen = colour === group.colour;
+      const [open, close, edge]: [string, string, Style] = chosen ? ['[', ']', { fg: 15, add: BOLD }] : this.hovered(cell) ? ['[', ']', DARK] : [' ', ' ', DARK];
+      drawLine(this.g, cell.x, cell.y, [seg(open, edge), seg('██', { fg: colour }), seg(close, edge)], cell.w);
+      this.region({ r: cell, click: () => app.setGroupStyle(undefined, colour), cursor: 'pointer' });
+    });
+    const done = styleDone(cols, rows);
+    const max = Math.max(0, last.w - done.w - 5);
+    this.line(last, [seg('▾ ', DARK), this.groupHeader(group, max)]);
+    this.span(done.x, done.y, ` ${STYLE_DONE} `, this.hovered(done) ? PRESSED : { fg: 6, add: BOLD }, done.w);
+    this.region({ r: done, click: () => app.closeOverlay(), cursor: 'pointer' });
   }
 
   private confirm(): void {

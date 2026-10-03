@@ -17,7 +17,29 @@ const PICKER_HEIGHT = 24;
 const ISSUES_WIDTH = 110;
 const ISSUES_HEIGHT = 30;
 
+export const GROUP_ICONS = ['●', '◉', '◐', '◆', '■', '▲', '▼', '★', '✦', '♥', '♣', '♠'];
+export const GROUP_COLOURS = [1, 9, 208, 214, 3, 11, 2, 10, 6, 14, 4, 12, 99, 5, 13, 205];
+export const STYLE_DONE = 'done';
+const ICONS_PER_ROW = 6;
+const COLOURS_PER_ROW = 8;
+const ICON_CELL = 3;
+const COLOUR_CELL = 4;
+
 export type Nav = 'projects' | 'workspaces' | null;
+
+export type SidebarRow = { kind: 'gap' } | { kind: 'group'; g: number } | { kind: 'project'; p: number };
+
+export function sidebarRows(groups: (number | null)[], collapsed: boolean[]): SidebarRow[] {
+  const inGroup = (g: number | null): SidebarRow[] =>
+    groups.flatMap((group, p) => (group === g ? [{ kind: 'project', p } as SidebarRow] : []));
+  const rows = inGroup(null);
+  collapsed.forEach((folded, g) => {
+    if (rows.length) rows.push({ kind: 'gap' });
+    rows.push({ kind: 'group', g });
+    if (!folded) rows.push(...inGroup(g));
+  });
+  return rows;
+}
 
 export interface Widths {
   projects: number;
@@ -294,4 +316,27 @@ export function menuArea(cols: number, rows: number, at: { x: number; y: number 
   const w = Math.min(longest + 4, cols);
   const h = Math.min(items.length + 2, rows);
   return rect(Math.min(at.x, cols - w), Math.min(at.y + 1, rows - h), w, h);
+}
+
+function styleRows(cols: number, rows: number): [Rect, Rect, Rect, Rect, Rect] {
+  const c = inner(formArea(cols, rows));
+  const at = (dy: number, h: number) => intersect(rect(c.x, c.y + dy, c.w, h), c);
+  return [at(0, 1), at(1, 2), at(3, 1), at(4, 2), intersect(rect(c.x, bottom(c) - 1, c.w, 1), c)];
+}
+
+function gridCell(grid: Rect, perRow: number, width: number, i: number): Rect {
+  return intersect(rect(grid.x + (i % perRow) * width, grid.y + Math.floor(i / perRow), width, 1), grid);
+}
+
+export const styleLabels = (cols: number, rows: number): [Rect, Rect, Rect] => {
+  const [icon, , colour, , last] = styleRows(cols, rows);
+  return [icon, colour, last];
+};
+export const styleIcon = (cols: number, rows: number, i: number) => gridCell(styleRows(cols, rows)[1], ICONS_PER_ROW, ICON_CELL, i);
+export const styleColour = (cols: number, rows: number, i: number) => gridCell(styleRows(cols, rows)[3], COLOURS_PER_ROW, COLOUR_CELL, i);
+
+export function styleDone(cols: number, rows: number): Rect {
+  const last = styleRows(cols, rows)[4];
+  const w = Math.min(buttonWidth(STYLE_DONE), last.w);
+  return rect(right(last) - w, last.y, w, last.h);
 }
