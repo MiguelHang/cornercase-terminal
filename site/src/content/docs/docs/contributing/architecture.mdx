@@ -32,7 +32,7 @@ The accept thread, one reader thread per client, the signal thread and a forward
 3. lets the session `Saver` decide whether to write the session to disk;
 4. waits for an event or a 500 ms tick, then drains everything queued, feeding input and PTY output to the `App`.
 
-Each client has its own writer thread, so a slow client never blocks the loop. All clients share one size, the smallest, and see the same `App`, which is why hover, menus and scroll positions are mirrored.
+Each client has its own writer thread, so a slow client never blocks the loop. All clients share one size, that of the client that attached, typed or clicked last (a smaller client gets the frame cropped), and see the same `App`, which is why hover, menus and scroll positions are mirrored.
 
 ## Protocol
 
