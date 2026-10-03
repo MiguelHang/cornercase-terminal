@@ -176,10 +176,10 @@ T kill-server
 Astro + Starlight, deployed to GitHub Pages by `.github/workflows/pages.yml` (Pages source: GitHub Actions). `cd site && npm ci && npm run dev`; `npm run check` and `npm run build` must pass.
 
 - **Keep it in sync with the app.** When a feature, setting, `config.json` key, message, path or click changes, update in the same change: the docs pages that describe it (`src/content/docs/docs/`, search them for the old wording), the landing page if it shows it, the simulation if the UI changed, and the screens it makes stale.
-- The landing page (`src/pages/index.astro`, `src/components/landing/`) is custom; the documentation is Starlight content in `src/content/docs/docs/`. Internal doc links are relative with a trailing slash, because the site lives under a base path.
+- The landing page (`src/pages/index.astro`, `src/components/landing/`) is custom; the documentation is Starlight content in `src/content/docs/docs/`. Internal doc links are relative with a trailing slash, so the site works under any base path.
 - The terminal on the landing page is a simulation in TypeScript (`src/lib/demo/`) that mirrors `ui.rs`: same layout, labels and colours, with fake shells, agents and issues. When `ui.rs` changes, update the simulation too. The same code renders the feature pictures to SVG at build time (`scenes.ts`).
 - Docs screenshots are real: `src/screens/*.ansi` are `tmux capture-pane -e -p -N` dumps of the app, run with a fake `HOME` and its own `XDG_RUNTIME_DIR` (a separate server that still shows the default paths), rendered to SVG at build time by `src/lib/term/`. Box-drawing, block and a few symbol characters are drawn as shapes, not font glyphs, so lines join. Re-capture them when the UI changes.
-- Base URL and origin come from `actions/configure-pages` (`SITE_BASE`, `SITE_ORIGIN`): the site lives under `/cornercase-terminal/` on github.io and moves to `/` once the repo has a custom domain, with no code change.
+- Base URL and origin come from `actions/configure-pages` (`SITE_BASE`, `SITE_ORIGIN`). The site lives on the custom domain `usecornercase.dev` at `/` (DNS in DigitalOcean: GitHub Pages A/AAAA records on the apex, `www` CNAME to `usecornercase.github.io`); the old github.io address redirects there. Local builds default to the same origin and base.
 
 ## Known limitations
 
