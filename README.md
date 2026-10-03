@@ -4,7 +4,7 @@ A terminal multiplexer for working on several projects at once, each with its ow
 
 > **Status:** early and moving fast. Runs on Linux and macOS.
 
-**Website and documentation:** https://usecornercase.github.io/cornercase-terminal/
+**Website and documentation:** https://usecornercase.dev
 
 ## What it does
 

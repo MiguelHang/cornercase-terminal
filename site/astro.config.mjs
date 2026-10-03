@@ -2,8 +2,8 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
 const repo = 'https://github.com/usecornercase/cornercase-terminal';
-const site = process.env.SITE_ORIGIN || 'https://usecornercase.github.io';
-const base = process.env.SITE_BASE ?? '/cornercase-terminal';
+const site = process.env.SITE_ORIGIN || 'https://usecornercase.dev';
+const base = process.env.SITE_BASE ?? '';
 
 export default defineConfig({
   site,
