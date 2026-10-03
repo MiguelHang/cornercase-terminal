@@ -51,6 +51,11 @@ const BEHIND_ICON: &str = "↓";
 const GROUP_INDENT: &str = "  ";
 pub const GROUP_ICONS: [char; 12] = ['●', '◉', '◐', '◆', '■', '▲', '▼', '★', '✦', '♥', '♣', '♠'];
 pub const GROUP_COLOURS: [u8; 16] = [1, 9, 208, 214, 3, 11, 2, 10, 6, 14, 4, 12, 99, 5, 13, 205];
+pub const STYLE_DONE: &str = "done";
+const ICONS_PER_ROW: usize = 6;
+const COLOURS_PER_ROW: usize = 8;
+const ICON_CELL: u16 = 3;
+const COLOUR_CELL: u16 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Border {
@@ -638,6 +643,55 @@ pub fn form_hit(area: Rect, submit: &str, pos: Position) -> Option<FormHit> {
     }
 }
 
+fn style_rows(area: Rect) -> [Rect; 5] {
+    let [icon_label, icons, colour_label, colours, _, last] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(form_inner(form_area(area)));
+    [icon_label, icons, colour_label, colours, last]
+}
+
+fn grid_cell(grid: Rect, per_row: usize, width: u16, i: usize) -> Rect {
+    let (row, col) = (u16::try_from(i / per_row).unwrap_or(u16::MAX), u16::try_from(i % per_row).unwrap_or(u16::MAX));
+    Rect::new(grid.x.saturating_add(col.saturating_mul(width)), grid.y.saturating_add(row), width, 1).intersection(grid)
+}
+
+pub fn style_icon(area: Rect, i: usize) -> Rect {
+    grid_cell(style_rows(area)[1], ICONS_PER_ROW, ICON_CELL, i)
+}
+
+pub fn style_colour(area: Rect, i: usize) -> Rect {
+    grid_cell(style_rows(area)[3], COLOURS_PER_ROW, COLOUR_CELL, i)
+}
+
+pub fn style_done(area: Rect) -> Rect {
+    let last = style_rows(area)[4];
+    let width = button_width(STYLE_DONE).min(last.width);
+    Rect { x: last.right() - width, width, ..last }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StyleHit {
+    Icon(usize),
+    Colour(usize),
+    Done,
+}
+
+pub fn style_hit(area: Rect, pos: Position) -> Option<StyleHit> {
+    if style_done(area).contains(pos) {
+        return Some(StyleHit::Done);
+    }
+    (0..GROUP_ICONS.len())
+        .find(|&i| style_icon(area, i).contains(pos))
+        .map(StyleHit::Icon)
+        .or_else(|| (0..GROUP_COLOURS.len()).find(|&i| style_colour(area, i).contains(pos)).map(StyleHit::Colour))
+}
+
 pub fn picker_area(area: Rect) -> Rect {
     let width = area.width.saturating_sub(4).min(PICKER_WIDTH);
     let height = area.height.saturating_sub(2).min(PICKER_HEIGHT);
@@ -1153,6 +1207,7 @@ impl Search {
 pub enum Overlay {
     Menu { at: Position, items: Vec<String> },
     Form(Form),
+    GroupStyle(GroupEntry),
     Confirm(Confirm),
     Update(Update),
     Picker(Picker),
@@ -1269,6 +1324,7 @@ pub fn draw(f: &mut Frame, view: &View) {
     match &view.overlay {
         Some(Overlay::Menu { at, items }) => draw_menu(f, view, *at, items),
         Some(Overlay::Form(form)) => draw_form(f, view, form),
+        Some(Overlay::GroupStyle(group)) => draw_group_style(f, view, group),
         Some(Overlay::Confirm(confirm)) => draw_confirm(f, view, confirm),
         Some(Overlay::Update(update)) => draw_update(f, view, update),
         Some(Overlay::Picker(picker)) => draw_picker(f, view, picker),
@@ -1462,6 +1518,57 @@ fn draw_form(f: &mut Frame, view: &View, form: &Form) {
     if !matches!(form.note, Some(Note::Busy(_))) && cursor_x < input.right() {
         f.set_cursor_position(Position::new(cursor_x, input.y));
     }
+}
+
+fn group_header(group: &GroupEntry, max: usize) -> Span<'static> {
+    let style = Style::default().fg(Color::Indexed(group.colour)).add_modifier(Modifier::BOLD);
+    Span::styled(format!("{} {}", group.icon, truncate_right(&group.name, max)), style)
+}
+
+fn draw_group_style(f: &mut Frame, view: &View, group: &GroupEntry) {
+    let area = f.area();
+    let r = form_area(area);
+    f.render_widget(Clear, r);
+    f.render_widget(overlay_block(&group.name), r);
+    let [icon_label, _, colour_label, _, last] = style_rows(area);
+    let dim = Style::default().fg(Color::DarkGray);
+    f.render_widget(Paragraph::new(Span::styled("icon", dim)), icon_label);
+    f.render_widget(Paragraph::new(Span::styled("colour", dim)), colour_label);
+    let selected = Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD);
+    for (i, &icon) in GROUP_ICONS.iter().enumerate() {
+        let cell = style_icon(area, i);
+        let style = if icon == group.icon {
+            selected
+        } else if hovered(view, cell) {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::Indexed(group.colour))
+        };
+        f.render_widget(Paragraph::new(Span::styled(format!(" {icon} "), style)), cell);
+    }
+    for (i, &colour) in GROUP_COLOURS.iter().enumerate() {
+        let cell = style_colour(area, i);
+        let (open, close, edge) = if colour == group.colour {
+            ("[", "]", Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+        } else if hovered(view, cell) {
+            ("[", "]", dim)
+        } else {
+            (" ", " ", dim)
+        };
+        let line = Line::from(vec![
+            Span::styled(open, edge),
+            Span::styled("██", Style::default().fg(Color::Indexed(colour))),
+            Span::styled(close, edge),
+        ]);
+        f.render_widget(Paragraph::new(line), cell);
+    }
+    let done = style_done(area);
+    let max = usize::from(last.width.saturating_sub(done.width)).saturating_sub(5);
+    let preview = Line::from(vec![Span::styled("▾ ", dim), group_header(group, max)]);
+    f.render_widget(Paragraph::new(preview), last);
+    let style =
+        if hovered(view, done) { selected } else { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) };
+    f.render_widget(Paragraph::new(Span::styled(format!(" {STYLE_DONE} "), style)), done);
 }
 
 fn draw_note(f: &mut Frame, note: Option<&Note>, r: Rect) {
@@ -2170,12 +2277,11 @@ fn draw_group(f: &mut Frame, view: &View, g: usize, r: Rect) {
     } else {
         ("▾ ", String::new())
     };
-    let colour = Style::default().fg(Color::Indexed(group.colour)).add_modifier(Modifier::BOLD);
     let max = usize::from(r.width).saturating_sub(NAME_RESERVED_COLS + 2 + count.chars().count());
     let line = Line::from(vec![
         Span::styled(marker, Style::default().fg(Color::Cyan)),
         Span::styled(arrow, Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("{} {}", group.icon, truncate_right(&group.name, max)), colour),
+        group_header(group, max),
         Span::styled(count, Style::default().fg(Color::DarkGray)),
     ]);
     draw_band(f, r, line, Style::default());
@@ -2638,6 +2744,52 @@ mod tests {
             let header = entry_row(tall_list(), 1, &rows, 0, SidebarRow::Group(1));
             let t = render_sized(&grouped(0, false), W, TALL);
             assert_eq!(t.backend().buffer()[(header.x + 4, header.y)].fg, Color::Indexed(99));
+        }
+
+        fn styling(icon: char, colour: u8) -> View<'static> {
+            let group = GroupEntry { name: "work".into(), icon, colour, collapsed: false };
+            View { overlay: Some(Overlay::GroupStyle(group)), ..grouped(1, false) }
+        }
+
+        #[test]
+        fn renders_the_icon_and_colour_modal() {
+            insta::assert_snapshot!(render(&styling('★', 99)).backend());
+        }
+
+        #[test]
+        fn the_chosen_icon_is_highlighted() {
+            let t = render(&styling('★', 99));
+            let at = |i: usize| t.backend().buffer()[style_icon(AREA, i).as_position()].bg;
+            assert_eq!((at(7), at(0)), (Color::Cyan, Color::Reset));
+        }
+
+        #[test]
+        fn each_swatch_shows_its_colour() {
+            let t = render(&styling('★', 99));
+            let fg = |i: usize| {
+                let cell = style_colour(AREA, i);
+                t.backend().buffer()[(cell.x + 1, cell.y)].fg
+            };
+            assert_eq!((0..GROUP_COLOURS.len()).map(fg).collect::<Vec<_>>(), GROUP_COLOURS.map(Color::Indexed));
+        }
+
+        #[rstest]
+        #[case::first_icon(style_icon(AREA, 0), Some(StyleHit::Icon(0)))]
+        #[case::icon_on_the_second_row(style_icon(AREA, 11), Some(StyleHit::Icon(11)))]
+        #[case::colour(style_colour(AREA, 5), Some(StyleHit::Colour(5)))]
+        #[case::colour_on_the_second_row(style_colour(AREA, 15), Some(StyleHit::Colour(15)))]
+        #[case::done(style_done(AREA), Some(StyleHit::Done))]
+        #[case::title(Rect { y: form_area(AREA).y, ..style_icon(AREA, 0) }, None)]
+        fn style_hits(#[case] cell: Rect, #[case] expected: Option<StyleHit>) {
+            assert_eq!(style_hit(AREA, Position::new(cell.right() - 1, cell.y)), expected);
+        }
+
+        #[test]
+        fn the_cells_fit_a_narrow_terminal() {
+            let narrow = Rect::new(0, 0, 40, 20);
+            let all =
+                (0..GROUP_ICONS.len()).map(|i| style_icon(narrow, i)).chain((0..16).map(|i| style_colour(narrow, i)));
+            assert!(all.into_iter().all(|r| r.width >= ICON_CELL));
         }
 
         #[test]

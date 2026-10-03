@@ -110,6 +110,7 @@ enum MenuAction {
     Rename(Target),
     MoveToGroup(u64),
     SetGroup(u64, Option<u64>),
+    GroupStyle(u64),
     DeleteGroup(u64),
     OpenProject,
     NewGroup,
@@ -149,6 +150,7 @@ enum UpdateStep {
 enum Overlay {
     Menu { at: Position, actions: Vec<MenuAction> },
     NewGroup { input: String },
+    GroupStyle { group: u64 },
     NewWorkspace { project: u64, input: String, worktree: Option<bool>, error: Option<String>, creating: bool },
     Settings(Box<Settings>),
     Rename { target: Target, input: String },
@@ -617,6 +619,10 @@ impl App {
         let p = self.project_index(project)?;
         let w = self.projects[p].workspaces.iter().position(|w| w.id == workspace)?;
         Some((p, w))
+    }
+
+    fn group_entry(g: &Group) -> ui::GroupEntry {
+        ui::GroupEntry { name: g.name.clone(), icon: g.icon, colour: g.colour, collapsed: g.collapsed }
     }
 
     fn group_index(&self, id: u64) -> Option<usize> {
@@ -1779,7 +1785,7 @@ impl App {
             }
             Some(SidebarHit::Group(g)) => {
                 let id = self.groups[g].id;
-                vec![MenuAction::Rename(Target::Group(id)), MenuAction::DeleteGroup(id)]
+                vec![MenuAction::Rename(Target::Group(id)), MenuAction::GroupStyle(id), MenuAction::DeleteGroup(id)]
             }
             _ => return,
         };
@@ -1862,6 +1868,10 @@ impl App {
         if matches!(self.overlay, Some(Overlay::Update(_))) {
             return self.update_mouse(ev, pos, area);
         }
+        if let Some(Overlay::GroupStyle { group }) = self.overlay {
+            self.group_style_mouse(group, ev, pos, area);
+            return Ok(());
+        }
         let MouseEventKind::Down(button) = ev.kind else { return Ok(()) };
         if let Some(Overlay::Menu { at, actions }) = &self.overlay {
             let (at, actions) = (*at, actions.clone());
@@ -1895,6 +1905,7 @@ impl App {
                 .group_index(id)
                 .map(|g| format!("{} {}", self.groups[g].icon, self.groups[g].name))
                 .unwrap_or_default(),
+            MenuAction::GroupStyle(_) => "icon and colour".into(),
             MenuAction::DeleteGroup(_) => "delete group".into(),
             MenuAction::OpenProject => "open project".into(),
             MenuAction::NewGroup => "new group".into(),
@@ -1926,6 +1937,7 @@ impl App {
                     self.projects[p].group = group;
                 }
             }
+            MenuAction::GroupStyle(group) => self.overlay = Some(Overlay::GroupStyle { group }),
             MenuAction::DeleteGroup(id) => {
                 self.groups.retain(|g| g.id != id);
                 for p in self.projects.iter_mut().filter(|p| p.group == Some(id)) {
@@ -1945,12 +1957,30 @@ impl App {
         Ok(())
     }
 
-    fn add_group(&mut self, name: String) {
+    fn add_group(&mut self, name: String) -> u64 {
         let n = self.groups.len();
         let icon = ui::GROUP_ICONS[n % ui::GROUP_ICONS.len()];
         let colour = ui::GROUP_COLOURS[n % ui::GROUP_COLOURS.len()];
         let id = self.take_id();
         self.groups.push(Group { id, name, icon, colour, collapsed: false });
+        id
+    }
+
+    fn group_style_mouse(&mut self, group: u64, ev: MouseEvent, pos: Position, area: Rect) {
+        if ev.kind != MouseEventKind::Down(MouseButton::Left) {
+            return;
+        }
+        let hit = ui::style_hit(area, pos);
+        let Some(g) = self.group_index(group) else {
+            self.overlay = None;
+            return;
+        };
+        match hit {
+            Some(ui::StyleHit::Icon(i)) => self.groups[g].icon = ui::GROUP_ICONS[i],
+            Some(ui::StyleHit::Colour(i)) => self.groups[g].colour = ui::GROUP_COLOURS[i],
+            Some(ui::StyleHit::Done) => self.overlay = None,
+            None => {}
+        }
     }
 
     fn toggle_worktree(&mut self) {
@@ -2000,9 +2030,9 @@ impl App {
             }
             Overlay::NewGroup { input } if input.trim().is_empty() => Some(Overlay::NewGroup { input }),
             Overlay::NewGroup { input } => {
-                self.add_group(input.trim().to_string());
-                None
+                Some(Overlay::GroupStyle { group: self.add_group(input.trim().to_string()) })
             }
+            Overlay::GroupStyle { .. } => None,
             Overlay::RemoveWorkspace { project, workspace, force, removing: false, .. } => {
                 self.remove_worktree(project, workspace, force)
             }
@@ -2440,11 +2470,7 @@ impl App {
             .zip(self.project_groups())
             .map(|(p, group)| ui::ProjectEntry { name: self.project_label(p), workspaces: p.workspaces.len(), group })
             .collect();
-        let groups = self
-            .groups
-            .iter()
-            .map(|g| ui::GroupEntry { name: g.name.clone(), icon: g.icon, colour: g.colour, collapsed: g.collapsed })
-            .collect();
+        let groups = self.groups.iter().map(Self::group_entry).collect();
         let (has_project, workspaces, active_workspace, active_tab) = match self.project() {
             Some(p) => (
                 true,
@@ -2503,6 +2529,15 @@ impl App {
             Overlay::Menu { at, actions } => {
                 ui::Overlay::Menu { at: *at, items: actions.iter().map(|&a| self.menu_label(a)).collect() }
             }
+            Overlay::GroupStyle { group } => ui::Overlay::GroupStyle(self.group_index(*group).map_or_else(
+                || ui::GroupEntry {
+                    name: String::new(),
+                    icon: ui::GROUP_ICONS[0],
+                    colour: ui::GROUP_COLOURS[0],
+                    collapsed: false,
+                },
+                |g| Self::group_entry(&self.groups[g]),
+            )),
             Overlay::NewGroup { input } => ui::Overlay::Form(ui::Form {
                 title: "new group",
                 label: "name",
@@ -2883,6 +2918,8 @@ mod tests {
     }
 
     mod groups {
+        use rstest::rstest;
+
         use super::*;
 
         fn sidebar_pos(app: &App, row: SidebarRow) -> Position {
@@ -2905,6 +2942,14 @@ mod tests {
             click(app, new);
             pick(app, "new group");
             submit_text(app, name);
+            if matches!(app.overlay, Some(Overlay::GroupStyle { .. })) {
+                send_key(app, KeyCode::Enter, KeyModifiers::NONE);
+            }
+        }
+
+        fn open_style(app: &mut App) {
+            right_click_sidebar(app, SidebarRow::Group(0));
+            pick(app, "icon and colour");
         }
 
         fn move_to(app: &mut App, p: usize, group: &str) {
@@ -2933,6 +2978,56 @@ mod tests {
             let (mut app, _rx) = app();
             new_group(&mut app, "work");
             assert_eq!((names(&app), app.overlay.is_none()), (vec!["work"], true));
+        }
+
+        #[test]
+        fn a_new_group_opens_its_icon_and_colour() {
+            let (mut app, _rx) = app();
+            let new = ui::new_project_button(list(), 1, &app.sidebar_rows()).as_position();
+            click(&mut app, new);
+            pick(&mut app, "new group");
+
+            submit_text(&mut app, "work");
+
+            assert!(matches!(app.overlay, Some(Overlay::GroupStyle { group }) if group == app.groups[0].id));
+        }
+
+        #[test]
+        fn the_group_menu_offers_rename_icon_and_colour_and_delete() {
+            let (mut app, _rx) = app();
+            new_group(&mut app, "work");
+            right_click_sidebar(&mut app, SidebarRow::Group(0));
+            assert_eq!(menu_labels(&app), ["rename group", "icon and colour", "delete group"]);
+        }
+
+        #[test]
+        fn clicks_in_the_modal_set_the_icon_and_the_colour() {
+            let (mut app, _rx) = app();
+            new_group(&mut app, "work");
+            open_style(&mut app);
+
+            click(&mut app, ui::style_icon(AREA, 7).as_position());
+            click(&mut app, ui::style_colour(AREA, 12).as_position());
+
+            assert_eq!((app.groups[0].icon, app.groups[0].colour), (ui::GROUP_ICONS[7], ui::GROUP_COLOURS[12]));
+        }
+
+        #[rstest]
+        #[case::done(None)]
+        #[case::enter(Some(KeyCode::Enter))]
+        #[case::esc(Some(KeyCode::Esc))]
+        fn the_modal_closes_keeping_the_choice(#[case] key: Option<KeyCode>) {
+            let (mut app, _rx) = app();
+            new_group(&mut app, "work");
+            open_style(&mut app);
+            click(&mut app, ui::style_icon(AREA, 3).as_position());
+
+            match key {
+                Some(code) => send_key(&mut app, code, KeyModifiers::NONE),
+                None => click(&mut app, ui::style_done(AREA).as_position()),
+            }
+
+            assert_eq!((app.overlay.is_none(), app.groups[0].icon), (true, ui::GROUP_ICONS[3]));
         }
 
         #[test]

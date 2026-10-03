@@ -879,6 +879,8 @@ fn a_project_moves_into_a_new_group() {
     app.open_new_menu(1, 1);
     app.wait_for("the group form opens", |s| s.contains("new group") && s.contains("right-click a project"));
     app.send(b"work\r");
+    app.wait_for("its icon and colour open", |s| s.contains("colour") && s.contains(" done "));
+    app.send(b"\r");
     app.wait_for("the group shows", |s| s.contains(&format!("  ▾ {} work", ui::GROUP_ICONS[0])));
     app.right_click(at);
     app.wait_for("the menu opens", |s| s.contains("move to group"));
