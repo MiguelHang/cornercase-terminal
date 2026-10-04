@@ -3,28 +3,47 @@ use std::path::PathBuf;
 use rustix::io::Errno;
 use rustix::process::{Pid, test_kill_process};
 
-pub use imp::{args, cwd, name};
+pub use imp::{args, cwd, env, name};
 
 pub fn alive(pid: i32) -> bool {
     Pid::from_raw(pid).is_some_and(|pid| !matches!(test_kill_process(pid), Err(Errno::SRCH)))
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+fn vars<'a>(entries: impl Iterator<Item = &'a [u8]>) -> Vec<(String, String)> {
+    entries
+        .filter_map(|entry| {
+            let entry = String::from_utf8_lossy(entry);
+            let (key, value) = entry.split_once('=')?;
+            (!key.is_empty()).then(|| (key.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
 #[cfg(any(target_os = "macos", test))]
-fn procargs(buf: &[u8]) -> Vec<String> {
-    let Some((argc, rest)) = buf.split_first_chunk::<4>() else { return Vec::new() };
+fn procargs_strings(buf: &[u8]) -> Option<(usize, impl Iterator<Item = &[u8]>)> {
+    let (argc, rest) = buf.split_first_chunk::<4>()?;
     let argc = usize::try_from(i32::from_ne_bytes(*argc)).unwrap_or(0);
     let rest = &rest[rest.iter().position(|b| *b == 0).unwrap_or(rest.len())..];
     let rest = &rest[rest.iter().position(|b| *b != 0).unwrap_or(rest.len())..];
-    rest.split(|b| *b == 0)
-        .take(argc)
-        .filter(|a| !a.is_empty())
-        .map(|a| String::from_utf8_lossy(a).into_owned())
-        .collect()
+    Some((argc, rest.split(|b| *b == 0)))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn procargs(buf: &[u8]) -> Vec<String> {
+    let Some((argc, strings)) = procargs_strings(buf) else { return Vec::new() };
+    strings.take(argc).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn procenv(buf: &[u8]) -> Vec<(String, String)> {
+    let Some((argc, strings)) = procargs_strings(buf) else { return Vec::new() };
+    vars(strings.skip(argc).take_while(|s| !s.is_empty()))
 }
 
 #[cfg(target_os = "linux")]
 mod imp {
-    use super::PathBuf;
+    use super::{PathBuf, vars};
 
     pub fn cwd(pid: i32) -> Option<PathBuf> {
         std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
@@ -39,6 +58,11 @@ mod imp {
         let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
         cmdline.split(|b| *b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect()
     }
+
+    pub fn env(pid: i32) -> Vec<(String, String)> {
+        let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+        vars(environ.split(|b| *b == 0))
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -47,7 +71,7 @@ mod imp {
     use std::os::unix::ffi::OsStrExt;
     use std::ptr::null_mut;
 
-    use super::{PathBuf, procargs};
+    use super::{PathBuf, procargs, procenv};
 
     pub fn cwd(pid: i32) -> Option<PathBuf> {
         let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
@@ -68,20 +92,28 @@ mod imp {
         Some(String::from_utf8_lossy(&buf[..len]).into_owned())
     }
 
-    pub fn args(pid: i32) -> Vec<String> {
+    fn procargs_buffer(pid: i32) -> Option<Vec<u8>> {
         let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
         let mut size: libc::size_t = 0;
         let asked = unsafe { libc::sysctl(mib.as_mut_ptr(), 3, null_mut(), &raw mut size, null_mut(), 0) };
         if asked != 0 || size == 0 {
-            return Vec::new();
+            return None;
         }
         let mut buf = vec![0_u8; size];
         let read = unsafe { libc::sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr().cast(), &raw mut size, null_mut(), 0) };
         if read != 0 {
-            return Vec::new();
+            return None;
         }
         buf.truncate(size);
-        procargs(&buf)
+        Some(buf)
+    }
+
+    pub fn args(pid: i32) -> Vec<String> {
+        procargs_buffer(pid).map(|buf| procargs(&buf)).unwrap_or_default()
+    }
+
+    pub fn env(pid: i32) -> Vec<(String, String)> {
+        procargs_buffer(pid).map(|buf| procenv(&buf)).unwrap_or_default()
     }
 }
 
@@ -100,6 +132,10 @@ mod imp {
     pub fn args(_pid: i32) -> Vec<String> {
         Vec::new()
     }
+
+    pub fn env(_pid: i32) -> Vec<(String, String)> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
@@ -112,6 +148,12 @@ mod tests {
         i32::try_from(std::process::id()).expect("pid fits in i32")
     }
 
+    fn gone() -> i32 {
+        let mut child = std::process::Command::new("/bin/sh").arg("-c").arg("exit 0").spawn().expect("spawn sh");
+        child.wait().expect("wait for sh");
+        i32::try_from(child.id()).expect("pid fits in i32")
+    }
+
     mod alive {
         use super::*;
 
@@ -122,11 +164,7 @@ mod tests {
 
         #[test]
         fn is_false_for_a_process_that_exited() {
-            let mut child = std::process::Command::new("/bin/sh").arg("-c").arg("exit 0").spawn().expect("spawn sh");
-            let pid = i32::try_from(child.id()).expect("pid fits in i32");
-            child.wait().expect("wait for sh");
-
-            assert!(!alive(pid));
+            assert!(!alive(gone()));
         }
     }
 
@@ -154,6 +192,25 @@ mod tests {
         }
     }
 
+    mod env {
+        use super::*;
+        use crate::test_util::Sleeper;
+
+        #[test]
+        fn is_what_the_process_started_with() {
+            let sleeper = Sleeper::with_env(&[("CORNERCASE_PROBE", "a=b")]);
+
+            let found = env(sleeper.pid()).into_iter().find(|(key, _)| key == "CORNERCASE_PROBE");
+
+            assert_eq!(found, Some(("CORNERCASE_PROBE".into(), "a=b".into())));
+        }
+
+        #[test]
+        fn is_empty_for_a_process_that_is_gone() {
+            assert_eq!(env(gone()), Vec::new());
+        }
+    }
+
     mod procargs {
         use super::*;
 
@@ -178,6 +235,20 @@ mod tests {
         #[test]
         fn is_empty_for_a_short_buffer() {
             assert_eq!(procargs(&[1, 0]), Vec::<String>::new());
+        }
+
+        #[test]
+        fn the_environment_follows_the_arguments() {
+            let buf = buffer(1, b"/bin/zsh\0\0-zsh\0HOME=/Users/a\0PATH=/bin\0\0ptr_munge=\0");
+
+            assert_eq!(procenv(&buf), [("HOME".into(), "/Users/a".into()), ("PATH".into(), "/bin".into())]);
+        }
+
+        #[test]
+        fn arguments_that_look_like_variables_are_not_the_environment() {
+            let buf = buffer(2, b"/usr/bin/env\0\0env\0A=1\0B=2\0");
+
+            assert_eq!(procenv(&buf), [("B".to_string(), "2".to_string())]);
         }
     }
 }

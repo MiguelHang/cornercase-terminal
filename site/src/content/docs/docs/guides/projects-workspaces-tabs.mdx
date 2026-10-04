@@ -11,7 +11,7 @@ cornercase organises your shells in three levels, each in its own column: **proj
 <Screen
   name="hover-close"
   crop={[0, 5, 48, 21]}
-  alt="The projects column with shop, api, infra and notes, and the workspaces column of shop: main with nvim and bash, feat/dark-mode, feat/login hovered, with a lighter background and a close button, and an issue workspace whose claude tab shows ◐ while the agent works"
+  alt="The projects column with shop, api, infra and notes, and the workspaces column of shop: main with nvim and bash, feat/dark-mode, feat/login hovered, with a lighter background and a close button, and an issue workspace whose claude tab shows ◐ while the agent works, with Opus 5.5 · 7% under it"
   caption="The two columns, with feat/login hovered: a lighter background and its × button."
 />
 
@@ -120,6 +120,19 @@ When Claude Code runs in a tab, an icon before the tab's name tells you what it 
 So that a finished or waiting agent in another project doesn't go unnoticed, `!` and `✓` also show at the end of its workspace's row, of its project's row and, while the group is collapsed, of its group's header. When several tabs below a row disagree, `!` wins over `✓`. In the [compact layout](../small-terminals/) the `≡` button shows them for every tab except the one on screen.
 
 cornercase reads what Claude Code reports about itself: the small file it keeps for each running session in `~/.claude/sessions` (or in `$CLAUDE_CONFIG_DIR/sessions`), the same one `claude agents --json` reads. Nothing is installed and none of Claude's settings change. Without that file, for example with an older Claude Code, cornercase falls back to the title Claude gives the terminal, which only tells working from idle. Other agents don't get an icon yet.
+
+### How full the context is
+
+Once Claude has answered, a second line under the tab's name shows its model and how much of its context window the conversation takes up, such as `Opus 5.5 · 23%`: the percentage Claude Code gives its own status line. It turns orange from 75% and red from 90%. After `/compact` or `/clear` the line goes away until Claude's next answer. In the [compact layout](../small-terminals/) it sits at the bottom of the tab's row.
+
+The numbers come from the end of the conversation's transcript, which Claude Code keeps in `~/.claude/projects` (or in `$CLAUDE_CONFIG_DIR/projects`): the model of the last answer and how many tokens it was sent. The size of the window isn't written anywhere, so cornercase works it out the way Claude Code does:
+
+- 1M for the models with a 1M window of their own, such as Opus 5.5, Sonnet 5.5 and Fable 5.1;
+- 1M when the model is chosen with `[1m]`, like `sonnet[1m]`, in `--model`, in `ANTHROPIC_MODEL` or in `model` in Claude's settings;
+- 200k with `CLAUDE_CODE_DISABLE_1M_CONTEXT` set, and the value of `CLAUDE_CODE_MAX_CONTEXT_TOKENS` for models Claude Code doesn't know;
+- otherwise 200k, or 1M once the conversation is past 200k.
+
+The variables are read from the running `claude` and from the `env` of its settings. After switching models with `/model`, the percentage can be off until the new model is also in one of those places.
 
 ### Notifications
 

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 pub mod changes;
 
 use crate::activity::{self, Status};
+use crate::context::Context;
 use crate::emulator::Snapshot;
 use crate::split::{Dir, Node};
 use crate::usage::Severity;
@@ -60,6 +61,8 @@ const TOAST_ICON: &str = " ✓ ";
 const TOAST_MARGIN: u16 = 1;
 const NAME_RESERVED_COLS: usize = 6;
 const BEHIND_ICON: &str = "↓";
+const CONTEXT_SEPARATOR: &str = " · ";
+const MIN_MODEL_WIDTH: usize = 4;
 const WAITING_COLOR: Color = Color::Indexed(208);
 const GROUP_INDENT: &str = "  ";
 pub const GROUP_ICONS: [char; 12] = ['●', '◉', '◐', '◆', '■', '▲', '▼', '★', '✦', '♥', '♣', '♠'];
@@ -646,17 +649,13 @@ pub fn active_row(rows: &[SidebarRow], project: usize, group: Option<usize>) -> 
     find(SidebarRow::Project(project)).or_else(|| find(SidebarRow::Group(group?)))
 }
 
-fn gapped_rows<R: PartialEq>(list: Rect, pitch: u16, rows: &[R], gap: &R, scroll: usize) -> Rows {
-    let heights = rows.iter().map(|r| if r == gap { GAP } else { pitch }).collect();
-    Rows { list, heights, button: pitch, scroll }
-}
-
 fn row_rect<R: PartialEq>(layout: &Rows, rows: &[R], row: &R) -> Rect {
     rows.iter().position(|r| r == row).map_or_else(Rect::default, |i| layout.item(i))
 }
 
 pub fn project_rows(list: Rect, pitch: u16, rows: &[SidebarRow], scroll: usize) -> Rows {
-    gapped_rows(list, pitch, rows, &SidebarRow::Gap, scroll)
+    let heights = rows.iter().map(|r| if *r == SidebarRow::Gap { GAP } else { pitch }).collect();
+    Rows { list, heights, button: pitch, scroll }
 }
 
 pub fn entry_row(list: Rect, pitch: u16, rows: &[SidebarRow], scroll: usize, row: SidebarRow) -> Rect {
@@ -664,7 +663,7 @@ pub fn entry_row(list: Rect, pitch: u16, rows: &[SidebarRow], scroll: usize, row
 }
 
 pub fn close_button(list: Rect, pitch: u16, rows: &[SidebarRow], scroll: usize, p: usize) -> Rect {
-    row_close_button(entry_row(list, pitch, rows, scroll, SidebarRow::Project(p)))
+    row_close_button(entry_row(list, pitch, rows, scroll, SidebarRow::Project(p)), pitch)
 }
 
 pub fn new_project_button(list: Rect, pitch: u16, rows: &[SidebarRow]) -> Rect {
@@ -691,7 +690,7 @@ pub fn sidebar_hit(list: Rect, pitch: u16, rows: &[SidebarRow], scroll: usize, p
     match rows[i] {
         SidebarRow::Gap => None,
         SidebarRow::Group(g) => Some(SidebarHit::Group(g)),
-        SidebarRow::Project(p) if row_close_button(layout.item(i)).contains(pos) => Some(SidebarHit::Close(p)),
+        SidebarRow::Project(p) if row_close_button(layout.item(i), pitch).contains(pos) => Some(SidebarHit::Close(p)),
         SidebarRow::Project(p) => Some(SidebarHit::Select(p)),
     }
 }
@@ -704,35 +703,47 @@ pub enum WorkspaceRow {
     NewTab(usize),
 }
 
-pub fn workspace_rows(tabs: &[usize]) -> Vec<WorkspaceRow> {
+pub fn tab_lines(context: bool) -> u16 {
+    1 + u16::from(context)
+}
+
+pub fn workspace_rows(tabs: &[Vec<u16>]) -> Vec<WorkspaceRow> {
     tabs.iter()
         .enumerate()
-        .flat_map(|(w, &n)| {
+        .flat_map(|(w, lines)| {
             (w > 0)
                 .then_some(WorkspaceRow::Gap)
                 .into_iter()
                 .chain(std::iter::once(WorkspaceRow::Workspace(w)))
-                .chain((0..n).map(move |t| WorkspaceRow::Tab(w, t)))
+                .chain((0..lines.len()).map(move |t| WorkspaceRow::Tab(w, t)))
                 .chain(std::iter::once(WorkspaceRow::NewTab(w)))
         })
         .collect()
 }
 
-pub fn workspace_layout(list: Rect, pitch: u16, tabs: &[usize], scroll: usize) -> Rows {
-    gapped_rows(list, pitch, &workspace_rows(tabs), &WorkspaceRow::Gap, scroll)
+pub fn workspace_layout(list: Rect, pitch: u16, tabs: &[Vec<u16>], scroll: usize) -> Rows {
+    let heights = workspace_rows(tabs)
+        .into_iter()
+        .map(|row| match row {
+            WorkspaceRow::Gap => GAP,
+            WorkspaceRow::Tab(w, t) => pitch.max(tabs[w][t]),
+            WorkspaceRow::Workspace(_) | WorkspaceRow::NewTab(_) => pitch,
+        })
+        .collect();
+    Rows { list, heights, button: pitch, scroll }
 }
 
-pub fn new_workspace_button(list: Rect, pitch: u16, tabs: &[usize]) -> Rect {
+pub fn new_workspace_button(list: Rect, pitch: u16, tabs: &[Vec<u16>]) -> Rect {
     workspace_layout(list, pitch, tabs, 0).button()
 }
 
-pub fn workspace_row(list: Rect, pitch: u16, tabs: &[usize], scroll: usize, row: WorkspaceRow) -> Rect {
+pub fn workspace_row(list: Rect, pitch: u16, tabs: &[Vec<u16>], scroll: usize, row: WorkspaceRow) -> Rect {
     row_rect(&workspace_layout(list, pitch, tabs, scroll), &workspace_rows(tabs), &row)
 }
 
-pub fn row_close_button(row: Rect) -> Rect {
-    let width = if row.height > 1 { COMPACT_CLOSE_WIDTH } else { CLOSE_BUTTON_WIDTH };
-    Rect::new(row.right().saturating_sub(width), row.y, width.min(row.width), row.height)
+pub fn row_close_button(row: Rect, pitch: u16) -> Rect {
+    let width = if pitch > 1 { COMPACT_CLOSE_WIDTH } else { CLOSE_BUTTON_WIDTH };
+    Rect::new(row.right().saturating_sub(width), row.y, width.min(row.width), pitch.min(row.height))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -745,7 +756,7 @@ pub enum WorkspaceHit {
     NewWorkspace,
 }
 
-pub fn workspace_hit(list: Rect, pitch: u16, tabs: &[usize], scroll: usize, pos: Position) -> Option<WorkspaceHit> {
+pub fn workspace_hit(list: Rect, pitch: u16, tabs: &[Vec<u16>], scroll: usize, pos: Position) -> Option<WorkspaceHit> {
     if !list.contains(pos) {
         return None;
     }
@@ -754,7 +765,7 @@ pub fn workspace_hit(list: Rect, pitch: u16, tabs: &[usize], scroll: usize, pos:
         return Some(WorkspaceHit::NewWorkspace);
     }
     let i = layout.at(pos)?;
-    let on_close = row_close_button(layout.item(i)).contains(pos);
+    let on_close = row_close_button(layout.item(i), pitch).contains(pos);
     Some(match workspace_rows(tabs)[i] {
         WorkspaceRow::Gap => return None,
         WorkspaceRow::Workspace(w) if on_close => WorkspaceHit::CloseWorkspace(w),
@@ -1087,7 +1098,7 @@ pub fn settings_row(area: Rect, sections: &[&str], cursor: usize, row: usize) ->
 }
 
 pub fn settings_remove(row: Rect) -> Rect {
-    row_close_button(row)
+    row_close_button(row, 1)
 }
 
 pub fn settings_moves(row: Rect) -> [Rect; 2] {
@@ -1507,17 +1518,18 @@ pub struct WorkspaceEntry {
 pub struct TabEntry {
     pub name: String,
     pub status: Option<Status>,
+    pub context: Option<Context>,
 }
 
 impl From<&str> for TabEntry {
     fn from(name: &str) -> Self {
-        Self { name: name.to_string(), status: None }
+        Self::from(name.to_string())
     }
 }
 
 impl From<String> for TabEntry {
     fn from(name: String) -> Self {
-        Self { name, status: None }
+        Self { name, status: None, context: None }
     }
 }
 
@@ -1573,8 +1585,8 @@ impl View<'_> {
         sidebar_rows(&groups, &collapsed)
     }
 
-    pub fn tab_counts(&self) -> Vec<usize> {
-        self.workspaces.iter().map(|w| w.tabs.len()).collect()
+    pub fn tab_lines(&self) -> Vec<Vec<u16>> {
+        self.workspaces.iter().map(|w| w.tabs.iter().map(|t| tab_lines(t.context.is_some())).collect()).collect()
     }
 
     fn surface(&self) -> Color {
@@ -2315,7 +2327,7 @@ fn draw_sidebar(f: &mut Frame, view: &View, areas: &Areas) {
     draw_title(f, areas.title, "projects");
     let sidebar = view.sidebar_rows();
     let rows = project_rows(areas.list, areas.pitch, &sidebar, view.projects_scroll);
-    draw_entries(f, view, &rows, &sidebar);
+    draw_entries(f, view, &rows, &sidebar, areas.pitch);
     let (above, below) = rows.hidden();
     let count = |range: Range<usize>| {
         (!range.is_empty()).then(|| sidebar[range].iter().filter(|r| **r != SidebarRow::Gap).count())
@@ -2561,7 +2573,7 @@ fn draw_workspaces(f: &mut Frame, view: &View, areas: &Areas) {
     }
 
     let list = areas.workspaces_list;
-    let tabs = view.tab_counts();
+    let tabs = view.tab_lines();
     let dim = Style::default().fg(Color::DarkGray);
     let accent = Style::default().fg(Color::Cyan);
     let rows = workspace_rows(&tabs);
@@ -2571,7 +2583,7 @@ fn draw_workspaces(f: &mut Frame, view: &View, areas: &Areas) {
         if r.is_empty() {
             continue;
         }
-        let close_width = usize::from(row_close_button(r).width);
+        let close_width = usize::from(row_close_button(r, areas.pitch).width);
         match row {
             WorkspaceRow::Gap => {}
             WorkspaceRow::Workspace(w) => {
@@ -2592,7 +2604,7 @@ fn draw_workspaces(f: &mut Frame, view: &View, areas: &Areas) {
                 marks.push_onto(&mut line, name.chars().count(), room);
                 let bg = view.row_background(r, false);
                 draw_band(f, r, Line::from(line), bg);
-                draw_row_close(f, view, r, bg);
+                draw_row_close(f, view, r, areas.pitch, bg);
             }
             WorkspaceRow::Tab(w, t) => {
                 let active = w == view.active_workspace && view.active_tab == Some(t);
@@ -2612,7 +2624,10 @@ fn draw_workspaces(f: &mut Frame, view: &View, areas: &Areas) {
                 }
                 line.push(Span::styled(truncate_right(&tab.name, max), style));
                 draw_band(f, r, Line::from(line), bg);
-                draw_row_close(f, view, r, bg);
+                if let Some(context) = &tab.context {
+                    draw_context(f, r, areas.pitch, context, 4 + icon_width);
+                }
+                draw_row_close(f, view, r, areas.pitch, bg);
             }
             WorkspaceRow::NewTab(_) => draw_button(f, r, "   ", "+ tab", button_style(view, r, dim, Color::Cyan)),
         }
@@ -2653,6 +2668,29 @@ fn draw_issues_row(f: &mut Frame, view: &View, areas: &Areas) {
         };
         draw_button(f, r, "", &button.label, button_style(view, r, idle, Color::Cyan));
     }
+}
+
+fn draw_context(f: &mut Frame, row: Rect, pitch: u16, context: &Context, indent: usize) {
+    let r = Rect { y: middle(row).y + 1, height: 1, ..row }.intersection(row);
+    let close = row_close_button(row, pitch);
+    let reserved = if close.bottom() > r.y { usize::from(close.width) } else { 0 };
+    let room = usize::from(r.width).saturating_sub(indent + reserved + 1);
+    let dim = Style::default().fg(Color::DarkGray);
+    let percent = format!("{}%", context.percent);
+    let level = match Severity::of(context.percent) {
+        Severity::Normal => dim,
+        severity => Style::default().fg(severity_color(severity)),
+    };
+    let model_room = room.saturating_sub(percent.chars().count() + CONTEXT_SEPARATOR.chars().count());
+    let mut line = vec![Span::raw(" ".repeat(indent))];
+    if model_room >= MIN_MODEL_WIDTH {
+        line.extend([
+            Span::styled(truncate_right(&context.model, model_room), dim),
+            Span::styled(CONTEXT_SEPARATOR, dim),
+        ]);
+    }
+    line.push(Span::styled(percent, level));
+    f.render_widget(Paragraph::new(Line::from(line)), r);
 }
 
 fn status_icon(status: Status) -> Span<'static> {
@@ -2733,11 +2771,11 @@ fn draw_more(f: &mut Frame, [top, bottom]: [Rect; 2], above: Option<usize>, belo
     }
 }
 
-fn draw_row_close(f: &mut Frame, view: &View, row: Rect, bg: Style) {
+fn draw_row_close(f: &mut Frame, view: &View, row: Rect, pitch: u16, bg: Style) {
     if !sidebar_hovered(view, row) {
         return;
     }
-    let r = row_close_button(row);
+    let r = row_close_button(row, pitch);
     let style = if hovered(view, r) { bg.fg(Color::Red).add_modifier(Modifier::BOLD) } else { bg.fg(Color::DarkGray) };
     draw_band(f, r, Span::styled(centered("×", r.width), style), style);
 }
@@ -2757,7 +2795,7 @@ fn draw_quit_button(f: &mut Frame, view: &View, r: Rect) {
     draw_button(f, r, " ", "quit", style);
 }
 
-fn draw_entries(f: &mut Frame, view: &View, rows: &Rows, sidebar: &[SidebarRow]) {
+fn draw_entries(f: &mut Frame, view: &View, rows: &Rows, sidebar: &[SidebarRow], pitch: u16) {
     let group = view.projects.get(view.active).and_then(|p| p.group);
     let active = active_row(sidebar, view.active, group).filter(|_| view.has_project);
     for (i, &row) in sidebar.iter().enumerate() {
@@ -2767,13 +2805,13 @@ fn draw_entries(f: &mut Frame, view: &View, rows: &Rows, sidebar: &[SidebarRow])
         }
         match row {
             SidebarRow::Gap => {}
-            SidebarRow::Group(g) => draw_group(f, view, g, r, active == Some(i)),
-            SidebarRow::Project(p) => draw_project(f, view, p, r),
+            SidebarRow::Group(g) => draw_group(f, view, g, r, pitch, active == Some(i)),
+            SidebarRow::Project(p) => draw_project(f, view, p, r, pitch),
         }
     }
 }
 
-fn draw_group(f: &mut Frame, view: &View, g: usize, r: Rect, holds_active: bool) {
+fn draw_group(f: &mut Frame, view: &View, g: usize, r: Rect, pitch: u16, holds_active: bool) {
     let group = &view.groups[g];
     let marker = if holds_active { "▌ " } else { "  " };
     let (arrow, count) = if group.collapsed {
@@ -2782,7 +2820,7 @@ fn draw_group(f: &mut Frame, view: &View, g: usize, r: Rect, holds_active: bool)
         ("▾ ", String::new())
     };
     let badge = group.collapsed.then(|| group_attention(view, g)).flatten().map(status_icon);
-    let room = usize::from(r.width).saturating_sub(4 + usize::from(row_close_button(r).width) + 1);
+    let room = usize::from(r.width).saturating_sub(4 + usize::from(row_close_button(r, pitch).width) + 1);
     let used = 2 + count.chars().count();
     let marks = Tags::fit(badge.into_iter().collect(), room.saturating_sub(used));
     let max = if marks.is_empty() {
@@ -2801,7 +2839,7 @@ fn draw_group(f: &mut Frame, view: &View, g: usize, r: Rect, holds_active: bool)
     draw_band(f, r, Line::from(line), view.row_background(r, false));
 }
 
-fn draw_project(f: &mut Frame, view: &View, p: usize, r: Rect) {
+fn draw_project(f: &mut Frame, view: &View, p: usize, r: Rect, pitch: u16) {
     let entry = &view.projects[p];
     let (marker, title_style) = if p == view.active {
         ("▌ ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
@@ -2811,7 +2849,9 @@ fn draw_project(f: &mut Frame, view: &View, p: usize, r: Rect) {
     let bg = view.row_background(r, p == view.active);
     let indent = if entry.group.is_some() { GROUP_INDENT } else { "" };
     let count = format!(" ({})", entry.workspaces);
-    let reserved = NAME_RESERVED_COLS + indent.len() + usize::from(row_close_button(r).width - CLOSE_BUTTON_WIDTH);
+    let reserved = NAME_RESERVED_COLS
+        + indent.len()
+        + usize::from(row_close_button(r, pitch).width.saturating_sub(CLOSE_BUTTON_WIDTH));
     let room = usize::from(r.width).saturating_sub(reserved);
     let marks =
         Tags::fit(entry.status.map(status_icon).into_iter().collect(), room.saturating_sub(count.chars().count()));
@@ -2826,7 +2866,7 @@ fn draw_project(f: &mut Frame, view: &View, p: usize, r: Rect) {
     ];
     marks.push_onto(&mut line, shown, room);
     draw_band(f, r, Line::from(line), bg);
-    draw_row_close(f, view, r, bg);
+    draw_row_close(f, view, r, pitch, bg);
 }
 
 pub fn folder_name(path: &Path, home: Option<&Path>) -> String {
@@ -2874,6 +2914,7 @@ mod tests {
     const W: u16 = 100;
     const H: u16 = 18;
     const AREA: Rect = Rect { x: 0, y: 0, width: W, height: H };
+    const SMALL: Rect = Rect { x: 0, y: 0, width: 80, height: 30 };
 
     fn view(names: &[&str]) -> View<'static> {
         View {
@@ -2908,6 +2949,10 @@ mod tests {
 
     fn plain(projects: usize) -> Vec<SidebarRow> {
         sidebar_rows(&vec![None; projects], &[])
+    }
+
+    fn tabs(counts: &[usize]) -> Vec<Vec<u16>> {
+        counts.iter().map(|&n| vec![tab_lines(false); n]).collect()
     }
 
     fn render(view: &View) -> Terminal<TestBackend> {
@@ -3668,8 +3713,6 @@ mod tests {
     mod compact {
         use super::*;
 
-        const SMALL: Rect = Rect { x: 0, y: 0, width: 80, height: 30 };
-
         fn small() -> Areas {
             layout(SMALL, Widths::default())
         }
@@ -3698,6 +3741,12 @@ mod tests {
         #[case::wide(COMPACT_WIDTH, false)]
         fn narrow_terminals_get_the_menu_bar(#[case] width: u16, #[case] compact: bool) {
             assert_eq!(layout(Rect::new(0, 0, width, 20), Widths::default()).compact(), compact);
+        }
+
+        #[test]
+        fn the_projects_menu_draws_in_a_terminal_two_columns_wide() {
+            let t = render_sized(&in_a_project(Some(Nav::Projects)), 2, SMALL.height);
+            assert_eq!(t.backend().buffer().area.width, 2);
         }
 
         #[test]
@@ -3887,7 +3936,7 @@ mod tests {
         fn workspace_rows_follow_the_scroll() {
             let pos = Position::new(areas().workspaces_list.x + 4, areas().workspaces_list.y);
             assert_eq!(
-                workspace_hit(areas().workspaces_list, areas().pitch, &[10], 2, pos),
+                workspace_hit(areas().workspaces_list, areas().pitch, &tabs(&[10]), 2, pos),
                 Some(WorkspaceHit::Tab(0, 1))
             );
         }
@@ -3901,7 +3950,7 @@ mod tests {
                 ..view(&["cornercase"])
             };
             let t = render(&v);
-            let below = workspace_layout(areas().workspaces_list, 1, &[10], 0).more_below();
+            let below = workspace_layout(areas().workspaces_list, 1, &tabs(&[10]), 0).more_below();
             assert_eq!(row_text(&t, below).trim_end(), "  ↓ 6 more");
         }
     }
@@ -3931,7 +3980,7 @@ mod tests {
 
         #[test]
         fn the_gap_between_workspaces_stays_one_row() {
-            let second = workspace_row(TALL, 3, &[0, 0], 0, WorkspaceRow::Workspace(1));
+            let second = workspace_row(TALL, 3, &tabs(&[0, 0]), 0, WorkspaceRow::Workspace(1));
             assert_eq!(second.y, TALL.y + 3 + 3 + GAP);
         }
 
@@ -3947,7 +3996,7 @@ mod tests {
 
         #[test]
         fn a_tall_row_gets_a_wider_close_button() {
-            assert_eq!(row_close_button(Rect::new(0, 0, 40, 3)).width, COMPACT_CLOSE_WIDTH);
+            assert_eq!(row_close_button(Rect::new(0, 0, 40, 3), 3).width, COMPACT_CLOSE_WIDTH);
         }
     }
 
@@ -4024,7 +4073,7 @@ mod tests {
         }
 
         fn row_text(v: &View, row: WorkspaceRow) -> String {
-            let r = workspace_row(areas().workspaces_list, areas().pitch, &v.tab_counts(), v.workspaces_scroll, row);
+            let r = workspace_row(areas().workspaces_list, areas().pitch, &v.tab_lines(), v.workspaces_scroll, row);
             let t = render(v);
             (r.x..r.right()).map(|x| t.backend().buffer()[(x, r.y)].symbol().to_string()).collect()
         }
@@ -4045,7 +4094,7 @@ mod tests {
         fn rows_are_each_workspace_then_its_tabs_then_plus_tab() {
             use WorkspaceRow::{Gap, NewTab, Tab, Workspace};
             assert_eq!(
-                workspace_rows(&[2, 0]),
+                workspace_rows(&tabs(&[2, 0])),
                 [Workspace(0), Tab(0, 0), Tab(0, 1), NewTab(0), Gap, Workspace(1), NewTab(1)]
             );
         }
@@ -4059,23 +4108,23 @@ mod tests {
         #[case::gap_before_new_workspace(at(4), None)]
         #[case::new_workspace(at(5), Some(WorkspaceHit::NewWorkspace))]
         fn maps_clicks(#[case] pos: Position, #[case] expected: Option<WorkspaceHit>) {
-            assert_eq!(workspace_hit(wlist(), 1, &[2], 0, pos), expected);
+            assert_eq!(workspace_hit(wlist(), 1, &tabs(&[2]), 0, pos), expected);
         }
 
         #[test]
         fn the_gap_between_workspaces_is_not_a_row() {
-            assert_eq!(workspace_hit(wlist(), 1, &[0, 0], 0, at(2)), None);
+            assert_eq!(workspace_hit(wlist(), 1, &tabs(&[0, 0]), 0, at(2)), None);
         }
 
         #[test]
         fn new_workspace_sticks_to_the_bottom_when_rows_overflow() {
-            assert_eq!(new_workspace_button(wlist(), 1, &[100]).y, wlist().bottom() - 1);
+            assert_eq!(new_workspace_button(wlist(), 1, &tabs(&[100])).y, wlist().bottom() - 1);
         }
 
         #[test]
         fn rows_under_the_new_workspace_button_are_hidden() {
             let last_visible = usize::from(wlist().height) - 1;
-            assert!(workspace_row(wlist(), 1, &[100], 0, WorkspaceRow::Tab(0, last_visible)).is_empty());
+            assert!(workspace_row(wlist(), 1, &tabs(&[100]), 0, WorkspaceRow::Tab(0, last_visible)).is_empty());
         }
 
         #[test]
@@ -4135,10 +4184,8 @@ mod tests {
     mod agent_status {
         use super::*;
 
-        const SMALL: Rect = Rect { x: 0, y: 0, width: 80, height: 30 };
-
         fn tab(name: &str, status: Option<Status>) -> TabEntry {
-            TabEntry { name: name.into(), status }
+            TabEntry { status, ..name.into() }
         }
 
         fn with_agents() -> View<'static> {
@@ -4174,12 +4221,12 @@ mod tests {
         }
 
         fn tab_row(v: &View, w: usize, t: usize) -> Rect {
-            workspace_row(areas().workspaces_list, areas().pitch, &v.tab_counts(), 0, WorkspaceRow::Tab(w, t))
+            workspace_row(areas().workspaces_list, areas().pitch, &v.tab_lines(), 0, WorkspaceRow::Tab(w, t))
         }
 
         fn workspace_line(v: &View, w: usize) -> String {
             let r =
-                workspace_row(areas().workspaces_list, areas().pitch, &v.tab_counts(), 0, WorkspaceRow::Workspace(w));
+                workspace_row(areas().workspaces_list, areas().pitch, &v.tab_lines(), 0, WorkspaceRow::Workspace(w));
             row_text(&render(v), r).trim_end().to_string()
         }
 
@@ -4274,6 +4321,101 @@ mod tests {
             let mut t = Terminal::new(TestBackend::new(SMALL.width, SMALL.height)).expect("test backend");
             t.draw(|f| draw(f, &v)).expect("draw");
             assert_eq!(row_text(&t, Rect::new(0, 1, COMPACT_BUTTON_WIDTH, 1)), expected);
+        }
+    }
+
+    mod tab_context {
+        use super::*;
+
+        fn opus(percent: u16) -> Context {
+            Context { model: "Opus 5.5".into(), percent }
+        }
+
+        fn with_context(context: Option<Context>) -> View<'static> {
+            let claude = TabEntry { status: Some(Status::Working), context, ..TabEntry::from("claude") };
+            View {
+                has_project: true,
+                workspaces: vec![WorkspaceEntry { name: "login".into(), tabs: vec![claude, "nvim".into()], behind: 0 }],
+                active_tab: Some(0),
+                ..view(&["shop"])
+            }
+        }
+
+        fn row(v: &View, area: Rect, row: WorkspaceRow) -> Rect {
+            let a = layout(area, v.widths);
+            workspace_row(a.workspaces_list, a.pitch, &v.tab_lines(), 0, row)
+        }
+
+        fn line(t: &Terminal<TestBackend>, r: Rect, y: u16) -> String {
+            row_text(t, Rect { y: r.y + y, height: 1, ..r }).trim_end().to_string()
+        }
+
+        #[test]
+        fn renders_the_model_and_the_context_under_the_tab() {
+            insta::assert_snapshot!(render(&with_context(Some(opus(17)))).backend());
+        }
+
+        #[test]
+        fn the_tab_takes_a_second_row() {
+            assert_eq!(row(&with_context(Some(opus(17))), AREA, WorkspaceRow::Tab(0, 0)).height, 2);
+        }
+
+        #[test]
+        fn the_rows_below_move_down_one() {
+            let moved = row(&with_context(Some(opus(17))), AREA, WorkspaceRow::Tab(0, 1));
+            let before = row(&with_context(None), AREA, WorkspaceRow::Tab(0, 1));
+            assert_eq!(moved.y, before.y + 1);
+        }
+
+        #[rstest]
+        #[case::fits(26, "      Opus 5.5 · 17%")]
+        #[case::cuts_the_model(19, "      Opus… · 17%")]
+        #[case::keeps_the_percentage(16, "      17%")]
+        fn a_narrow_column_cuts_the_model_first(#[case] workspaces: u16, #[case] expected: &str) {
+            let v = View { widths: Widths { workspaces, ..Widths::default() }, ..with_context(Some(opus(17))) };
+            let r = row(&v, AREA, WorkspaceRow::Tab(0, 0));
+            assert_eq!(line(&render(&v), r, 1), expected);
+        }
+
+        #[rstest]
+        #[case::normal(40, Color::DarkGray)]
+        #[case::getting_full(80, WAITING_COLOR)]
+        #[case::nearly_full(95, Color::Red)]
+        fn the_percentage_turns_orange_then_red(#[case] percent: u16, #[case] colour: Color) {
+            let v = with_context(Some(opus(percent)));
+            let r = row(&v, AREA, WorkspaceRow::Tab(0, 0));
+            let t = render(&v);
+            let end = u16::try_from(line(&t, r, 1).chars().count()).expect("fits");
+            assert_eq!(t.backend().buffer()[(r.x + end - 1, r.y + 1)].fg, colour);
+        }
+
+        #[test]
+        fn only_the_first_row_has_the_close_button() {
+            let v = with_context(Some(opus(17)));
+            let r = row(&v, AREA, WorkspaceRow::Tab(0, 0));
+            let hit = |x: u16, y: u16| {
+                workspace_hit(areas().workspaces_list, areas().pitch, &v.tab_lines(), 0, Position::new(x, y))
+            };
+            assert_eq!(
+                [hit(r.x + 4, r.y + 1), hit(r.right() - 2, r.y + 1), hit(r.right() - 2, r.y)],
+                [Some(WorkspaceHit::Tab(0, 0)), Some(WorkspaceHit::Tab(0, 0)), Some(WorkspaceHit::CloseTab(0, 0))]
+            );
+        }
+
+        #[test]
+        fn the_close_button_covers_only_the_first_band_of_a_taller_row() {
+            assert_eq!(row_close_button(Rect::new(0, 4, 25, 2), 1), Rect::new(22, 4, CLOSE_BUTTON_WIDTH, 1));
+        }
+
+        #[test]
+        fn a_compact_band_shows_it_on_its_last_row() {
+            let v = View { nav: Some(Nav::Workspaces), ..with_context(Some(opus(17))) };
+            let r = row(&v, SMALL, WorkspaceRow::Tab(0, 0));
+            let t = render_sized(&v, SMALL.width, SMALL.height);
+            assert_eq!(
+                (r.height, line(&t, r, 1), line(&t, r, 2)),
+                (COMPACT_PITCH, "  ▌ ◐ claude".into(), "      Opus 5.5 · 17%".into())
+            );
         }
     }
 
@@ -5333,7 +5475,7 @@ mod tests {
         fn rect(v: &View, size: Rect, row: Row) -> Rect {
             let a = layout(size, v.widths).shown(v.nav);
             let sidebar = |r| entry_row(a.list, a.pitch, &v.sidebar_rows(), v.projects_scroll, r);
-            let workspaces = |r| workspace_row(a.workspaces_list, a.pitch, &v.tab_counts(), v.workspaces_scroll, r);
+            let workspaces = |r| workspace_row(a.workspaces_list, a.pitch, &v.tab_lines(), v.workspaces_scroll, r);
             match row {
                 Row::Project(p) => sidebar(SidebarRow::Project(p)),
                 Row::Group => sidebar(SidebarRow::Group(0)),

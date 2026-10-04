@@ -91,10 +91,47 @@ impl Pane {
     }
 }
 
-#[derive(Deserialize)]
-struct Session {
+#[derive(Debug, Deserialize)]
+pub struct Session {
     pid: Option<i64>,
     status: Option<String>,
+    #[serde(rename = "sessionId")]
+    pub id: Option<String>,
+    pub cwd: Option<PathBuf>,
+}
+
+impl Session {
+    pub fn read(dir: Option<&Path>, pid: i32) -> Option<Self> {
+        let text = std::fs::read_to_string(dir?.join("sessions").join(format!("{pid}.json"))).ok()?;
+        Self::parse(&text, pid)
+    }
+
+    pub fn parse(text: &str, pid: i32) -> Option<Self> {
+        let session: Self = serde_json::from_str(text).ok()?;
+        session.pid.is_none_or(|p| p == i64::from(pid)).then_some(session)
+    }
+
+    fn activity(&self) -> Option<Activity> {
+        match self.status.as_deref()? {
+            "busy" | "shell" => Some(Activity::Working),
+            "waiting" => Some(Activity::Waiting),
+            "idle" => Some(Activity::Idle),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Claude {
+    pub pid: i32,
+    pub args: Vec<String>,
+    pub session: Option<Session>,
+}
+
+impl Claude {
+    pub fn activity(&self, title: &str) -> Activity {
+        self.session.as_ref().and_then(Session::activity).or_else(|| from_title(title)).unwrap_or(Activity::Idle)
+    }
 }
 
 pub fn claude_dir(home: Option<&Path>) -> Option<PathBuf> {
@@ -105,26 +142,6 @@ fn claude_dir_from(env: Option<OsString>, home: Option<&Path>) -> Option<PathBuf
     match env {
         Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
         _ => home.map(|home| home.join(".claude")),
-    }
-}
-
-pub fn claude(dir: Option<&Path>, pid: i32, title: &str) -> Activity {
-    dir.and_then(|dir| std::fs::read_to_string(dir.join("sessions").join(format!("{pid}.json"))).ok())
-        .and_then(|text| session(&text, pid))
-        .or_else(|| from_title(title))
-        .unwrap_or(Activity::Idle)
-}
-
-fn session(text: &str, pid: i32) -> Option<Activity> {
-    let session: Session = serde_json::from_str(text).ok()?;
-    if session.pid.is_some_and(|p| p != i64::from(pid)) {
-        return None;
-    }
-    match session.status.as_deref()? {
-        "busy" | "shell" => Some(Activity::Working),
-        "waiting" => Some(Activity::Waiting),
-        "idle" => Some(Activity::Idle),
-        _ => None,
     }
 }
 
@@ -150,6 +167,14 @@ mod tests {
     use super::*;
     use crate::test_util::TempDir;
 
+    fn session(text: &str, pid: i32) -> Option<Activity> {
+        Session::parse(text, pid).and_then(|s| s.activity())
+    }
+
+    fn claude(dir: Option<&Path>, pid: i32, title: &str) -> Activity {
+        Claude { pid, args: Vec::new(), session: Session::read(dir, pid) }.activity(title)
+    }
+
     mod session_file {
         use super::*;
 
@@ -165,6 +190,15 @@ mod tests {
         #[case::half_written(r#"{"pid":7,"sta"#, None)]
         fn says_what_claude_is_doing(#[case] text: &str, #[case] expected: Option<Activity>) {
             assert_eq!(session(text, 7), expected);
+        }
+
+        #[test]
+        fn names_the_conversation_and_where_it_started() {
+            let text = r#"{"pid":7,"sessionId":"a01c","cwd":"/home/a/shop","status":"idle","version":"2.1.289"}"#;
+
+            let found = Session::parse(text, 7).map(|s| (s.id, s.cwd));
+
+            assert_eq!(found, Some((Some("a01c".into()), Some(PathBuf::from("/home/a/shop")))));
         }
 
         #[test]

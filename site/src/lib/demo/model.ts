@@ -1,5 +1,5 @@
 import type { Tree } from './data';
-import type { Place, Shell } from './programs';
+import type { Context, Place, Shell } from './programs';
 import type { Node } from './split';
 
 export interface Pos {
@@ -12,6 +12,7 @@ export interface Pane {
   shell: Shell;
   rightClicks: boolean;
   activity?: Activity | null;
+  context?: Context | null;
   unseen?: boolean;
   since?: number;
   notified?: boolean;
@@ -210,4 +211,5 @@ function mostUrgent(statuses: (Status | null)[]): Status | null {
 
 export const attention = (statuses: (Status | null)[]): Status | null => mostUrgent(statuses.filter((s) => s === 'done' || s === 'waiting'));
 export const tabStatus = (t: Tab): Status | null => mostUrgent(t.panes.map(paneStatus));
+export const tabContext = (t: Tab): Context | null => activePane(t)?.context ?? t.panes.find((p) => p.context)?.context ?? null;
 export const projectAttention = (p: Project): Status | null => attention(p.workspaces.flatMap((w) => w.tabs.map(tabStatus)));

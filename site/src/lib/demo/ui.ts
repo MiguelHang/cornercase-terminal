@@ -13,6 +13,7 @@ import {
   bottom,
   buttonWidth,
   closeButton,
+  GAP,
   formArea,
   inner,
   intersect,
@@ -29,12 +30,14 @@ import {
   styleDone,
   styleIcon,
   styleLabels,
+  tabLines,
   tabsIn,
   usageArea,
   usageDone,
 } from './layout';
 import { USAGE, USAGE_PLAN, type UsageWindow } from './data';
-import { type Group, type IssuesOverlay, type Pane, type SettingsOverlay, type Status, type Tab, attention, projectAttention, projectLabel, tabLabel, tabStatus, workspaceLabel } from './model';
+import { type Group, type IssuesOverlay, type Pane, type SettingsOverlay, type Status, type Tab, attention, projectAttention, projectLabel, tabContext, tabLabel, tabStatus, workspaceLabel } from './model';
+import type { Context } from './programs';
 import { type Divider, dividers, grab, panes } from './split';
 import { type Line, type Seg, drawLine, seg, truncateLeft, truncateRight, wrapAll } from './text';
 
@@ -68,8 +71,11 @@ const STATUS_ICONS: Record<Status, Seg> = {
 };
 const BRAND = 99;
 const SEVERITY: Record<UsageWindow['severity'], number> = { normal: 2, warning: 208, critical: 1 };
+const severityOf = (percent: number): UsageWindow['severity'] => (percent >= 90 ? 'critical' : percent >= 75 ? 'warning' : 'normal');
 const USAGE_FILLED = '█';
 const USAGE_EMPTY = '░';
+const CONTEXT_SEPARATOR = ' · ';
+const MIN_MODEL_WIDTH = 4;
 
 function updated(ms: number): string {
   const minutes = Math.floor(ms / 60_000);
@@ -364,12 +370,26 @@ export class Painter {
     }
   }
 
-  private closeX(row: Rect, bg: Style, act: () => void): void {
+  private closeX(row: Rect, pitch: number, bg: Style, act: () => void): void {
     if (!this.sidebarHovered(row)) return;
-    const r = closeButton(row);
+    const r = closeButton(row, pitch);
     const style = this.hovered(r) ? { ...bg, fg: 1, add: BOLD } : { ...bg, fg: 8 };
     this.band(r, [seg(centered('×', r.w))], style);
     this.region({ r, click: act, cursor: 'pointer' });
+  }
+
+  private context(row: Rect, pitch: number, context: Context, indent: number): void {
+    const r = intersect(rect(row.x, middle(row).y + 1, row.w, 1), row);
+    const close = closeButton(row, pitch);
+    const room = r.w - indent - (bottom(close) > r.y ? close.w : 0) - 1;
+    const percent = `${context.percent}%`;
+    const severity = severityOf(context.percent);
+    const level: Style = severity === 'normal' ? DARK : { fg: SEVERITY[severity] };
+    const modelRoom = room - percent.length - CONTEXT_SEPARATOR.length;
+    const line: Line = [seg(' '.repeat(indent))];
+    if (modelRoom >= MIN_MODEL_WIDTH) line.push(seg(truncateRight(context.model, modelRoom), DARK), seg(CONTEXT_SEPARATOR, DARK));
+    line.push(seg(percent, level));
+    this.line(r, line);
   }
 
   private groupHeader(group: Group, max: number): Line[number] {
@@ -391,7 +411,7 @@ export class Painter {
         const inside = app.projects.filter((p) => p.group === group.id).length;
         const count = group.collapsed ? ` (${inside})` : '';
         const badge = group.collapsed ? attention(app.projects.filter((p) => p.group === group.id).map(projectAttention)) : null;
-        const room = r.w - 4 - closeButton(r).w - 1;
+        const room = r.w - 4 - closeButton(r, areas.pitch).w - 1;
         const used = 2 + count.length;
         const marks = fitTags(badge ? [STATUS_ICONS[badge]] : [], room - used);
         const max = marks.segs.length ? room - used - marks.reserved : r.w - 8 - count.length;
@@ -406,7 +426,7 @@ export class Painter {
       const active = pi === app.active;
       const bg = this.rowBackground(r, active);
       const indent = p.group !== undefined ? '  ' : '';
-      const reserved = 6 + indent.length + (closeButton(r).w - 3);
+      const reserved = 6 + indent.length + (closeButton(r, areas.pitch).w - 3);
       const count = ` (${p.workspaces.length})`;
       const room = r.w - reserved;
       const badge = projectAttention(p);
@@ -416,7 +436,7 @@ export class Painter {
       pushTags(line, marks, [...name].length + count.length, room);
       this.band(r, line, bg);
       this.region({ r, click: () => app.selectProject(pi), right: (x, y) => app.openMenu({ x, y }, { kind: 'project', project: p.id }), cursor: 'pointer' });
-      this.closeX(r, bg, () => app.closeProject(pi));
+      this.closeX(r, areas.pitch, bg, () => app.closeProject(pi));
     });
     const [above, under] = rows.hidden();
     const named = (from: number, to: number) => sidebar.slice(from, to).filter((s) => s.kind !== 'gap').length;
@@ -457,12 +477,17 @@ export class Painter {
       w.tabs.forEach((_, ti) => rowsSpec.push({ kind: 'tab', w: wi, t: ti }));
       rowsSpec.push({ kind: 'new', w: wi });
     });
-    const rows = new Rows(list, rowsSpec.map((r) => (r.kind === 'gap' ? 1 : areas.pitch)), areas.pitch, app.workspacesScroll);
+    const height = (r: Row): number => {
+      if (r.kind === 'gap') return GAP;
+      if (r.kind === 'tab') return Math.max(areas.pitch, tabLines(!!tabContext(p.workspaces[r.w].tabs[r.t])));
+      return areas.pitch;
+    };
+    const rows = new Rows(list, rowsSpec.map(height), areas.pitch, app.workspacesScroll);
     this.region({ r: list, wheel: (dy) => app.scrollWorkspaces(rows, dy) });
     rowsSpec.forEach((spec, i) => {
       const r = rows.item(i);
       if (isEmpty(r) || spec.kind === 'gap') return;
-      const closeWidth = closeButton(r).w;
+      const closeWidth = closeButton(r, areas.pitch).w;
       if (spec.kind === 'ws') {
         const w = p.workspaces[spec.w];
         const style: Style = spec.w === p.active ? { fg: 15, add: BOLD } : { fg: 7, add: BOLD };
@@ -476,7 +501,7 @@ export class Painter {
         const bg = this.rowBackground(r, false);
         this.band(r, segs, bg);
         this.region({ r, click: () => app.selectWorkspace(spec.w), right: (x, y) => app.openMenu({ x, y }, { kind: 'workspace', project: p.id, workspace: w.id }), cursor: 'pointer' });
-        this.closeX(r, bg, () => app.closeWorkspace(spec.w));
+        this.closeX(r, areas.pitch, bg, () => app.closeWorkspace(spec.w));
       } else if (spec.kind === 'tab') {
         const w = p.workspaces[spec.w];
         const t = w.tabs[spec.t];
@@ -488,8 +513,10 @@ export class Painter {
         if (status) line.push(STATUS_ICONS[status], seg(' '));
         line.push(seg(name, active ? { fg: 15 } : { fg: 7 }));
         this.band(r, line, bg);
+        const context = tabContext(t);
+        if (context) this.context(r, areas.pitch, context, 4 + (status ? 2 : 0));
         this.region({ r, click: () => app.selectTab(spec.w, spec.t), right: (x, y) => app.openMenu({ x, y }, { kind: 'tab', project: p.id, workspace: w.id, tab: t.id }), cursor: 'pointer' });
-        this.closeX(r, bg, () => app.closeTab(spec.w, spec.t));
+        this.closeX(r, areas.pitch, bg, () => app.closeTab(spec.w, spec.t));
       } else {
         this.button(r, '   ', '+ tab', this.buttonStyle(r, DARK, 6));
         this.region({ r, click: () => app.addTab(spec.w), cursor: 'pointer' });

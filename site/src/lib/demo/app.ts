@@ -81,10 +81,14 @@ const RENAME: Record<Target['kind'], { label: string; hint: string }> = {
   tab: { label: 'rename tab', hint: 'leave it empty to use the program name' },
 };
 
-function agentActivity(pane: Pane): Activity | null {
+function claudeIn(pane: Pane): Agent | null {
   const fg = pane.shell.fg;
-  if (!(fg instanceof Agent) || fg.name !== 'claude') return null;
-  return fg.working ? 'working' : 'idle';
+  return fg instanceof Agent && fg.name === 'claude' ? fg : null;
+}
+
+function agentActivity(claude: Agent | null): Activity | null {
+  if (!claude) return null;
+  return claude.working ? 'working' : 'idle';
 }
 
 export class App {
@@ -222,7 +226,9 @@ export class App {
       for (const w of p.workspaces) {
         for (const t of w.tabs) {
           for (const pane of t.panes) {
-            const status = watchPane(pane, agentActivity(pane), t === visible, now);
+            const claude = claudeIn(pane);
+            pane.context = claude?.context ?? null;
+            const status = watchPane(pane, agentActivity(claude), t === visible, now);
             if (status) this.notify(`claude ${status === 'waiting' ? 'needs you' : 'finished'} in ${projectLabel(p)} › ${workspaceLabel(w)}`, status);
             else if (pane.since === now && !pane.notified) this.after(NOTIFY_AFTER, () => this.dirty());
           }

@@ -12,7 +12,7 @@ A terminal multiplexer for working on several projects at once, each with its ow
 - **Git worktrees.** A new workspace in a git repository can get its own worktree and branch. Worktrees created outside cornercase show up too. Files listed in `.worktreeinclude` (such as `.env`) are copied into new checkouts.
 - **Splits.** Right-click a pane to split it right or down; drag the dividers to resize.
 - **Issues to agents.** Browse GitHub issues, Shortcut stories and Linear issues, read them as Markdown, and start one: cornercase creates a worktree on a matching branch, launches your coding agent (Claude Code, Codex, Gemini, …) in a new tab and hands it the issue.
-- **Agent status.** A tab running Claude Code shows whether it is working (`◐`), needs you (`!`) or finished while you were elsewhere (`✓`). `!` and `✓` also mark its workspace and project, so an agent waiting in another project doesn't go unnoticed.
+- **Agent status.** A tab running Claude Code shows whether it is working (`◐`), needs you (`!`) or finished while you were elsewhere (`✓`), and under its name the model and how full its context is (`Opus 5.5 · 23%`). `!` and `✓` also mark its workspace and project, so an agent waiting in another project doesn't go unnoticed.
 - **Sessions survive the UI.** A background server owns the shells. Closing the window or clicking ` quit ` detaches; running `cornercase` again reattaches. Several terminals can attach at once and mirror each other.
 - **A real terminal inside.** Panes are emulated with [libghostty-vt](https://github.com/ghostty-org/ghostty), Ghostty's terminal core, so nvim, fzf, htop and full-screen agents work as expected.
 - **Responsive.** Below 90 columns the sidebars fold into a menu bar.

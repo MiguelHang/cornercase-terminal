@@ -4,6 +4,11 @@ import { ADDRESS_FIXED_RS, COMMITS, type Tree } from './data';
 import { highlight, language } from './highlight';
 import { type Line, drawLine, paintRows, pad, plain, seg, truncateRight, wrapAll } from './text';
 
+export interface Context {
+  model: string;
+  percent: number;
+}
+
 export interface Key {
   key: string;
   ctrl?: boolean;
@@ -693,6 +698,11 @@ export function taskFor(prompt: string, place: Place): Task {
   };
 }
 
+const AGENT_MODEL = 'Opus 5.5';
+const AGENT_WINDOW = 1_000_000;
+const PROMPT_TOKENS = 38_000;
+const REPLY_TOKENS = 9_000;
+
 export class Agent implements Program {
   readonly mouse = false;
   private phase: 'boot' | 'trust' | 'ready' | 'working' = 'boot';
@@ -702,6 +712,7 @@ export class Agent implements Program {
   private frame = 0;
   private timers: (() => void)[] = [];
   private spinning = false;
+  private tokens = 0;
 
   constructor(
     private host: Host,
@@ -740,6 +751,14 @@ export class Agent implements Program {
 
   get pending(): string {
     return this.input;
+  }
+
+  get context(): Context | null {
+    return this.tokens ? { model: AGENT_MODEL, percent: Math.min(100, Math.round((this.tokens / AGENT_WINDOW) * 100)) } : null;
+  }
+
+  private reply(): void {
+    this.tokens = (this.tokens || PROMPT_TOKENS) + REPLY_TOKENS;
   }
 
   screen(): string {
@@ -832,13 +851,17 @@ export class Agent implements Program {
     this.phase = 'working';
     this.spin();
     let delay = 0;
-    task.steps.slice(0, shown).forEach((step) => this.log.push([seg('● ', MAGENTA), seg(step)]));
+    task.steps.slice(0, shown).forEach((step) => {
+      this.log.push([seg('● ', MAGENTA), seg(step)]);
+      this.reply();
+    });
     task.steps.slice(shown).forEach((step, k) => {
       const i = k + shown;
       delay += (pace || 900) + Math.random() * 700;
       this.timers.push(
         this.host.after(delay, () => {
           this.log.push([seg('● ', MAGENTA), seg(step, i === task.steps.length - 1 ? GREEN : {})]);
+          this.reply();
           this.host.dirty();
         }),
       );
@@ -846,6 +869,7 @@ export class Agent implements Program {
     this.timers.push(
       this.host.after(delay + 900, () => {
         this.log.push([], [seg('✓ ', GREEN), seg(task.result, { add: BOLD })], []);
+        this.reply();
         this.phase = 'ready';
         this.spinning = false;
         task.onDone?.();
