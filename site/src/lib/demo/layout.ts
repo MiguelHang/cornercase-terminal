@@ -394,10 +394,12 @@ export class Rows {
 
 export const moreAbove = (list: Rect): Rect => (list.y < GAP ? EMPTY : rect(list.x, list.y - GAP, list.w, 1));
 
-export const closeButton = (row: Rect): Rect => {
-  const w = row.h > 1 ? 5 : 3;
-  return rect(right(row) - w, row.y, Math.min(w, row.w), row.h);
+export const closeButton = (row: Rect, pitch: number): Rect => {
+  const w = pitch > 1 ? 5 : 3;
+  return rect(right(row) - w, row.y, Math.min(w, row.w), Math.min(pitch, row.h));
 };
+
+export const tabLines = (context: boolean): number => (context ? 2 : 1);
 
 export function centered(cols: number, rows: number, w: number, h: number): Rect {
   return rect(Math.floor((cols - w) / 2), Math.floor((rows - h) / 2), w, h);

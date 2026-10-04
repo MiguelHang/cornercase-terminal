@@ -9,6 +9,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 
 use crate::activity;
 use crate::app::AppEvent;
+use crate::context;
 use crate::emulator::Emulator;
 use crate::error::{Error, Result};
 use crate::host_theme::HostTheme;
@@ -24,6 +25,7 @@ pub struct Term {
     pub id: u64,
     pub emulator: Emulator,
     pub agent: activity::Pane,
+    pub context: context::Pane,
     master: Box<dyn MasterPty + Send>,
     writer: Writer,
     child: Box<dyn Child + Send + Sync>,
@@ -77,8 +79,16 @@ impl Term {
             .map_err(|e| Error::Emulator(e.into()))?;
         spawn_reader(id, reader, tx);
 
-        let agent = activity::Pane::default();
-        Ok(Self { id, emulator, agent, master: pair.master, writer, child, size: (rows, cols) })
+        Ok(Self {
+            id,
+            emulator,
+            agent: activity::Pane::default(),
+            context: context::Pane::default(),
+            master: pair.master,
+            writer,
+            child,
+            size: (rows, cols),
+        })
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {

@@ -8,7 +8,7 @@ use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 
-use crate::activity::{self, Activity};
+use crate::activity::{self, Claude, Session};
 use crate::agents;
 use crate::changes::diff::File as ChangedFile;
 use crate::changes::{self, BranchPicker, Checkout, Tints};
@@ -275,10 +275,10 @@ impl Toast {
     }
 }
 
-fn claude_activity(config: &Config, dir: Option<&Path>, term: &Term) -> Option<Activity> {
+fn claude_in(config: &Config, dir: Option<&Path>, term: &Term) -> Option<Claude> {
     let pid = term.foreground_pid()?;
-    let agent = agents::detect(config, &process::args(pid))?;
-    (agent == agents::CLAUDE).then(|| activity::claude(dir, pid, &term.emulator.title()))
+    let args = process::args(pid);
+    (agents::detect(config, &args)? == agents::CLAUDE).then(|| Claude { pid, args, session: Session::read(dir, pid) })
 }
 
 fn wheel(kind: MouseEventKind) -> Option<isize> {
@@ -513,7 +513,9 @@ impl App {
                     let seen = visible == Some(tab.id);
                     for term in &mut tab.panes {
                         if read {
-                            let activity = claude_activity(config, dir, term);
+                            let claude = claude_in(config, dir, term);
+                            let activity = claude.as_ref().map(|c| c.activity(&term.emulator.title()));
+                            term.context.update(dir, claude.as_ref());
                             if let Some(status) = term.agent.update(activity, seen, now)
                                 && !notices.contains(&(status, project.id, workspace.id))
                             {
@@ -763,7 +765,7 @@ impl App {
         if let Some(workspace) = project.workspace().filter(|w| !w.tabs.is_empty()) {
             shown.push(WorkspaceRow::Tab(w, workspace.active));
         }
-        let tabs = self.tab_counts();
+        let tabs = self.tab_lines();
         let rows = ui::workspace_rows(&tabs);
         for row in shown {
             if let Some(i) = rows.iter().position(|r| *r == row) {
@@ -1149,7 +1151,7 @@ impl App {
             self.projects_scroll = rows.scrolled(items);
             true
         } else if areas.workspaces.contains(pos) {
-            let tabs = self.tab_counts();
+            let tabs = self.tab_lines();
             let layout = ui::workspace_layout(areas.workspaces_list, areas.pitch, &tabs, self.workspaces_scroll);
             self.workspaces_scroll = layout.scrolled(items);
             true
@@ -1367,15 +1369,17 @@ impl App {
         }
     }
 
-    fn tab_counts(&self) -> Vec<usize> {
-        self.project().map(|p| p.workspaces.iter().map(|w| w.tabs.len()).collect()).unwrap_or_default()
+    fn tab_lines(&self) -> Vec<Vec<u16>> {
+        let lines =
+            |w: &Workspace| -> Vec<u16> { w.tabs.iter().map(|t| ui::tab_lines(t.context().is_some())).collect() };
+        self.project().map(|p| p.workspaces.iter().map(lines).collect()).unwrap_or_default()
     }
 
     fn click_workspaces(&mut self, list: Rect, pitch: u16, pos: Position, area: Rect) -> Result<()> {
         if self.project().is_none() {
             return Ok(());
         }
-        let hit = ui::workspace_hit(list, pitch, &self.tab_counts(), self.workspaces_scroll, pos);
+        let hit = ui::workspace_hit(list, pitch, &self.tab_lines(), self.workspaces_scroll, pos);
         if !matches!(hit, None | Some(WorkspaceHit::CloseWorkspace(_) | WorkspaceHit::CloseTab(..))) {
             self.nav = None;
         }
@@ -2047,7 +2051,7 @@ impl App {
 
     fn open_workspace_menu(&mut self, list: Rect, pitch: u16, pos: Position) {
         let Some(project) = self.project() else { return };
-        let target = match ui::workspace_hit(list, pitch, &self.tab_counts(), self.workspaces_scroll, pos) {
+        let target = match ui::workspace_hit(list, pitch, &self.tab_lines(), self.workspaces_scroll, pos) {
             Some(WorkspaceHit::Workspace(w) | WorkspaceHit::CloseWorkspace(w)) => {
                 Target::Workspace(project.id, project.workspaces[w].id)
             }
@@ -2770,7 +2774,15 @@ impl App {
                     .iter()
                     .map(|w| ui::WorkspaceEntry {
                         name: w.label(),
-                        tabs: w.tabs.iter().map(|t| ui::TabEntry { name: t.label(), status: t.status() }).collect(),
+                        tabs: w
+                            .tabs
+                            .iter()
+                            .map(|t| ui::TabEntry {
+                                name: t.label(),
+                                status: t.status(),
+                                context: t.context().cloned(),
+                            })
+                            .collect(),
                         behind: w.behind,
                     })
                     .collect(),
@@ -3347,7 +3359,7 @@ mod tests {
     }
 
     fn row_rect(app: &App, row: WorkspaceRow) -> Rect {
-        ui::workspace_row(areas().workspaces_list, areas().pitch, &app.tab_counts(), app.workspaces_scroll, row)
+        ui::workspace_row(areas().workspaces_list, areas().pitch, &app.tab_lines(), app.workspaces_scroll, row)
     }
 
     fn row_pos(app: &App, row: WorkspaceRow) -> Position {
@@ -3356,7 +3368,7 @@ mod tests {
     }
 
     fn row_close(app: &App, row: WorkspaceRow) -> Position {
-        ui::row_close_button(row_rect(app, row)).as_position()
+        ui::row_close_button(row_rect(app, row), areas().pitch).as_position()
     }
 
     fn click_row(app: &mut App, row: WorkspaceRow) {
@@ -3375,7 +3387,7 @@ mod tests {
     }
 
     fn new_workspace_pos(app: &App) -> Position {
-        ui::new_workspace_button(areas().workspaces_list, areas().pitch, &app.tab_counts()).as_position()
+        ui::new_workspace_button(areas().workspaces_list, areas().pitch, &app.tab_lines()).as_position()
     }
 
     fn form_value(app: &App) -> Option<&str> {
@@ -4670,6 +4682,15 @@ rm -f "$s"
 
         const SILENT_CLAUDE: &str = "#!/bin/sh\nwhile [ -d \"$1\" ] && [ ! -e \"$1/quit\" ]; do sleep 0.02; done\n";
 
+        const ANSWERING_CLAUDE: &str = r#"#!/bin/sh
+p=$(printf '%s' "$PWD" | tr -c 'a-zA-Z0-9' '-')
+mkdir -p "$1/projects/$p"
+printf '{"type":"assistant","message":{"model":"claude-opus-5-5","usage":{"input_tokens":2,"cache_creation_input_tokens":15655,"cache_read_input_tokens":149954}}}\n' > "$1/projects/$p/s1.jsonl"
+printf '{"pid":%s,"sessionId":"s1","cwd":"%s","status":"idle"}' $$ "$PWD" > "$1/sessions/$$.json"
+while [ -d "$1" ] && [ ! -e "$1/quit" ]; do sleep 0.02; done
+rm -f "$1/sessions/$$.json"
+"#;
+
         struct Claude {
             dir: TempDir,
             _bin: TempDir,
@@ -4691,7 +4712,8 @@ rm -f "$s"
 
             fn start(&self, app: &mut App) {
                 app.claude_dir = Some(self.dir.path().to_path_buf());
-                type_line(app, &format!("{} {}", self.script.display(), self.dir.path().display()));
+                let unset = format!("env -u {} -u {}", crate::context::NO_LONG_ENV, crate::context::NO_COMPACT_ENV);
+                type_line(app, &format!("{unset} {} {}", self.script.display(), self.dir.path().display()));
             }
 
             fn signal(&self, name: &str) {
@@ -4786,6 +4808,20 @@ rm -f "$s"
         }
 
         #[test]
+        fn a_tab_running_claude_shows_its_model_and_context_under_its_name() {
+            let (mut app, rx, _dirs) = app_with(1);
+            let claude = Claude::running(ANSWERING_CLAUDE);
+            claude.start(&mut app);
+            watch_until(&mut app, &rx, "claude answers", |a| a.projects[0].workspaces[0].tabs[0].context().is_some());
+
+            let r = row_rect(&app, WorkspaceRow::Tab(0, 0));
+            let below = text(&rendered(&mut app, AREA), Rect { y: r.y + 1, height: 1, ..r });
+            claude.signal("quit");
+
+            assert_eq!((r.height, below.trim_end()), (2, "      Opus 5.5 · 17%"));
+        }
+
+        #[test]
         fn another_project_and_the_menu_button_show_that_claude_finished() {
             let (mut app, rx, _dirs) = app_with(2);
             app.active = 0;
@@ -4817,7 +4853,7 @@ rm -f "$s"
                 let (mut app, rx, dirs) = app_with(1);
                 let claude = Claude::running(SILENT_CLAUDE);
                 claude.start(&mut app);
-                pump_until(&mut app, &rx, "claude runs", |a| claude_activity(&a.config, None, term(a, 0)).is_some());
+                pump_until(&mut app, &rx, "claude runs", |a| claude_in(&a.config, None, term(a, 0)).is_some());
                 let pid = term(&app, 0).foreground_pid().expect("the pid of claude");
                 let mut watched = Self { app, _rx: rx, _dirs: dirs, claude, pid };
                 watched.report("busy", 1);
@@ -4916,13 +4952,8 @@ rm -f "$s"
         }
 
         fn row(app: &App, row: WorkspaceRow) -> Position {
-            let r = ui::workspace_row(
-                small().workspaces_list,
-                small().pitch,
-                &app.tab_counts(),
-                app.workspaces_scroll,
-                row,
-            );
+            let r =
+                ui::workspace_row(small().workspaces_list, small().pitch, &app.tab_lines(), app.workspaces_scroll, row);
             Position::new(r.x + 3, r.y)
         }
 
@@ -4984,14 +5015,9 @@ rm -f "$s"
             let (mut app, _rx, _dirs) = app_with(1);
             app.add_tab(0, 0, SMALL).expect("add a tab");
             open_menu(&mut app);
-            let r = ui::workspace_row(
-                small().workspaces_list,
-                small().pitch,
-                &app.tab_counts(),
-                0,
-                WorkspaceRow::Tab(0, 0),
-            );
-            press(&mut app, ui::row_close_button(r).as_position());
+            let r =
+                ui::workspace_row(small().workspaces_list, small().pitch, &app.tab_lines(), 0, WorkspaceRow::Tab(0, 0));
+            press(&mut app, ui::row_close_button(r, small().pitch).as_position());
             assert_eq!(app.nav, Some(ui::Nav::Workspaces));
         }
 
@@ -5113,7 +5139,7 @@ rm -f "$s"
             let row = ui::workspace_row(
                 short().workspaces_list,
                 short().pitch,
-                &app.tab_counts(),
+                &app.tab_lines(),
                 app.workspaces_scroll,
                 WorkspaceRow::Tab(0, 3),
             );
@@ -6222,7 +6248,7 @@ rm -f "$s"
             let (mut app, _rx, _dirs) = stacked(1);
             app.add_tab(0, 0, TALL).expect("add a tab");
             let list = app.layout(TALL).workspaces_list;
-            let tab = ui::workspace_row(list, 1, &app.tab_counts(), app.workspaces_scroll, WorkspaceRow::Tab(0, 0));
+            let tab = ui::workspace_row(list, 1, &app.tab_lines(), app.workspaces_scroll, WorkspaceRow::Tab(0, 0));
             press_at(&mut app, MouseEventKind::Down(MouseButton::Left), tab.as_position());
             assert_eq!(app.projects[0].workspaces[0].active, 0);
         }

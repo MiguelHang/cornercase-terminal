@@ -2,6 +2,11 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.1.13
+
+- See how full Claude Code's context is without opening its tab: once Claude has answered, a second line under the tab's name shows its model and how much of its context window the conversation takes up, such as `Opus 5.5 · 23%`, the same percentage as Claude's own status line. It turns orange from 75% and red from 90%.
+- The numbers come from the transcript Claude Code keeps for the session. The size of the window is worked out the way Claude Code does it, from the model and from `[1m]`, `CLAUDE_CODE_DISABLE_1M_CONTEXT` or `CLAUDE_CODE_MAX_CONTEXT_TOKENS` in Claude's settings or environment.
+
 ## 0.1.12
 
 - Give your panes more room: settings → TUI → sidebar puts the workspaces column below the projects column (projects_on_top), or above it (workspaces_on_top), in one column. Drag the line between the two lists to share the height, and double-click it to split it in half again.

@@ -5,6 +5,7 @@ pub mod changes;
 pub mod client;
 pub mod clipboard;
 pub mod config;
+pub mod context;
 pub mod emulator;
 pub mod error;
 pub mod git;

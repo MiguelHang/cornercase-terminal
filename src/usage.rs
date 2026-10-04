@@ -41,13 +41,21 @@ pub enum Severity {
 }
 
 impl Severity {
+    pub fn of(percent: u16) -> Self {
+        if percent >= CRITICAL_FROM {
+            Self::Critical
+        } else if percent >= WARNING_FROM {
+            Self::Warning
+        } else {
+            Self::Normal
+        }
+    }
+
     fn parse(text: Option<&str>, percent: u16) -> Self {
         match text {
             Some("normal") => Self::Normal,
             Some("warning") => Self::Warning,
-            _ if percent >= CRITICAL_FROM => Self::Critical,
-            _ if percent >= WARNING_FROM => Self::Warning,
-            _ => Self::Normal,
+            _ => Self::of(percent),
         }
     }
 }

@@ -35,6 +35,35 @@ impl Drop for TempDir {
     }
 }
 
+pub struct Sleeper(std::process::Child);
+
+impl Sleeper {
+    pub fn with_env(vars: &[(&str, &str)]) -> Self {
+        let child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .env_clear()
+            .envs(vars.iter().copied())
+            .spawn()
+            .expect("spawn sleep");
+        let sleeper = Self(child);
+        wait_until("sleep starts", || {
+            crate::process::args(sleeper.pid()).first().is_some_and(|a| a.ends_with("sleep"))
+        });
+        sleeper
+    }
+
+    pub fn pid(&self) -> i32 {
+        i32::try_from(self.0.id()).expect("pid fits in i32")
+    }
+}
+
+impl Drop for Sleeper {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 pub fn is_sh(name: &str) -> bool {
     matches!(name, "sh" | "bash" | "dash")
 }

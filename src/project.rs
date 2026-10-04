@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::activity::Status;
+use crate::context::Context;
 use crate::split::{self, Dir, Node};
 use crate::term::Term;
 use crate::ui::GroupEntry;
@@ -44,6 +45,10 @@ impl Tab {
 
     pub fn status(&self) -> Option<Status> {
         self.panes.iter().filter_map(|t| t.agent.status()).max()
+    }
+
+    pub fn context(&self) -> Option<&Context> {
+        self.pane().and_then(|t| t.context.context()).or_else(|| self.panes.iter().find_map(|t| t.context.context()))
     }
 
     pub fn focus(&mut self, id: u64) {

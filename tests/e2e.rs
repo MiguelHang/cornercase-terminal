@@ -273,8 +273,12 @@ fn workspaces_list() -> Rect {
     areas().workspaces_list
 }
 
+fn tab_lines(counts: &[usize]) -> Vec<Vec<u16>> {
+    counts.iter().map(|&n| vec![ui::tab_lines(false); n]).collect()
+}
+
 fn workspace_row(tabs: &[usize], row: WorkspaceRow) -> Position {
-    let r = ui::workspace_row(workspaces_list(), 1, tabs, 0, row);
+    let r = ui::workspace_row(workspaces_list(), 1, &tab_lines(tabs), 0, row);
     Position::new(r.x + 3, r.y)
 }
 
@@ -374,7 +378,7 @@ fn a_tab_running_claude_shows_what_it_is_doing() {
         &claude,
         "#!/bin/sh\nprintf '{\"pid\":%s,\"status\":\"waiting\"}' $$ > \"$1/$$.json\"\nread answer\nrm -f \"$1/$$.json\"\n",
     );
-    let tab = usize::from(ui::workspace_row(workspaces_list(), 1, &[1], 0, WorkspaceRow::Tab(0, 0)).y);
+    let tab = usize::from(ui::workspace_row(workspaces_list(), 1, &tab_lines(&[1]), 0, WorkspaceRow::Tab(0, 0)).y);
     let tab_row = |s: &str| s.lines().nth(tab).unwrap_or_default().to_string();
 
     app.send(format!("{} {}\r", claude.display(), sessions.display()).as_bytes());
@@ -399,7 +403,7 @@ fn claude_asking_in_a_hidden_tab_reaches_the_desktop_through_the_outer_terminal(
          printf '{\"pid\":%s,\"status\":\"waiting\"}' $$ > \"$1/$$.json\"\nread answer\n",
     );
     app.send(format!("{} {}\r", claude.display(), sessions.display()).as_bytes());
-    let tab = usize::from(ui::workspace_row(workspaces_list(), 1, &[1], 0, WorkspaceRow::Tab(0, 0)).y);
+    let tab = usize::from(ui::workspace_row(workspaces_list(), 1, &tab_lines(&[1]), 0, WorkspaceRow::Tab(0, 0)).y);
     app.wait_for("the tab says claude works", |s| s.lines().nth(tab).unwrap_or_default().contains("◐"));
     app.click(workspace_row(&[1], WorkspaceRow::NewTab(0)));
     app.wait_for("the second tab is active", |s| s.contains("$ ") && !s.contains(&claude.display().to_string()));
@@ -855,17 +859,17 @@ fn a_workspace_with_its_own_worktree_is_created_and_removed() {
     app.open_project(1, &repo);
     app.wait_for("the repo opens as project 2", |s| s.contains(&entry(&repo_name)));
 
-    app.click(ui::new_workspace_button(workspaces_list(), 1, &[1]).as_position());
+    app.click(ui::new_workspace_button(workspaces_list(), 1, &tab_lines(&[1])).as_position());
     app.wait_for("the form opens", |s| s.contains("with its own worktree"));
     app.send(b"e2e/login\r");
 
-    let label_row = ui::workspace_row(workspaces_list(), 1, &[1, 1], 0, WorkspaceRow::Workspace(1));
+    let label_row = ui::workspace_row(workspaces_list(), 1, &tab_lines(&[1, 1]), 0, WorkspaceRow::Workspace(1));
     app.wait_for("the worktree workspace opens", |s| s.contains("e2e/login") && !s.contains("cancel"));
     assert!(app.row(label_row.y).contains("e2e/login"), "workspace row: {:?}", app.row(label_row.y));
     let checkout = worktrees.join(&repo_name).join("e2e-login");
     assert_eq!(std::fs::read_to_string(checkout.join(".env")).ok().as_deref(), Some("TOKEN=1\n"));
 
-    app.click(ui::row_close_button(label_row).as_position());
+    app.click(ui::row_close_button(label_row, 1).as_position());
     app.wait_for("it asks first", |s| s.contains("remove workspace"));
     app.click(ui::form_buttons(ui::form_area(AREA), "remove")[0].as_position());
 

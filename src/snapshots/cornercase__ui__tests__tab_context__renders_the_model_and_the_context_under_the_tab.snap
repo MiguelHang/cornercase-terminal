@@ -1,0 +1,22 @@
+---
+source: src/ui.rs
+expression: render(&with_context(opus(17))).backend()
+---
+" ▄▀▀▀ cornercase                                         │  no tab open                             "
+" █                                                       │                                          "
+"                                                         │                                          "
+"  ⌕ search projects, workspaces, tabs                    │                                          "
+"                                                         │                                          "
+" projects                      │ workspaces              │                                          "
+"                               │                         │                                          "
+"▌ shop (1)                     │  login                  │                                          "
+"                               │  ▌ ◐ claude             │                                          "
+"  + new project                │      Opus 5.5 · 17%     │                                          "
+"                               │    nvim                 │                                          "
+"                               │    + tab                │                                          "
+"                               │                         │                                          "
+"                               │  + new workspace        │                                          "
+" ───────────────────────────── │                         │                                          "
+"  settings                     │                         │                                          "
+"  usage                        │                         │                                          "
+"  quit                         │                         │                                          "

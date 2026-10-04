@@ -35,7 +35,7 @@ When `CORNERCASE_SOCKET` is set, everything moves next to that socket, so a sepa
 
 - **Worktrees** that cornercase creates go in `~/.cornercase/worktrees/<repository>/<branch>`, or in the folder set in [settings](../configuration/#worktrees). They are ordinary git worktrees: `git worktree list` shows them.
 - While it [updates](../../installation/#update), cornercase unpacks the download in a hidden `.cornercase-update-<pid>` folder next to its binary, and removes it when done.
-- cornercase reads, and never writes, the files Claude Code keeps for its running sessions in `~/.claude/sessions/` (or `$CLAUDE_CONFIG_DIR/sessions/`), to show [what an agent is doing](../../guides/projects-workspaces-tabs/#what-your-agents-are-doing).
+- cornercase reads, and never writes, the files Claude Code keeps for its running sessions in `~/.claude/sessions/` (or `$CLAUDE_CONFIG_DIR/sessions/`), to show [what an agent is doing](../../guides/projects-workspaces-tabs/#what-your-agents-are-doing). To show [how full its context is](../../guides/projects-workspaces-tabs/#how-full-the-context-is), it also reads the end of each session's transcript in `~/.claude/projects/`, and Claude's settings: `~/.claude/settings.json`, and `.claude/settings.json` and `.claude/settings.local.json` in the folder where Claude started.
 - Inside your projects, cornercase only changes what you ask for: the worktrees you create (which git records in the repository's `.git` folder) and the files `.worktreeinclude` copies into them.
 
 ## Environment variables
@@ -49,7 +49,7 @@ When `CORNERCASE_SOCKET` is set, everything moves next to that socket, so a sepa
 | `SHORTCUT_API_TOKEN` | Shortcut token. Takes precedence over a saved one. |
 | `LINEAR_API_KEY` | Linear API key. Takes precedence over a saved one. |
 | `HOME` | Expands `~` in paths, and is the base of the default folders. |
-| `CLAUDE_CONFIG_DIR` | Where Claude Code keeps its files; cornercase reads its running sessions from `sessions/` in it. Without it, `~/.claude`. The `claude` that the [usage dialog](../../guides/projects-workspaces-tabs/#plan-usage) runs gets it too. |
+| `CLAUDE_CONFIG_DIR` | Where Claude Code keeps its files; cornercase reads its running sessions from `sessions/` in it, their transcripts from `projects/` and its `settings.json`. Without it, `~/.claude`. The `claude` that the [usage dialog](../../guides/projects-workspaces-tabs/#plan-usage) runs gets it too. |
 | `TERM_PROGRAM`, `LC_TERMINAL`, `TERM`, `KITTY_WINDOW_ID`, `KONSOLE_VERSION` | Recognising your terminal when it doesn't say its name, to send it [desktop notifications](../../guides/projects-workspaces-tabs/#notifications) it understands. |
 | `TMUX`, `STY`, `ZELLIJ` | Inside tmux, screen or Zellij, desktop notifications are a bell. |
 | `XDG_CONFIG_HOME` | Folder for `config.json` and `secrets.json`. |
@@ -61,6 +61,16 @@ When `CORNERCASE_SOCKET` is set, everything moves next to that socket, so a sepa
 <Aside type="caution" title="The server keeps the environment it started with">
 The server is started by the first `cornercase` you run, and keeps that command's environment for as long as it runs. Variables such as `SHELL`, `SHORTCUT_API_TOKEN`, `LINEAR_API_KEY` or `CORNERCASE_RELEASES_URL` are read then. After changing them, run `cornercase kill-server` and start again.
 </Aside>
+
+### Read from Claude Code
+
+To work out the size of Claude's context window, cornercase reads these from the environment of each running `claude`, and from the `env` in its settings, which take precedence. See [How full the context is](../../guides/projects-workspaces-tabs/#how-full-the-context-is).
+
+| Variable | Used for |
+| --- | --- |
+| `ANTHROPIC_MODEL` | The model Claude was started with, when `--model` isn't given; `[1m]` at its end means a 1M window. |
+| `CLAUDE_CODE_DISABLE_1M_CONTEXT` | A 200k window even for models that have 1M. |
+| `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, `DISABLE_COMPACT` | The window of a model Claude Code doesn't know, or of any model while compacting is turned off. |
 
 ### Set by cornercase in every pane
 
