@@ -310,3 +310,18 @@ export const MODES: Record<string, [string, string][]> = {
     ['yolo (dangerous)', '--yolo'],
   ],
 };
+
+export interface UsageWindow {
+  label: string;
+  percent: number;
+  severity: 'normal' | 'warning' | 'critical';
+  resets: string;
+}
+
+export const USAGE_PLAN = 'max';
+
+export const USAGE: UsageWindow[] = [
+  { label: 'session (5h)', percent: 34, severity: 'normal', resets: 'resets in 2h 14m' },
+  { label: 'week', percent: 81, severity: 'warning', resets: 'resets in 3d 4h' },
+  { label: 'week · Opus', percent: 12, severity: 'normal', resets: 'resets in 3d 4h' },
+];

@@ -48,6 +48,8 @@ pub enum Error {
     GhOutput(serde_json::Error),
     #[error("{0}")]
     Api(String),
+    #[error("{0}")]
+    Usage(String),
     #[error("`{0}` already exists")]
     PathExists(PathBuf),
     #[error(transparent)]

@@ -113,6 +113,7 @@ export class App {
   outerLines: Line[] = [];
   outerInput = '';
   config: Config = defaultConfig();
+  usage: { loading: boolean; at: number | null } = { loading: false, at: null };
   private ids = 1;
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private listeners: Listener[] = [];
@@ -995,6 +996,20 @@ export class App {
     this.dirty();
   }
 
+  openUsage(): void {
+    this.nav = null;
+    this.overlay = { kind: 'usage' };
+    this.emit('narrate', 'Your Claude Code plan limits, asked from claude itself: no prompt, no tokens.');
+    if (!this.usage.loading) {
+      this.usage.loading = true;
+      this.after(1500, () => {
+        this.usage = { loading: false, at: this.now() };
+        this.dirty();
+      });
+    }
+    this.dirty();
+  }
+
   openSettings(): void {
     this.nav = null;
     this.overlay = { kind: 'settings', page: 0, cursor: 0 };
@@ -1847,7 +1862,7 @@ export class App {
       if (k.key === 'Escape') this.closeOverlay();
       return true;
     }
-    if (o.kind === 'groupStyle') {
+    if (o.kind === 'groupStyle' || o.kind === 'usage') {
       if (k.key === 'Escape' || k.key === 'Enter') this.closeOverlay();
       return true;
     }

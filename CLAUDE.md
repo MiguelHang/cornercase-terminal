@@ -50,6 +50,7 @@ src/config.rs     user settings (config.json), `~` expansion, validation
 src/settings.rs   the settings modal's state; returns Actions for App
 src/agents.rs     known coding agents, their modes and arguments, which agent takes an issue, detection, trust prompt
 src/activity.rs   what the agent in a pane is doing: Claude Code's session file, its title glyph, done-but-unseen, rollups
+src/usage.rs      Claude Code plan usage: the `get_usage` control request, parsing, the modal's state
 src/notify.rs     desktop notifications through the outer terminal: which escape sequence a terminal understands, encoding
 src/launch.rs     starting an agent in a new tab (pure state machine)
 src/secrets.rs    Shortcut / Linear tokens in secrets.json (0600)
@@ -87,7 +88,7 @@ src/error.rs      library error type
 - **Mouse buttons only, no app shortcuts.** Every key goes to the program in the active pane, except while a modal or the search is open (then `Enter` submits, `Esc` cancels). Do not add keyboard shortcuts without asking. No `Alt` shortcuts (Option is a compose key on macOS), no `Ctrl+letter` (steals shell bindings). `e2e::ctrl_b_reaches_the_shell` guards this.
 - Closing the last project leaves the app open and empty. ` quit ` only detaches.
 - `×` buttons only show while hovering their row. Names are cut at the end (`ui::truncate_right`), paths at the start (`truncate_left`).
-- At most one overlay is open (menu, form, confirmation, settings, picker, issues, search). While it is open, no mouse event reaches the columns or the pane.
+- At most one overlay is open (menu, form, confirmation, settings, usage, picker, issues, search). While it is open, no mouse event reaches the columns or the pane.
 - Overlays, hover, scroll, column widths and the toast live in `App` and are shared by every attached client.
 
 **Layout (`ui.rs`)**
@@ -152,6 +153,13 @@ src/error.rs      library error type
 - The channel is the client's: inside tmux, screen or Zellij it is BEL (tmux drops notification OSCs, passthrough is off by default, BEL goes through); otherwise `notify::detect` trusts the XTVERSION reply when there is one (asked with the colours, so it survives SSH, where only `TERM` arrives; env vars may also be inherited from another terminal), else `TERM_PROGRAM`, `LC_TERMINAL` (iTerm2 sets it for SSH), `TERM`, `KITTY_WINDOW_ID`, `KONSOLE_VERSION`. OSC 777 for Ghostty, WezTerm, foot, Konsole, Warp and Rio; OSC 9 for iTerm2 (its only one); OSC 99 with `o=unfocused` for kitty, Contour and VS Code (VS Code knows only 99); BEL otherwise. Never several, since terminals that know several would show each.
 - OSC 9 and 777 end with BEL, which every parser accepts; OSC 99 with ST, as kitty's spec says. `;` in the text becomes `,`: WezTerm, Rio and Konsole cut the body at it, WezTerm drops an OSC 9 holding one. Ghostty on macOS, foot, Konsole and Warp hide notifications while their window is focused; the others show them. `desktop_notifications` (`auto`, a channel, `off`) overrides the channel; the toast always shows. The visible tab never notifies, even while the outer window is unfocused (that would need focus reporting, `CSI ? 1004 h`).
 
+**Plan usage (`usage.rs`)**
+- ` usage ` sits under ` settings ` (wide: its own row, so the workspaces column keeps two blank rows to keep its separator and ` issues ` level; compact: the footer is settings | usage | quit in thirds). It opens `Overlay::Usage`; ` done `, `Esc` or `Enter` close it.
+- The numbers come from Claude Code's SDK control protocol: `claude -p --setting-sources '' --no-session-persistence --input-format stream-json --output-format stream-json --verbose`, then an `initialize` and a `get_usage` control request on stdin; the `control_response` for `get_usage` holds `subscription_type`, `rate_limits_available` and `rate_limits` (`limits[]` with `kind`, `percent`, `severity`, `resets_at`, `scope.model.display_name`; `spend` for extra usage). No prompt, no tokens, ~3 s. Claude handles OAuth (credentials file, Keychain, refresh), so cornercase never reads or refreshes a token; `GET /api/oauth/usage` was rejected for that (and refreshing the token ourselves can log Claude out). `--setting-sources ''` keeps the user's hooks from firing, `--no-session-persistence` keeps the probe out of the session list, `--bare` does not work (API key only).
+- The protocol is not documented as a CLI interface, so parsing is lenient (unknown fields and kinds pass, a missing `limits[]` falls back to `five_hour` / `seven_day`, an unknown `severity` comes from the percentage) and every failure shows `usage unavailable: <reason>`.
+- On demand only: opening the modal starts one probe on a thread (never two at once) that answers with `AppEvent::Usage`; nothing polls. The last answer stays in memory (not in the session file) and shows with its age while a new one loads. The probe runs on the server's machine, uses `agent_commands.claude`, strips `activity::CLAUDE_SESSION_ENV` like `Term::spawn`, inherits `CLAUDE_CONFIG_DIR`, and is killed after `usage::TIMEOUT` (10 s; `App::usage_timeout` in tests).
+- Reset times are relative (`resets in 2h 13m`, `3d 4h`): local time would need a time zone database, and the server may sit in another zone than the client anyway.
+
 **Settings (`config.rs`, `settings.rs`)**
 - Tabs: Worktrees, Agents, Issues, TUI. Every change is saved to `config.json` at once. File: `$XDG_CONFIG_HOME/cornercase/config.json`, or next to the socket when `CORNERCASE_SOCKET` is set (so tests never touch the real one). Missing keys take defaults; a corrupt file means all defaults.
 
@@ -193,6 +201,7 @@ src/error.rs      library error type
 - Helpers: `test_util::TempDir`, `git_repo`, `fake_gh`, `FakeHttp` (canned HTTP), `write_executable` (through a `/bin/sh` child to avoid `ETXTBSY`). Nothing calls real `gh`, Shortcut or Linear. App tests clear `App::env_tokens` and never use the real config.
 - Agents are faked with a script (`FAKE_AGENT`) that asks a trust question and echoes what it reads.
 - Agent status is faked with a script named `claude` that writes its own `sessions/$$.json`; app tests point `App::claude_dir` at a temp dir, and e2e sets `CLAUDE_CONFIG_DIR` per `Session`, so nothing reads the real `~/.claude`.
+- The usage probe is faked with a `claude` script that answers the control requests, set through `agent_commands`; no test runs the real `claude`.
 - `tests/e2e.rs` runs the real binary in a PTY (`SHELL=/bin/sh`, `PS1='$ '`), parses output with `vt100`, sends raw bytes and SGR mouse sequences, and answers the startup colour query. Each test gets its own server through a `Session`; dropping it runs `kill-server`.
 - Avoid races in e2e: wait for output that proves the previous step finished (`echo cat-""starts; cat -v`).
 - A safety-net test must fail without the code it protects.

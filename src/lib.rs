@@ -30,6 +30,7 @@ pub mod term;
 pub mod ui;
 pub mod update;
 pub mod upstream;
+pub mod usage;
 pub mod worktree;
 
 #[cfg(test)]

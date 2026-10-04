@@ -1,6 +1,5 @@
 ---
 source: src/ui.rs
-assertion_line: 2589
 expression: "render_sized(&with_panel(), 140, 16).backend()"
 ---
 " ▄▀▀▀ cornercase                                         │  no tab open                             │  uncommitted   commits   all       ×  "
@@ -15,7 +14,7 @@ expression: "render_sized(&with_panel(), 140, 16).backend()"
 "  + new project                │    + tab                │                                          │                                       "
 "                               │                         │                                          │                                       "
 "                               │  + new workspace        │                                          │                                       "
-"                               │                         │                                          │                                       "
 " ───────────────────────────── │ ─────────────────────── │                                          │                                       "
-"  settings                     │  issues      changes 3  │                                          │ ───────────────────────────────────── "
+"  settings                     │  issues      changes 3  │                                          │                                       "
+"  usage                        │                         │                                          │ ───────────────────────────────────── "
 "  quit                         │                         │                                          │                                       "

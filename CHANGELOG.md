@@ -2,6 +2,11 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.1.9
+
+- See how much of your Claude Code plan you have used without leaving what you are doing: the new `usage` button, under `settings`, opens a dialog with the five-hour session, the week and any per-model weekly limit, each with a bar and when it resets. Extra usage shows too when it is turned on.
+- The numbers come from Claude Code itself, asked in the background when you open the dialog: no prompt is sent, no tokens are spent, and cornercase never reads your login.
+
 ## 0.1.8
 
 - Find out when Claude Code needs you or finishes in a tab you aren't looking at: a toast says where (`claude needs you in shop › main`), and your terminal shows a desktop notification, so you hear about it from another window too. It works over SSH, because the notification travels through your terminal.
