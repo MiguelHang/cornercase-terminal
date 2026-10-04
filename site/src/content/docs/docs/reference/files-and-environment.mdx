@@ -49,7 +49,7 @@ When `CORNERCASE_SOCKET` is set, everything moves next to that socket, so a sepa
 | `SHORTCUT_API_TOKEN` | Shortcut token. Takes precedence over a saved one. |
 | `LINEAR_API_KEY` | Linear API key. Takes precedence over a saved one. |
 | `HOME` | Expands `~` in paths, and is the base of the default folders. |
-| `CLAUDE_CONFIG_DIR` | Where Claude Code keeps its files; cornercase reads its running sessions from `sessions/` in it. Without it, `~/.claude`. |
+| `CLAUDE_CONFIG_DIR` | Where Claude Code keeps its files; cornercase reads its running sessions from `sessions/` in it. Without it, `~/.claude`. The `claude` that the [usage dialog](../../guides/projects-workspaces-tabs/#plan-usage) runs gets it too. |
 | `TERM_PROGRAM`, `LC_TERMINAL`, `TERM`, `KITTY_WINDOW_ID`, `KONSOLE_VERSION` | Recognising your terminal when it doesn't say its name, to send it [desktop notifications](../../guides/projects-workspaces-tabs/#notifications) it understands. |
 | `TMUX`, `STY`, `ZELLIJ` | Inside tmux, screen or Zellij, desktop notifications are a bell. |
 | `XDG_CONFIG_HOME` | Folder for `config.json` and `secrets.json`. |
@@ -73,7 +73,7 @@ The server is started by the first `cornercase` you run, and keeps that command'
 
 | Variable | Why |
 | --- | --- |
-| `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_PID`, `CLAUDE_EFFORT` | Claude Code sets these for the session it runs in. When cornercase is started from inside Claude Code, the server would pass them to every pane: a `claude` started there would think it is a child of that other session (a child session does not save its prompt history, for instance), and every program in the pane could read that session's messaging token. A pane is never part of the session that started the server. |
+| `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_PID`, `CLAUDE_EFFORT` | Claude Code sets these for the session it runs in. When cornercase is started from inside Claude Code, the server would pass them to every pane: a `claude` started there would think it is a child of that other session (a child session does not save its prompt history, for instance), and every program in the pane could read that session's messaging token. A pane is never part of the session that started the server, and neither is the `claude` that the usage dialog runs. |
 
 Only these are removed. Claude Code settings such as `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_USE_BEDROCK` or `CLAUDE_CODE_MAX_OUTPUT_TOKENS` pass through. Apart from the variables above, a pane's shell inherits the server's environment.
 

@@ -370,7 +370,7 @@ pub fn age_of(timestamp: &str, now: i64) -> String {
     parse_time(timestamp).map(|t| age(now - t)).unwrap_or_default()
 }
 
-fn age(secs: i64) -> String {
+pub fn age(secs: i64) -> String {
     let minutes = secs.max(0) / 60;
     let hours = minutes / 60;
     let days = hours / 24;
@@ -387,7 +387,7 @@ fn age(secs: i64) -> String {
     }
 }
 
-fn parse_time(text: &str) -> Option<i64> {
+pub fn parse_time(text: &str) -> Option<i64> {
     let field = |from: usize, to: usize| text.get(from..to)?.parse::<i64>().ok();
     let (year, month, day) = (field(0, 4)?, field(5, 7)?, field(8, 10)?);
     let (hour, minute, second) = (field(11, 13)?, field(14, 16)?, field(17, 19)?);

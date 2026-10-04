@@ -125,6 +125,7 @@ export type Overlay =
   | { kind: 'remove'; project: number; workspace: number; removing?: boolean }
   | { kind: 'picker'; dir: string[]; filter: string; selected: number | null; scroll: number }
   | { kind: 'search'; query: string; selected: number; scroll: number }
+  | { kind: 'usage' }
   | SettingsOverlay
   | IssuesOverlay;
 

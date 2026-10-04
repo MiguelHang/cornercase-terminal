@@ -16,7 +16,6 @@ expression: "render_sized(&with_lists(Sidebar::ProjectsOnTop), W, TALL.height).b
 "    api (1)                    │                                                                    "
 "                               │                                                                    "
 "  + new project                │                                                                    "
-"                               │                                                                    "
 " ───────────────────────────── │                                                                    "
 " workspaces                    │                                                                    "
 "                               │                                                                    "
@@ -31,4 +30,5 @@ expression: "render_sized(&with_lists(Sidebar::ProjectsOnTop), W, TALL.height).b
 " ───────────────────────────── │                                                                    "
 "  issues                       │                                                                    "
 "  settings                     │                                                                    "
+"  usage                        │                                                                    "
 "  quit                         │                                                                    "

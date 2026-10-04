@@ -66,7 +66,7 @@ export const SIDEBARS: [Sidebar, string][] = [
   ['workspaces_on_top', 'one column, projects below workspaces'],
 ];
 export const MIN_STACK_SECTION = 5;
-const STACK_FOOTER = 4;
+const STACK_FOOTER = 5;
 
 export function changesWidth(w: Widths, total: number): number {
   const max = Math.max(0, total - (PANE_PADDING + MIN_PANE_WIDTH + 2 * MIN_COLUMN_WIDTH));
@@ -126,6 +126,7 @@ export interface Areas {
   list: Rect;
   separator: Rect;
   settings: Rect;
+  usage: Rect;
   quit: Rect;
   workspaces: Rect;
   workspacesTitle: Rect;
@@ -142,22 +143,21 @@ export interface Areas {
   changesButton: Rect;
 }
 
-function column(r: Rect, lead: number): [Rect, Rect, Rect, Rect, Rect] {
+function column(r: Rect, lead: number): [Rect, Rect, Rect, Rect, Rect, Rect] {
   const title = rect(r.x, r.y, r.w, Math.min(lead, r.h));
   const listY = r.y + lead + GAP;
-  const listH = Math.max(1, r.h - lead - GAP - 3);
+  const listH = Math.max(1, r.h - lead - GAP - 4);
   const list = rect(r.x, listY, r.w, listH);
   const separator = rect(r.x, bottom(list), r.w, 1);
-  const a = rect(r.x, bottom(list) + 1, r.w, 1);
-  const b = rect(r.x, bottom(list) + 2, r.w, 1);
-  return [title, list, separator, a, b];
+  const [a, b, c] = [1, 2, 3].map((dy) => rect(r.x, bottom(list) + dy, r.w, 1));
+  return [title, list, separator, a, b, c];
 }
 
 export function layout(cols: number, rows: number, widths: Widths, nav: Nav, changes = false, sidebar: Sidebar = 'side_by_side'): Areas {
   const main = (c: number): Areas => (sidebar === 'side_by_side' ? wide(c, rows, widths) : stacked(c, rows, widths, sidebar));
   const areas = cols < COMPACT_WIDTH ? compact(cols, rows, changes) : changes ? withChanges(cols, rows, widths, main) : main(cols);
   if (!areas.compact) return areas;
-  const projects = nav === 'projects' ? areas : { ...areas, sidebar: EMPTY, title: EMPTY, list: EMPTY, separator: EMPTY, settings: EMPTY, quit: EMPTY };
+  const projects = nav === 'projects' ? areas : { ...areas, sidebar: EMPTY, title: EMPTY, list: EMPTY, separator: EMPTY, settings: EMPTY, usage: EMPTY, quit: EMPTY };
   return nav === 'workspaces'
     ? projects
     : { ...projects, workspaces: EMPTY, workspacesTitle: EMPTY, workspacesList: EMPTY, workspacesSeparator: EMPTY, issues: EMPTY, back: EMPTY };
@@ -175,7 +175,7 @@ function wide(cols: number, rows: number, widths: Widths): Areas {
   const pane = rect(columnsWidth + PANE_PADDING, 0, Math.max(1, cols - columnsWidth - PANE_PADDING), rows);
   const header = rect(0, 0, columnsWidth - 1, Math.min(HEADER_HEIGHT, rows));
   const sidebar = rect(0, HEADER_HEIGHT, projects, Math.max(0, rows - HEADER_HEIGHT));
-  const [title, list, separator, settings, quit] = column(rect(0, HEADER_HEIGHT, projects - 1, sidebar.h), 1);
+  const [title, list, separator, settings, usage, quit] = column(rect(0, HEADER_HEIGHT, projects - 1, sidebar.h), 1);
   const wsColumn = rect(projects, 0, workspaces, rows);
   const [workspacesTitle, workspacesList, workspacesSeparator, issues] = column(rect(projects, HEADER_HEIGHT, workspaces - 1, sidebar.h), 1);
   return {
@@ -191,6 +191,7 @@ function wide(cols: number, rows: number, widths: Widths): Areas {
     list,
     separator,
     settings,
+    usage,
     quit,
     workspaces: wsColumn,
     workspacesTitle,
@@ -256,7 +257,8 @@ function stacked(cols: number, rows: number, widths: Widths, sidebar: Sidebar): 
     list,
     separator: rect(0, footer, inner, 1),
     settings: rect(0, footer + 2, inner, 1),
-    quit: rect(0, footer + 3, inner, 1),
+    usage: rect(0, footer + 3, inner, 1),
+    quit: rect(0, footer + 4, inner, 1),
     workspaces: { ...workspaces, w: width },
     workspacesTitle,
     workspacesList,
@@ -284,7 +286,7 @@ function compact(cols: number, rows: number, changes: boolean): Areas {
   const list = rect(0, listY, cols, Math.max(1, bottom(menu) - listY - 1 - pitch));
   const separator = rect(0, bottom(list), cols, 1);
   const footer = rect(0, bottom(list) + 1, cols, pitch);
-  const half = Math.floor(cols / 2);
+  const [first, second] = [Math.round(cols / 3), Math.round((2 * cols) / 3)];
   return {
     compact: true,
     pitch,
@@ -297,8 +299,9 @@ function compact(cols: number, rows: number, changes: boolean): Areas {
     title,
     list,
     separator,
-    settings: rect(0, footer.y, half, pitch),
-    quit: rect(half, footer.y, cols - half, pitch),
+    settings: rect(0, footer.y, first, pitch),
+    usage: rect(first, footer.y, second - first, pitch),
+    quit: rect(second, footer.y, cols - second, pitch),
     workspaces: below,
     workspacesTitle: title,
     workspacesList: list,
@@ -405,6 +408,15 @@ export const pickerArea = (cols: number, rows: number) =>
   centered(cols, rows, Math.min(Math.max(0, cols - 4), PICKER_WIDTH), Math.min(Math.max(0, rows - 2), PICKER_HEIGHT));
 export const issuesArea = (cols: number, rows: number) =>
   centered(cols, rows, Math.min(Math.max(0, cols - 4), ISSUES_WIDTH), Math.min(Math.max(0, rows - 2), ISSUES_HEIGHT));
+
+export const usageArea = (cols: number, rows: number, body: number) =>
+  centered(cols, rows, Math.min(Math.max(0, cols - 4), FORM_WIDTH), Math.min(body + 4, rows));
+
+export const usageDone = (r: Rect): Rect => {
+  const row = rect(r.x + 2, bottom(r) - 2, Math.max(0, r.w - 4), 1);
+  const w = Math.min(buttonWidth(DONE), row.w);
+  return rect(right(row) - w, row.y, w, 1);
+};
 
 export const inner = (r: Rect): Rect => rect(r.x + 2, r.y + 1, Math.max(0, r.w - 4), Math.max(0, r.h - 2));
 

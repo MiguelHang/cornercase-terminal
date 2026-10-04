@@ -30,7 +30,10 @@ import {
   styleIcon,
   styleLabels,
   tabsIn,
+  usageArea,
+  usageDone,
 } from './layout';
+import { USAGE, USAGE_PLAN, type UsageWindow } from './data';
 import { type Group, type IssuesOverlay, type Pane, type SettingsOverlay, type Status, type Tab, attention, projectAttention, projectLabel, tabLabel, tabStatus, workspaceLabel } from './model';
 import { type Divider, dividers, grab, panes } from './split';
 import { type Line, type Seg, drawLine, seg, truncateLeft, truncateRight, wrapAll } from './text';
@@ -64,6 +67,16 @@ const STATUS_ICONS: Record<Status, Seg> = {
   waiting: seg('!', { fg: 208, add: BOLD }),
 };
 const BRAND = 99;
+const SEVERITY: Record<UsageWindow['severity'], number> = { normal: 2, warning: 208, critical: 1 };
+const USAGE_FILLED = '█';
+const USAGE_EMPTY = '░';
+
+function updated(ms: number): string {
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 1) return 'updated just now';
+  if (minutes < 60) return `updated ${minutes}m ago`;
+  return `updated ${Math.floor(minutes / 60)}h ago`;
+}
 const INPUT_PROMPT = '› ';
 
 const middle = (r: Rect): Rect => rect(r.x, r.y + Math.floor(Math.max(0, r.h - 1) / 2), r.w, Math.min(r.h, 1));
@@ -415,6 +428,8 @@ export class Painter {
     else this.line(areas.separator, [seg(` ${'─'.repeat(Math.max(0, areas.separator.w - 2))} `, DARK)]);
     this.button(areas.settings, ' ', 'settings', this.buttonStyle(areas.settings, DARK, 6));
     this.region({ r: areas.settings, click: () => app.openSettings(), cursor: 'pointer' });
+    this.button(areas.usage, ' ', 'usage', this.buttonStyle(areas.usage, DARK, 6));
+    this.region({ r: areas.usage, click: () => app.openUsage(), cursor: 'pointer' });
     this.button(areas.quit, ' ', 'quit', this.buttonStyle(areas.quit, DARK, 1));
     this.region({ r: areas.quit, click: () => app.quit(), cursor: 'pointer' });
   }
@@ -518,6 +533,7 @@ export class Painter {
     if (o.kind === 'remove') return this.confirm();
     if (o.kind === 'picker') return this.picker();
     if (o.kind === 'settings') return this.settings(o);
+    if (o.kind === 'usage') return this.usage();
     if (o.kind === 'issues') return this.issues(o);
     if (o.kind === 'search') return this.results(areas);
   }
@@ -616,6 +632,32 @@ export class Painter {
     const max = Math.max(0, last.w - done.w - 5);
     this.line(last, [seg('▾ ', DARK), this.groupHeader(group, max)]);
     this.submitButton(done, DONE, () => app.closeOverlay());
+  }
+
+  private usage(): void {
+    const app = this.app;
+    const { loading, at } = app.usage;
+    const windows = at === null ? [] : USAGE;
+    const r = usageArea(app.cols, app.rows, 2 + windows.length * 3);
+    this.backdrop(false);
+    this.box(r, 'usage');
+    const c = inner(r);
+    const plan = at === null ? '' : ` · ${USAGE_PLAN} plan`;
+    const lines: Line[] = [[seg(`Claude Code${plan}`, { add: BOLD })], []];
+    for (const w of windows) {
+      const colour: Style = { fg: SEVERITY[w.severity] };
+      const percent = `${w.percent}%`;
+      const resets = ` · ${w.resets}`;
+      const filled = Math.ceil((c.w * Math.min(w.percent, 100)) / 100);
+      const room = c.w - [...w.label].length - percent.length - [...resets].length;
+      lines.push([seg(w.label), seg(' '.repeat(Math.max(0, room))), seg(percent, { ...colour, add: BOLD }), seg(resets, DARK)]);
+      lines.push([seg(USAGE_FILLED.repeat(filled), colour), seg(USAGE_EMPTY.repeat(c.w - filled), DARK)]);
+      lines.push([]);
+    }
+    lines.forEach((line, i) => this.line(rect(c.x, c.y + i, c.w, 1), line));
+    const note = loading ? 'loading…' : at === null ? '' : updated(app.now() - at);
+    this.line(rect(c.x, bottom(r) - 3, c.w, 1), [seg(note, DARK)]);
+    this.submitButton(usageDone(r), DONE, () => app.closeOverlay());
   }
 
   private confirm(): void {
