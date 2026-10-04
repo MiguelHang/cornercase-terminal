@@ -1201,7 +1201,7 @@ impl App {
         }
         let Some(tab) = self.tab() else { return };
         let Some(pane) = tab.pane().and_then(|t| tab.layout.pane(area, t.id)) else { return };
-        let at = pane_cell(pane, ev);
+        let Some(at) = pane_cell(pane, ev) else { return };
 
         let Some(term) = self.term_mut() else { return };
         let mode = term.emulator.mouse_mode();
@@ -1224,7 +1224,9 @@ impl App {
             return;
         };
         if ev.kind == MouseEventKind::Drag(MouseButton::Left) {
-            if term.emulator.extend_selection(pane_cell(pane, ev)).is_err() {
+            if let Some(at) = pane_cell(pane, ev)
+                && term.emulator.extend_selection(at).is_err()
+            {
                 self.selecting = None;
             }
             return;
@@ -3208,8 +3210,14 @@ fn copy(host_writes: &mut Vec<Vec<u8>>, toast: &mut Option<Toast>, text: &str) {
     *toast = Some(Toast::new(COPIED, None));
 }
 
-fn pane_cell(pane: Rect, ev: MouseEvent) -> Position {
-    Position::new(ev.column.clamp(pane.x, pane.right() - 1) - pane.x, ev.row.clamp(pane.y, pane.bottom() - 1) - pane.y)
+fn pane_cell(pane: Rect, ev: MouseEvent) -> Option<Position> {
+    if pane.is_empty() {
+        return None;
+    }
+    Some(Position::new(
+        ev.column.clamp(pane.x, pane.right() - 1) - pane.x,
+        ev.row.clamp(pane.y, pane.bottom() - 1) - pane.y,
+    ))
 }
 
 #[cfg(test)]
@@ -5847,6 +5855,72 @@ rm -f "$s"
             click(&mut app, moved);
 
             assert_eq!(divider(&app).line.x, line.x);
+        }
+
+        fn split_down_twice() -> (App, Receiver<AppEvent>) {
+            let (mut app, rx) = app();
+            split(&mut app, inside(pane()), "split down");
+            let bottom = rects(&app)[1];
+            split(&mut app, inside(bottom), "split down");
+            (app, rx)
+        }
+
+        fn with_an_empty_active_pane() -> (App, Receiver<AppEvent>, Position) {
+            let (mut app, rx) = split_down_twice();
+            let line = divider(&app).line;
+            drag(&mut app, Position::new(line.x + 1, line.y), Position::new(line.x + 1, pane().bottom() - 1));
+            assert_eq!((tab(&app).active, rects(&app)[2].height), (2, 0));
+            let top = inside(rects(&app)[0]);
+            (app, rx, top)
+        }
+
+        #[test]
+        fn a_middle_click_while_the_active_pane_has_no_room_is_dropped() {
+            let (mut app, _rx, top) = with_an_empty_active_pane();
+
+            mouse_down(&mut app, MouseButton::Middle, top);
+            mouse(&mut app, MouseEventKind::Up(MouseButton::Middle), top);
+
+            assert_eq!(tab(&app).active, 2);
+        }
+
+        #[test]
+        fn a_drag_from_the_sidebar_while_the_active_pane_has_no_room_is_dropped() {
+            let (mut app, _rx, top) = with_an_empty_active_pane();
+
+            click(&mut app, entry_pos());
+            mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), top);
+
+            assert_eq!(tab(&app).active, 2);
+        }
+
+        #[test]
+        fn a_selection_whose_pane_loses_all_its_room_ignores_the_drag() {
+            let (mut app, _rx) = split_down_twice();
+            let id = tab(&app).panes[2].id;
+            let bottom = inside(rects(&app)[2]);
+            click(&mut app, bottom);
+            let small = Rect { height: 4, ..AREA };
+            let shrunk = tab(&app).layout.pane(app.layout(small).pane, id).expect("the pane is still there");
+            assert!(shrunk.is_empty());
+
+            mouse_in(&mut app, MouseEventKind::Drag(MouseButton::Left), shrunk.as_position(), small);
+
+            assert_eq!(app.selecting, Some(id));
+        }
+
+        #[rstest::rstest]
+        #[case::no_width(Rect { x: 10, y: 5, width: 0, height: 4 })]
+        #[case::no_height(Rect { x: 10, y: 5, width: 4, height: 0 })]
+        fn a_pane_with_no_room_has_no_cell_under_the_mouse(#[case] rect: Rect) {
+            let ev = MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: 12,
+                row: 6,
+                modifiers: KeyModifiers::NONE,
+            };
+
+            assert_eq!(pane_cell(rect, ev), None);
         }
 
         #[test]
