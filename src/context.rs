@@ -170,7 +170,7 @@ impl Transcript {
         }
         let Ok(mut file) = File::open(&self.path) else { return };
         self.len = len;
-        let jump = self.read == 0 || len - self.read > TAIL;
+        let jump = self.reply.is_none() && (self.read == 0 || len - self.read > TAIL);
         let start = if jump { len.saturating_sub(TAIL) } else { self.read };
         let mut bytes = Vec::new();
         if file.seek(SeekFrom::Start(start)).is_err() || file.take(len - start).read_to_end(&mut bytes).is_err() {
@@ -487,6 +487,17 @@ mod tests {
                 .collect();
 
             assert_eq!(file.lines(&lines), Some(reply("claude-opus-5-5", 10)));
+        }
+
+        #[test]
+        fn a_compaction_in_a_large_append_is_not_skipped() {
+            let mut file = Written::new();
+            file.lines(&[assistant("claude-opus-5-5", 1, 0, 180_000)]);
+            let lines: Vec<String> = std::iter::once(COMPACTED.to_string())
+                .chain(std::iter::repeat_n(user(&"x".repeat(1000)), 1100))
+                .collect();
+
+            assert_eq!(file.lines(&lines), None);
         }
 
         #[test]
