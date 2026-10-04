@@ -55,9 +55,18 @@ export interface Widths {
   projects: number;
   workspaces: number;
   changes?: number | null;
+  stack?: number | null;
 }
 
-export type Border = 'projects' | 'workspaces' | 'changes';
+export type Border = 'projects' | 'workspaces' | 'stack' | 'changes';
+export type Sidebar = 'side_by_side' | 'projects_on_top' | 'workspaces_on_top';
+export const SIDEBARS: [Sidebar, string][] = [
+  ['side_by_side', 'projects and workspaces in two columns'],
+  ['projects_on_top', 'one column, workspaces below projects'],
+  ['workspaces_on_top', 'one column, projects below workspaces'],
+];
+export const MIN_STACK_SECTION = 5;
+const STACK_FOOTER = 5;
 
 export function changesWidth(w: Widths, total: number): number {
   const max = Math.max(0, total - (PANE_PADDING + MIN_PANE_WIDTH + 2 * MIN_COLUMN_WIDTH));
@@ -88,6 +97,7 @@ export function fit(w: Widths, total: number): Widths {
 }
 
 export function dragged(w: Widths, border: Border, x: number, total: number): Widths {
+  if (border === 'stack') return w;
   if (border === 'changes') {
     const max = Math.max(0, total - (PANE_PADDING + MIN_PANE_WIDTH + 2 * MIN_COLUMN_WIDTH));
     return { ...w, changes: Math.max(Math.min(MIN_CHANGES_WIDTH, max), Math.min(max, total - x)) };
@@ -127,6 +137,7 @@ export interface Areas {
   pane: Rect;
   projectsBorder: Rect;
   workspacesBorder: Rect;
+  stackBorder: Rect;
   changes: Rect;
   changesBorder: Rect;
   changesButton: Rect;
@@ -142,8 +153,9 @@ function column(r: Rect, lead: number): [Rect, Rect, Rect, Rect, Rect, Rect] {
   return [title, list, separator, a, b, c];
 }
 
-export function layout(cols: number, rows: number, widths: Widths, nav: Nav, changes = false): Areas {
-  const areas = cols < COMPACT_WIDTH ? compact(cols, rows, changes) : changes ? withChanges(cols, rows, widths) : wide(cols, rows, widths);
+export function layout(cols: number, rows: number, widths: Widths, nav: Nav, changes = false, sidebar: Sidebar = 'side_by_side'): Areas {
+  const main = (c: number): Areas => (sidebar === 'side_by_side' ? wide(c, rows, widths) : stacked(c, rows, widths, sidebar));
+  const areas = cols < COMPACT_WIDTH ? compact(cols, rows, changes) : changes ? withChanges(cols, rows, widths, main) : main(cols);
   if (!areas.compact) return areas;
   const projects = nav === 'projects' ? areas : { ...areas, sidebar: EMPTY, title: EMPTY, list: EMPTY, separator: EMPTY, settings: EMPTY, usage: EMPTY, quit: EMPTY };
   return nav === 'workspaces'
@@ -151,10 +163,10 @@ export function layout(cols: number, rows: number, widths: Widths, nav: Nav, cha
     : { ...projects, workspaces: EMPTY, workspacesTitle: EMPTY, workspacesList: EMPTY, workspacesSeparator: EMPTY, issues: EMPTY, back: EMPTY };
 }
 
-function withChanges(cols: number, rows: number, widths: Widths): Areas {
+function withChanges(cols: number, rows: number, widths: Widths, main: (cols: number) => Areas): Areas {
   const w = changesWidth(widths, cols);
   const x = cols - w;
-  return { ...wide(x, rows, widths), changes: rect(x + 1, 0, w - 1, rows), changesBorder: rect(x, 0, Math.min(1, w), rows) };
+  return { ...main(x), changes: rect(x + 1, 0, w - 1, rows), changesBorder: rect(x, 0, Math.min(1, w), rows) };
 }
 
 function wide(cols: number, rows: number, widths: Widths): Areas {
@@ -190,6 +202,73 @@ function wide(cols: number, rows: number, widths: Widths): Areas {
     pane,
     projectsBorder: rect(projects - 1, HEADER_HEIGHT, 1, sidebar.h),
     workspacesBorder: rect(projects + workspaces - 1, 0, 1, rows),
+    stackBorder: EMPTY,
+    changes: EMPTY,
+    changesBorder: EMPTY,
+    changesButton: EMPTY,
+  };
+}
+
+export const stackedWidth = (w: Widths, total: number): number =>
+  Math.max(MIN_COLUMN_WIDTH, Math.min(w.projects, Math.max(0, total - (PANE_PADDING + MIN_PANE_WIDTH))));
+
+export function topRows(w: Widths, room: number): number {
+  if (room < 2 * MIN_STACK_SECTION) return Math.floor(room / 2);
+  return Math.max(MIN_STACK_SECTION, Math.min(room - MIN_STACK_SECTION, w.stack ?? Math.floor(room / 2)));
+}
+
+const stackRoom = (rows: number): number => Math.max(0, rows - HEADER_HEIGHT - STACK_FOOTER - 1);
+
+export function draggedStacked(w: Widths, border: Border, x: number, y: number, total: number, rows: number): Widths {
+  if (border === 'projects') {
+    const max = Math.max(MIN_COLUMN_WIDTH, total - (PANE_PADDING + MIN_PANE_WIDTH));
+    return { ...w, projects: Math.max(MIN_COLUMN_WIDTH, Math.min(max, x + 1)) };
+  }
+  if (border === 'stack') return { ...w, stack: topRows({ ...w, stack: Math.max(0, y - HEADER_HEIGHT) }, stackRoom(rows)) };
+  return w;
+}
+
+function section(r: Rect): [Rect, Rect] {
+  return [rect(r.x, r.y, r.w, Math.min(1, r.h)), rect(r.x, r.y + 1 + GAP, r.w, Math.max(0, r.h - 1 - GAP))];
+}
+
+function stacked(cols: number, rows: number, widths: Widths, sidebar: Sidebar): Areas {
+  const width = stackedWidth(widths, cols);
+  const inner = width - 1;
+  const room = stackRoom(rows);
+  const topH = topRows(widths, room);
+  const top = rect(0, HEADER_HEIGHT, inner, topH);
+  const line = rect(0, HEADER_HEIGHT + topH, inner, 1);
+  const under = rect(0, bottom(line), inner, room - topH);
+  const [projects, workspaces] = sidebar === 'workspaces_on_top' ? [under, top] : [top, under];
+  const [title, list] = section(projects);
+  const [workspacesTitle, workspacesList] = section(workspaces);
+  const footer = bottom(under);
+  return {
+    compact: false,
+    pitch: 1,
+    bar: EMPTY,
+    brand: rect(0, 0, inner, 2),
+    search: rect(1, 3, inner - 2, 1),
+    searchButton: rect(1, 3, inner - 2, 1),
+    back: EMPTY,
+    sidebar: { ...projects, w: width },
+    title,
+    list,
+    separator: rect(0, footer, inner, 1),
+    settings: rect(0, footer + 2, inner, 1),
+    usage: rect(0, footer + 3, inner, 1),
+    quit: rect(0, footer + 4, inner, 1),
+    workspaces: { ...workspaces, w: width },
+    workspacesTitle,
+    workspacesList,
+    workspacesSeparator: EMPTY,
+    issues: rect(0, footer + 1, inner, 1),
+    results: rect(0, HEADER_HEIGHT, inner, Math.max(0, rows - HEADER_HEIGHT)),
+    pane: rect(width + PANE_PADDING, 0, Math.max(1, cols - width - PANE_PADDING), rows),
+    projectsBorder: rect(width - 1, 0, 1, rows),
+    workspacesBorder: EMPTY,
+    stackBorder: line,
     changes: EMPTY,
     changesBorder: EMPTY,
     changesButton: EMPTY,
@@ -232,6 +311,7 @@ function compact(cols: number, rows: number, changes: boolean): Areas {
     pane: below,
     projectsBorder: EMPTY,
     workspacesBorder: EMPTY,
+    stackBorder: EMPTY,
     changes: changes ? below : EMPTY,
     changesBorder: EMPTY,
     changesButton: rect(Math.max(0, cols - searchWidth - COMPACT_BUTTON_WIDTH), 0, Math.min(COMPACT_BUTTON_WIDTH, Math.max(0, cols - searchWidth)), pitch),

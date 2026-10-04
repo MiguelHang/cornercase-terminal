@@ -442,8 +442,12 @@ impl App {
         self.theme = theme;
     }
 
+    fn sidebar(&self) -> ui::Sidebar {
+        ui::Sidebar::from_setting(&self.config.sidebar)
+    }
+
     fn layout(&self, area: Rect) -> ui::Areas {
-        ui::layout_with(area, self.widths, self.changes_shown())
+        ui::layout_with(area, self.widths, self.changes_shown(), self.sidebar())
     }
 
     fn changes_target(&self) -> Option<Checkout> {
@@ -1321,11 +1325,14 @@ impl App {
 
     fn drag_border(&mut self, border: ui::Border, ev: MouseEvent, area: Rect) {
         if ev.kind == MouseEventKind::Drag(MouseButton::Left) {
-            let total = match border {
-                ui::Border::Changes => area.width,
-                _ => self.widths.main_width(area.width, self.changes_shown()),
+            let main = Rect { width: self.widths.main_width(area.width, self.changes_shown()), ..area };
+            self.widths = match border {
+                ui::Border::Changes => self.widths.dragged(border, ev.column, area.width),
+                _ if self.sidebar().stacked() => {
+                    self.widths.stacked_dragged(border, Position::new(ev.column, ev.row), main)
+                }
+                _ => self.widths.dragged(border, ev.column, main.width),
             };
-            self.widths = self.widths.dragged(border, ev.column, total);
             self.border_click = None;
         } else {
             self.resizing = None;
@@ -2799,6 +2806,7 @@ impl App {
             issues: self.issues_available(),
             hover: self.hover,
             widths: self.widths,
+            sidebar: self.sidebar(),
             resizing: self.resizing,
             light: self.theme.is_light() == Some(true),
             tab,
@@ -5416,7 +5424,7 @@ rm -f "$s"
         fn a_click_on_a_tab_shows_its_rows() {
             let mut s = open();
             show(&mut s.app, Page::Tui);
-            assert_eq!(form(&s.app).rows(), [Row::DimPanes, Row::Notifications, Row::Updates]);
+            assert_eq!(form(&s.app).rows(), [Row::Sidebar, Row::DimPanes, Row::Notifications, Row::Updates]);
         }
 
         #[test]
@@ -5435,6 +5443,18 @@ rm -f "$s"
             let mut s = open();
             send_key(&mut s.app, KeyCode::Esc, KeyModifiers::NONE);
             assert!(s.app.overlay.is_none());
+        }
+
+        #[test]
+        fn a_stacked_sidebar_applies_at_once() {
+            let mut s = open();
+            click_row(&mut s, &Row::Sidebar);
+            type_text(&mut s.app, "projects");
+            enter(&mut s);
+            assert_eq!(
+                (config::load(&config_path(&s)).sidebar, s.app.layout(AREA).workspaces_border),
+                ("projects_on_top".to_string(), Rect::default())
+            );
         }
 
         #[test]
@@ -6162,6 +6182,117 @@ rm -f "$s"
             app.restore(&saved, AREA).expect("restore");
 
             assert_eq!(app.widths, widths);
+        }
+    }
+
+    mod stacked_sidebar {
+        use super::*;
+
+        const TALL: Rect = Rect { x: 0, y: 0, width: 100, height: 30 };
+
+        fn stacked(projects: usize) -> (App, Receiver<AppEvent>, Vec<TempDir>) {
+            let (mut app, rx, dirs) = app_with(projects);
+            app.config.sidebar = ui::Sidebar::ProjectsOnTop.id().into();
+            (app, rx, dirs)
+        }
+
+        fn press_at(app: &mut App, kind: MouseEventKind, pos: Position) {
+            mouse_in(app, kind, pos, TALL);
+        }
+
+        fn drag_line(app: &mut App, rows: u16) -> Position {
+            let line = app.layout(TALL).stack_border;
+            let (from, to) = (Position::new(line.x + 3, line.y), Position::new(line.x + 3, line.y + rows));
+            press_at(app, MouseEventKind::Down(MouseButton::Left), from);
+            press_at(app, MouseEventKind::Drag(MouseButton::Left), to);
+            press_at(app, MouseEventKind::Up(MouseButton::Left), to);
+            to
+        }
+
+        #[test]
+        fn a_click_on_a_project_selects_it() {
+            let (mut app, _rx, _dirs) = stacked(2);
+            let list = app.layout(TALL).list;
+            press_at(&mut app, MouseEventKind::Down(MouseButton::Left), Position::new(list.x + 3, list.y));
+            assert_eq!(app.active, 0);
+        }
+
+        #[test]
+        fn a_click_on_a_tab_selects_it() {
+            let (mut app, _rx, _dirs) = stacked(1);
+            app.add_tab(0, 0, TALL).expect("add a tab");
+            let list = app.layout(TALL).workspaces_list;
+            let tab = ui::workspace_row(list, 1, &app.tab_counts(), app.workspaces_scroll, WorkspaceRow::Tab(0, 0));
+            press_at(&mut app, MouseEventKind::Down(MouseButton::Left), tab.as_position());
+            assert_eq!(app.projects[0].workspaces[0].active, 0);
+        }
+
+        #[test]
+        fn the_wheel_over_the_projects_scrolls_only_the_projects() {
+            let (mut app, _rx, _dirs) = stacked(4);
+            app.active = 0;
+            app.follow(AREA);
+            let (before, at) = (app.workspaces_scroll, app.layout(AREA).list.as_position());
+            mouse(&mut app, MouseEventKind::ScrollDown, at);
+            assert_eq!((app.projects_scroll > 0, app.workspaces_scroll), (true, before));
+        }
+
+        #[test]
+        fn the_wheel_over_the_workspaces_scrolls_only_the_workspaces() {
+            let (mut app, _rx, _dirs) = stacked(1);
+            for _ in 1..4 {
+                app.add_tab(0, 0, AREA).expect("add a tab");
+            }
+            app.projects[0].workspaces[0].active = 0;
+            app.follow(AREA);
+            let (before, at) = (app.workspaces_scroll, app.layout(AREA).workspaces_list.as_position());
+            mouse(&mut app, MouseEventKind::ScrollDown, at);
+            assert_eq!((app.workspaces_scroll > before, app.projects_scroll), (true, 0));
+        }
+
+        #[test]
+        fn dragging_the_line_moves_it_and_saves_it() {
+            let (mut app, _rx, _dirs) = stacked(1);
+            let to = drag_line(&mut app, 3);
+            let saved = app.state().widths.and_then(|w| w.stack).is_some();
+            assert_eq!((app.layout(TALL).stack_border.y, saved), (to.y, true));
+        }
+
+        #[test]
+        fn a_double_click_on_the_line_splits_the_lists_in_half_again() {
+            let (mut app, _rx, _dirs) = stacked(1);
+            let at = drag_line(&mut app, 3);
+            let moved = app.widths.stack.is_some();
+
+            press_at(&mut app, MouseEventKind::Down(MouseButton::Left), at);
+            press_at(&mut app, MouseEventKind::Up(MouseButton::Left), at);
+            press_at(&mut app, MouseEventKind::Down(MouseButton::Left), at);
+
+            assert_eq!((moved, app.widths.stack), (true, None));
+        }
+
+        #[test]
+        fn the_column_can_take_the_room_of_the_workspaces_column() {
+            let (mut app, _rx, _dirs) = stacked(1);
+            let border = app.layout(AREA).projects_border;
+            let from = Position::new(border.x, border.y + 1);
+
+            click(&mut app, from);
+            mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), Position::new(59, from.y));
+            mouse(&mut app, MouseEventKind::Up(MouseButton::Left), Position::new(59, from.y));
+
+            assert_eq!(app.widths.projects, 60);
+        }
+
+        #[test]
+        fn the_terminals_get_the_room_of_the_workspaces_column() {
+            let (mut app, _rx, _dirs) = app_with(1);
+            let before = term(&app, 0).emulator.size().expect("size").1;
+
+            app.config.sidebar = ui::Sidebar::WorkspacesOnTop.id().into();
+            app.resize(AREA);
+
+            assert_eq!(term(&app, 0).emulator.size().expect("size").1, before + ui::WORKSPACES_WIDTH);
         }
     }
 

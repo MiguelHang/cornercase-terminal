@@ -135,6 +135,7 @@ export interface Config {
   agent: string;
   submit: boolean;
   trust: boolean;
+  sidebar: string;
   dim: boolean;
   notify: string;
   updates: boolean;
@@ -149,6 +150,7 @@ export const defaultConfig = (): Config => ({
   agent: 'claude',
   submit: false,
   trust: true,
+  sidebar: 'side_by_side',
   dim: true,
   notify: 'auto',
   updates: true,

@@ -144,7 +144,7 @@ export class Painter {
       this.outer();
       return { regions: this.regions, cursor: this.cursor, areas: null };
     }
-    const areas = layout(app.cols, app.rows, app.widths, app.nav, app.changesShown());
+    const areas = layout(app.cols, app.rows, app.widths, app.nav, app.changesShown(), app.sidebar());
     this.pane(areas);
     if (areas.compact) {
       this.bar(areas);
@@ -268,15 +268,20 @@ export class Painter {
 
   private borders(areas: Areas): void {
     const app = this.app;
+    const lit = (border: Border, r: Rect) => (app.dragging?.kind === 'border' && app.dragging.border === border) || this.sidebarHovered(r);
     for (const [border, r] of [
       ['projects', areas.projectsBorder],
       ['workspaces', areas.workspacesBorder],
     ] as const) {
-      const lit = (app.dragging?.kind === 'border' && app.dragging.border === border) || this.sidebarHovered(r);
-      for (let y = r.y; y < bottom(r); y++) this.g.put(r.x, y, '│', { fg: lit ? 6 : 8 });
+      for (let y = r.y; y < bottom(r); y++) this.g.put(r.x, y, '│', { fg: lit(border, r) ? 6 : 8 });
       this.region({ r, drag: { kind: 'border', border }, double: () => app.resetBorder(border), cursor: 'col-resize' });
     }
+    const line = areas.stackBorder;
+    if (isEmpty(line)) return;
+    this.line(line, [seg(` ${'─'.repeat(Math.max(0, line.w - 2))}`, { fg: lit('stack', line) ? 6 : 8 })]);
+    this.region({ r: line, drag: { kind: 'border', border: 'stack' }, double: () => app.resetBorder('stack'), cursor: 'row-resize' });
   }
+
 
   private brand(r: Rect): void {
     const mark: Style = { fg: BRAND };
