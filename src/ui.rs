@@ -22,6 +22,8 @@ pub const MIN_COLUMN_WIDTH: u16 = 16;
 pub const MIN_PANE_WIDTH: u16 = 20;
 pub const COMPACT_WIDTH: u16 = 90;
 pub const COMPACT_PITCH: u16 = 3;
+pub const MIN_STACK_SECTION: u16 = 5;
+const STACK_FOOTER: u16 = 4;
 const COMPACT_BUTTON_WIDTH: u16 = 7;
 const BRAND_HEIGHT: u16 = 2;
 const HEADER_HEIGHT: u16 = BRAND_HEIGHT + 3;
@@ -67,7 +69,48 @@ const COLOUR_CELL: u16 = 4;
 pub enum Border {
     Projects,
     Workspaces,
+    Stack,
     Changes,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Sidebar {
+    #[default]
+    SideBySide,
+    ProjectsOnTop,
+    WorkspacesOnTop,
+}
+
+impl Sidebar {
+    pub const ALL: [Self; 3] = [Self::SideBySide, Self::ProjectsOnTop, Self::WorkspacesOnTop];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::SideBySide => "side_by_side",
+            Self::ProjectsOnTop => "projects_on_top",
+            Self::WorkspacesOnTop => "workspaces_on_top",
+        }
+    }
+
+    fn note(self) -> &'static str {
+        match self {
+            Self::SideBySide => "projects and workspaces in two columns",
+            Self::ProjectsOnTop => "one column, workspaces below projects",
+            Self::WorkspacesOnTop => "one column, projects below workspaces",
+        }
+    }
+
+    pub fn choices() -> Vec<(&'static str, &'static str)> {
+        Self::ALL.into_iter().map(|s| (s.id(), s.note())).collect()
+    }
+
+    pub fn from_setting(setting: &str) -> Self {
+        Self::ALL.into_iter().find(|s| s.id().eq_ignore_ascii_case(setting.trim())).unwrap_or_default()
+    }
+
+    pub fn stacked(self) -> bool {
+        self != Self::SideBySide
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,11 +119,13 @@ pub struct Widths {
     pub workspaces: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changes: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<u16>,
 }
 
 impl Default for Widths {
     fn default() -> Self {
-        Self { projects: SIDEBAR_WIDTH, workspaces: WORKSPACES_WIDTH, changes: None }
+        Self { projects: SIDEBAR_WIDTH, workspaces: WORKSPACES_WIDTH, changes: None, stack: None }
     }
 }
 
@@ -125,6 +170,7 @@ impl Widths {
                 let max = total.saturating_sub(PANE_PADDING + MIN_PANE_WIDTH + 2 * MIN_COLUMN_WIDTH);
                 Self { changes: Some(total.saturating_sub(x).clamp(changes::MIN_WIDTH.min(max), max)), ..self }
             }
+            Border::Stack => self,
         }
     }
 
@@ -133,9 +179,42 @@ impl Widths {
         match border {
             Border::Projects => Self { projects: SIDEBAR_WIDTH, ..self },
             Border::Workspaces => Self { workspaces: WORKSPACES_WIDTH, ..self },
+            Border::Stack => Self { stack: None, ..self },
             Border::Changes => Self { changes: None, ..self },
         }
     }
+
+    pub fn stacked_width(self, total: u16) -> u16 {
+        self.projects.min(columns_room(total)).max(MIN_COLUMN_WIDTH)
+    }
+
+    pub fn top_rows(self, room: u16) -> u16 {
+        if room < 2 * MIN_STACK_SECTION {
+            return room / 2;
+        }
+        self.stack.unwrap_or(room / 2).clamp(MIN_STACK_SECTION, room - MIN_STACK_SECTION)
+    }
+
+    #[must_use]
+    pub fn stacked_dragged(self, border: Border, pos: Position, area: Rect) -> Self {
+        match border {
+            Border::Projects => {
+                let max = columns_room(area.width).max(MIN_COLUMN_WIDTH);
+                Self { projects: pos.x.saturating_add(1).clamp(MIN_COLUMN_WIDTH, max), ..self }
+            }
+            Border::Stack => {
+                let room = stack_room(area);
+                let wanted = Self { stack: Some(pos.y.saturating_sub(room.y)), ..self };
+                Self { stack: Some(wanted.top_rows(room.height)), ..self }
+            }
+            Border::Workspaces | Border::Changes => self,
+        }
+    }
+}
+
+fn stack_room(column: Rect) -> Rect {
+    let y = column.y.saturating_add(HEADER_HEIGHT).min(column.bottom());
+    Rect { y, height: column.bottom().saturating_sub(y).saturating_sub(STACK_FOOTER + 1), ..column }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,7 +223,7 @@ pub enum Nav {
     Workspaces,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Areas {
     pub pitch: u16,
     pub bar: Rect,
@@ -167,6 +246,7 @@ pub struct Areas {
     pub pane: Rect,
     pub projects_border: Rect,
     pub workspaces_border: Rect,
+    pub stack_border: Rect,
     pub changes: Rect,
     pub changes_border: Rect,
     pub changes_button: Rect,
@@ -177,12 +257,15 @@ impl Areas {
         match border {
             Border::Projects => self.projects_border,
             Border::Workspaces => self.workspaces_border,
+            Border::Stack => self.stack_border,
             Border::Changes => self.changes_border,
         }
     }
 
     pub fn border_hit(&self, pos: Position) -> Option<Border> {
-        [Border::Projects, Border::Workspaces, Border::Changes].into_iter().find(|&b| self.border(b).contains(pos))
+        [Border::Projects, Border::Workspaces, Border::Stack, Border::Changes]
+            .into_iter()
+            .find(|&b| self.border(b).contains(pos))
     }
 
     pub fn compact(&self) -> bool {
@@ -263,21 +346,33 @@ fn below_header(r: Rect) -> Rect {
 }
 
 pub fn layout(area: Rect, widths: Widths) -> Areas {
-    layout_with(area, widths, false)
+    layout_with(area, widths, false, Sidebar::SideBySide)
 }
 
-pub fn layout_with(area: Rect, widths: Widths, changes: bool) -> Areas {
+pub fn layout_with(area: Rect, widths: Widths, changes: bool, sidebar: Sidebar) -> Areas {
     if area.width < COMPACT_WIDTH {
         return compact_layout(area, changes);
     }
+    let columns = |r: Rect| if sidebar.stacked() { stacked_layout(r, widths, sidebar) } else { wide_layout(r, widths) };
     if !changes {
-        return wide_layout(area, widths);
+        return columns(area);
     }
     let [main, panel] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(widths.changes_width(area.width))]).areas(area);
     let border = Rect { width: panel.width.min(1), ..panel };
     let content = Rect { x: panel.x.saturating_add(1), width: panel.width.saturating_sub(1), ..panel };
-    Areas { changes: content, changes_border: border, ..wide_layout(main, widths) }
+    Areas { changes: content, changes_border: border, ..columns(main) }
+}
+
+fn header_areas(header: Rect) -> (Rect, Rect) {
+    let [brand, _, search, _] = Layout::vertical([
+        Constraint::Length(BRAND_HEIGHT),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(header);
+    (brand, search.inner(Margin::new(1, 0)))
 }
 
 fn wide_layout(area: Rect, widths: Widths) -> Areas {
@@ -292,18 +387,11 @@ fn wide_layout(area: Rect, widths: Widths) -> Areas {
         Layout::horizontal([Constraint::Length(projects), Constraint::Length(workspaces)]).areas(columns);
     let [header, results] = Layout::vertical([Constraint::Length(HEADER_HEIGHT), Constraint::Min(0)])
         .areas(Rect { width: columns.width.saturating_sub(1), ..columns });
-    let [brand, _, search, _] = Layout::vertical([
-        Constraint::Length(BRAND_HEIGHT),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(header);
+    let (brand, search) = header_areas(header);
     let sidebar = below_header(left);
     let [title, list, separator, settings, quit] = projects_column(sidebar_block().inner(sidebar));
     let [workspaces_title, workspaces_list, workspaces_separator, issues] =
         workspaces_column(below_header(sidebar_block().inner(workspaces)));
-    let search = search.inner(Margin::new(1, 0));
     Areas {
         pitch: 1,
         bar: Rect::default(),
@@ -326,9 +414,58 @@ fn wide_layout(area: Rect, widths: Widths) -> Areas {
         pane,
         projects_border: right_edge(sidebar),
         workspaces_border: right_edge(workspaces),
+        stack_border: Rect::default(),
         changes: Rect::default(),
         changes_border: Rect::default(),
         changes_button: Rect::default(),
+    }
+}
+
+fn section(r: Rect) -> [Rect; 2] {
+    let [title, _, list] =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(GAP), Constraint::Min(0)]).areas(r);
+    [title, list]
+}
+
+fn stacked_layout(area: Rect, widths: Widths, sidebar: Sidebar) -> Areas {
+    let column = Rect { width: widths.stacked_width(area.width), ..area };
+    let pane_x = column.right().saturating_add(PANE_PADDING).min(area.right());
+    let pane = Rect { x: pane_x, width: area.right() - pane_x, ..area };
+    let inner = sidebar_block().inner(column);
+    let [header, results] = Layout::vertical([Constraint::Length(HEADER_HEIGHT), Constraint::Min(0)]).areas(inner);
+    let (brand, search) = header_areas(header);
+    let room = stack_room(inner);
+    let top_rows = widths.top_rows(room.height);
+    let top = Rect { height: top_rows, ..room };
+    let line = Rect { y: top.bottom(), height: 1, ..room }.intersection(inner);
+    let under = Rect { y: top.bottom().saturating_add(1), height: room.height - top_rows, ..room }.intersection(inner);
+    let footer_y = room.bottom().saturating_add(1).min(inner.bottom());
+    let footer = Rect { y: footer_y, height: inner.bottom() - footer_y, ..inner };
+    let [separator, issues, settings, quit] = Layout::vertical([Constraint::Length(1); 4]).areas(footer);
+    let (projects, workspaces) = if sidebar == Sidebar::WorkspacesOnTop { (under, top) } else { (top, under) };
+    let [title, list] = section(projects);
+    let [workspaces_title, workspaces_list] = section(workspaces);
+    let widen = |r: Rect| Rect { x: column.x, width: column.width, ..r };
+    Areas {
+        pitch: 1,
+        brand,
+        search,
+        search_button: search,
+        sidebar: widen(projects),
+        title,
+        list,
+        separator,
+        settings,
+        quit,
+        workspaces: widen(workspaces),
+        workspaces_title,
+        workspaces_list,
+        issues,
+        results,
+        pane,
+        projects_border: right_edge(column),
+        stack_border: line,
+        ..Areas::default()
     }
 }
 
@@ -376,6 +513,7 @@ fn compact_layout(area: Rect, changes: bool) -> Areas {
         pane: below,
         projects_border: Rect::default(),
         workspaces_border: Rect::default(),
+        stack_border: Rect::default(),
         changes: if changes { below } else { Rect::default() },
         changes_border: Rect::default(),
         changes_button,
@@ -1364,6 +1502,7 @@ pub struct View<'a> {
     pub issues: bool,
     pub hover: Option<Position>,
     pub widths: Widths,
+    pub sidebar: Sidebar,
     pub resizing: Option<Border>,
     pub light: bool,
     pub tab: Option<TabView>,
@@ -1414,7 +1553,7 @@ impl View<'_> {
 }
 
 pub fn draw(f: &mut Frame, view: &View) {
-    let areas = layout_with(f.area(), view.widths, view.changes.is_some()).shown(view.nav);
+    let areas = layout_with(f.area(), view.widths, view.changes.is_some(), view.sidebar).shown(view.nav);
     match &view.tab {
         Some(tab) => draw_tab(f, view, tab, areas.pane),
         None if view.has_project => f.render_widget(
@@ -1429,8 +1568,9 @@ pub fn draw(f: &mut Frame, view: &View) {
             f.render_widget(Clear, areas.pane);
         }
     } else {
-        f.render_widget(sidebar_block(), areas.sidebar);
-        f.render_widget(sidebar_block(), areas.workspaces);
+        draw_column_border(f, areas.projects_border);
+        draw_column_border(f, areas.workspaces_border);
+        draw_separator(f, areas.stack_border);
         draw_borders(f, view, &areas);
         draw_brand(f, areas.brand);
         draw_search_bar(f, view, areas.search);
@@ -1438,17 +1578,21 @@ pub fn draw(f: &mut Frame, view: &View) {
     if !areas.sidebar.is_empty() {
         draw_sidebar(f, view, &areas);
     }
+    if [areas.separator, areas.settings, areas.quit].iter().any(|r| !r.is_empty()) {
+        draw_footer(f, view, &areas);
+    }
     if !areas.workspaces.is_empty() {
         draw_workspaces(f, view, &areas);
+    }
+    if view.has_project && [areas.workspaces_separator, areas.issues].iter().any(|r| !r.is_empty()) {
+        draw_issues_row(f, view, &areas);
     }
     if let Some(panel) = &view.changes
         && !areas.changes.is_empty()
     {
         f.render_widget(Clear, areas.changes);
         let border = areas.changes_border;
-        let line = Paragraph::new(vec![Line::from("│"); usize::from(border.height)])
-            .style(Style::default().fg(Color::DarkGray));
-        f.render_widget(line, border);
+        draw_column_border(f, border);
         draw_border(f, view, border, Border::Changes);
         changes::draw(f, areas.changes, panel, view.hover.filter(|_| view.overlay.is_none()));
     }
@@ -2069,6 +2213,9 @@ fn draw_sidebar(f: &mut Frame, view: &View, areas: &Areas) {
     draw_more(f, [more_above(areas.list), rows.more_below()], count(above), count(below));
     let r = rows.button();
     draw_button(f, r, " ", "+ new project", button_style(view, r, Style::default().fg(Color::Cyan), Color::Cyan));
+}
+
+fn draw_footer(f: &mut Frame, view: &View, areas: &Areas) {
     draw_separator(f, areas.separator);
     let mut settings = areas.settings;
     if let Some(label) = &view.update {
@@ -2081,8 +2228,13 @@ fn draw_sidebar(f: &mut Frame, view: &View, areas: &Areas) {
     draw_quit_button(f, view, areas.quit);
 }
 
+fn draw_column_border(f: &mut Frame, r: Rect) {
+    let line = Paragraph::new(vec![Line::from("│"); usize::from(r.height)]).style(Style::default().fg(Color::DarkGray));
+    f.render_widget(line, r);
+}
+
 fn draw_borders(f: &mut Frame, view: &View, areas: &Areas) {
-    for border in [Border::Projects, Border::Workspaces] {
+    for border in [Border::Projects, Border::Workspaces, Border::Stack] {
         draw_border(f, view, areas.border(border), border);
     }
 }
@@ -2091,7 +2243,9 @@ fn draw_border(f: &mut Frame, view: &View, r: Rect, border: Border) {
     if view.resizing == Some(border) || sidebar_hovered(view, r) {
         let buf = f.buffer_mut();
         for y in r.top()..r.bottom() {
-            buf[(r.x, y)].set_fg(Color::Cyan);
+            for x in r.left()..r.right() {
+                buf[(x, y)].set_fg(Color::Cyan);
+            }
         }
     }
 }
@@ -2363,7 +2517,9 @@ fn draw_workspaces(f: &mut Frame, view: &View, areas: &Areas) {
 
     let r = layout.button();
     draw_button(f, r, " ", "+ new workspace", button_style(view, r, accent, Color::Cyan));
+}
 
+fn draw_issues_row(f: &mut Frame, view: &View, areas: &Areas) {
     let changes = view.changes_button.as_ref().filter(|_| !areas.compact());
     if view.issues {
         draw_separator(f, areas.workspaces_separator);
@@ -2618,6 +2774,7 @@ mod tests {
             issues: false,
             hover: None,
             widths: Widths::default(),
+            sidebar: Sidebar::SideBySide,
             resizing: None,
             light: false,
             projects_scroll: 0,
@@ -2680,6 +2837,33 @@ mod tests {
         list().right() - 2
     }
 
+    mod sidebar_setting {
+        use super::*;
+
+        #[rstest]
+        #[case::side_by_side("side_by_side", Sidebar::SideBySide)]
+        #[case::projects_on_top("projects_on_top", Sidebar::ProjectsOnTop)]
+        #[case::workspaces_on_top("workspaces_on_top", Sidebar::WorkspacesOnTop)]
+        #[case::any_case_and_spaces(" Projects_On_Top ", Sidebar::ProjectsOnTop)]
+        #[case::unknown("sideways", Sidebar::SideBySide)]
+        #[case::empty("", Sidebar::SideBySide)]
+        fn is_read_from_the_config(#[case] setting: &str, #[case] expected: Sidebar) {
+            assert_eq!(Sidebar::from_setting(setting), expected);
+        }
+
+        #[test]
+        fn only_side_by_side_keeps_two_columns() {
+            let stacked: Vec<bool> = Sidebar::ALL.into_iter().map(Sidebar::stacked).collect();
+            assert_eq!(stacked, [false, true, true]);
+        }
+
+        #[test]
+        fn each_choice_is_its_id_with_a_note() {
+            let ids: Vec<&str> = Sidebar::choices().into_iter().map(|(id, _)| id).collect();
+            assert_eq!(ids, ["side_by_side", "projects_on_top", "workspaces_on_top"]);
+        }
+    }
+
     mod changes_layout {
         use super::*;
 
@@ -2687,7 +2871,7 @@ mod tests {
 
         #[test]
         fn the_panel_sits_right_of_the_pane() {
-            let a = layout_with(BIG, Widths::default(), true);
+            let a = layout_with(BIG, Widths::default(), true, Sidebar::SideBySide);
             assert_eq!(
                 (a.changes_border.x, a.changes.x, a.changes.right(), a.pane.right()),
                 (a.pane.right(), a.pane.right() + 1, BIG.right(), BIG.width - Widths::default().changes_width(160))
@@ -2696,14 +2880,14 @@ mod tests {
 
         #[test]
         fn the_panel_border_drags() {
-            let a = layout_with(BIG, Widths::default(), true);
+            let a = layout_with(BIG, Widths::default(), true, Sidebar::SideBySide);
             assert_eq!(a.border_hit(a.changes_border.as_position()), Some(Border::Changes));
         }
 
         #[test]
         fn a_compact_panel_covers_the_screen_below_the_bar() {
             let small = Rect { width: 80, ..BIG };
-            let a = layout_with(small, Widths::default(), true);
+            let a = layout_with(small, Widths::default(), true, Sidebar::SideBySide);
             assert_eq!((a.changes, a.changes_button.right()), (a.pane, a.search_button.x));
         }
 
@@ -2834,7 +3018,7 @@ mod tests {
     mod widths {
         use super::*;
 
-        const WIDE: Widths = Widths { projects: 40, workspaces: 30, changes: None };
+        const WIDE: Widths = Widths { projects: 40, workspaces: 30, changes: None, stack: None };
 
         #[test]
         fn the_changes_panel_takes_half_of_the_free_space_up_to_its_default() {
@@ -2922,6 +3106,64 @@ mod tests {
                 Widths { projects: SIDEBAR_WIDTH, workspaces: 30, ..Widths::default() }
             );
         }
+
+        const STACKED: Rect = Rect { x: 0, y: 0, width: W, height: 30 };
+
+        #[test]
+        fn the_line_starts_halfway() {
+            assert_eq!(Widths::default().top_rows(20), 10);
+        }
+
+        #[test]
+        fn a_dragged_line_keeps_its_rows() {
+            assert_eq!(Widths { stack: Some(7), ..Widths::default() }.top_rows(20), 7);
+        }
+
+        #[rstest]
+        #[case::top(0, MIN_STACK_SECTION)]
+        #[case::bottom(40, 20 - MIN_STACK_SECTION)]
+        fn the_line_leaves_room_for_both_lists(#[case] stack: u16, #[case] expected: u16) {
+            assert_eq!(Widths { stack: Some(stack), ..Widths::default() }.top_rows(20), expected);
+        }
+
+        #[test]
+        fn a_saved_line_too_low_for_a_short_screen_is_fitted() {
+            assert_eq!(Widths { stack: Some(30), ..Widths::default() }.top_rows(12), 12 - MIN_STACK_SECTION);
+        }
+
+        #[test]
+        fn a_room_too_short_for_both_lists_is_split_in_half() {
+            assert_eq!(Widths { stack: Some(1), ..Widths::default() }.top_rows(7), 3);
+        }
+
+        #[test]
+        fn dragging_the_line_puts_it_under_the_mouse() {
+            let widths =
+                Widths::default().stacked_dragged(Border::Stack, Position::new(5, HEADER_HEIGHT + 12), STACKED);
+            assert_eq!(widths.stack, Some(12));
+        }
+
+        #[test]
+        fn the_stacked_column_can_take_the_room_of_the_workspaces_column() {
+            let widths = Widths::default().stacked_dragged(Border::Projects, Position::new(59, 6), STACKED);
+            assert_eq!(widths.projects, 60);
+        }
+
+        #[test]
+        fn the_stacked_column_leaves_room_for_the_pane() {
+            let widths = Widths::default().stacked_dragged(Border::Projects, Position::new(W - 1, 6), STACKED);
+            assert_eq!(widths.stacked_width(W), W - PANE_PADDING - MIN_PANE_WIDTH);
+        }
+
+        #[test]
+        fn a_double_click_splits_the_lists_in_half_again() {
+            assert_eq!(Widths { stack: Some(7), ..Widths::default() }.reset(Border::Stack).stack, None);
+        }
+
+        #[test]
+        fn two_columns_ignore_the_line() {
+            assert_eq!(Widths::default().dragged(Border::Stack, 10, W), Widths::default());
+        }
     }
 
     mod borders {
@@ -2985,6 +3227,150 @@ mod tests {
             let menu = Overlay::Menu { at: Position::new(80, 1), items: vec!["rename tab".into()] };
             let v = View { hover: Some(pos), overlay: Some(menu), ..view(&["~"]) };
             assert_eq!(render(&v).backend().buffer()[pos].fg, Color::DarkGray);
+        }
+    }
+
+    mod stacked {
+        use super::*;
+
+        const TALL: Rect = Rect { x: 0, y: 0, width: W, height: 30 };
+
+        fn stacked(sidebar: Sidebar) -> Areas {
+            layout_with(TALL, Widths::default(), false, sidebar)
+        }
+
+        #[test]
+        fn the_pane_gets_the_width_of_the_workspaces_column() {
+            let side = layout(TALL, Widths::default());
+            assert_eq!(stacked(Sidebar::ProjectsOnTop).pane.width, side.pane.width + WORKSPACES_WIDTH);
+        }
+
+        #[rstest]
+        #[case::projects_on_top(Sidebar::ProjectsOnTop, true)]
+        #[case::workspaces_on_top(Sidebar::WorkspacesOnTop, false)]
+        fn the_setting_picks_the_list_on_top(#[case] sidebar: Sidebar, #[case] projects_first: bool) {
+            let a = stacked(sidebar);
+            assert_eq!(a.title.y < a.workspaces_title.y, projects_first);
+        }
+
+        #[test]
+        fn the_line_sits_between_the_lists() {
+            let a = stacked(Sidebar::ProjectsOnTop);
+            assert_eq!(
+                (a.list.bottom(), a.stack_border.y, a.workspaces_title.y),
+                (HEADER_HEIGHT + 10, HEADER_HEIGHT + 10, HEADER_HEIGHT + 11)
+            );
+        }
+
+        #[test]
+        fn one_footer_holds_issues_settings_and_quit() {
+            let a = stacked(Sidebar::WorkspacesOnTop);
+            assert_eq!(
+                (a.separator.y, a.issues.y, a.settings.y, a.quit.y, a.workspaces_separator),
+                (26, 27, 28, 29, Rect::default())
+            );
+        }
+
+        #[test]
+        fn the_column_border_runs_the_whole_height() {
+            let a = stacked(Sidebar::ProjectsOnTop);
+            assert_eq!(
+                (a.projects_border, a.workspaces_border),
+                (Rect::new(SIDEBAR_WIDTH - 1, 0, 1, 30), Rect::default())
+            );
+        }
+
+        #[rstest]
+        #[case::line(Position::new(3, HEADER_HEIGHT + 10), Some(Border::Stack))]
+        #[case::column(Position::new(SIDEBAR_WIDTH - 1, 2), Some(Border::Projects))]
+        #[case::list(Position::new(3, HEADER_HEIGHT + 4), None)]
+        fn hit_finds_the_line_and_the_column_border(#[case] pos: Position, #[case] expected: Option<Border>) {
+            assert_eq!(stacked(Sidebar::ProjectsOnTop).border_hit(pos), expected);
+        }
+
+        #[test]
+        fn each_list_scrolls_in_its_own_section() {
+            let a = stacked(Sidebar::ProjectsOnTop);
+            let (projects, workspaces) = (a.list.as_position(), a.workspaces_list.as_position());
+            assert_eq!(
+                (a.sidebar.contains(projects), a.sidebar.contains(workspaces), a.workspaces.contains(workspaces)),
+                (true, false, true)
+            );
+        }
+
+        #[test]
+        fn narrow_terminals_stay_compact() {
+            let a = layout_with(Rect { width: 80, ..TALL }, Widths::default(), false, Sidebar::ProjectsOnTop);
+            assert!(a.compact());
+        }
+
+        #[test]
+        fn the_changes_panel_sits_right_of_the_pane() {
+            let a = layout_with(Rect { width: 160, ..TALL }, Widths::default(), true, Sidebar::ProjectsOnTop);
+            assert_eq!((a.pane.x, a.changes_border.x), (SIDEBAR_WIDTH + PANE_PADDING, a.pane.right()));
+        }
+
+        fn with_lists(sidebar: Sidebar) -> View<'static> {
+            let mut v = View {
+                has_project: true,
+                issues: true,
+                active_tab: Some(0),
+                sidebar,
+                workspaces: vec![
+                    WorkspaceEntry { name: "login".into(), tabs: vec!["claude".into(), "nvim".into()], behind: 0 },
+                    WorkspaceEntry { name: "main".into(), tabs: vec!["zsh".into()], behind: 0 },
+                ],
+                ..view(&["tmp", "api", "cornercase"])
+            };
+            v.groups = vec![GroupEntry { name: "work".into(), icon: '●', colour: 4, collapsed: false }];
+            v.projects[1].group = Some(0);
+            v
+        }
+
+        #[test]
+        fn renders_projects_on_top() {
+            insta::assert_snapshot!(render_sized(&with_lists(Sidebar::ProjectsOnTop), W, TALL.height).backend());
+        }
+
+        #[test]
+        fn renders_workspaces_on_top() {
+            insta::assert_snapshot!(render_sized(&with_lists(Sidebar::WorkspacesOnTop), W, TALL.height).backend());
+        }
+
+        #[test]
+        fn the_column_border_runs_down_the_header_too() {
+            let t = render_sized(&with_lists(Sidebar::ProjectsOnTop), W, TALL.height);
+            assert_eq!(t.backend().buffer()[(SIDEBAR_WIDTH - 1, 1)].symbol(), "│");
+        }
+
+        #[test]
+        fn the_hovered_line_turns_cyan() {
+            let line = stacked(Sidebar::ProjectsOnTop).stack_border;
+            let at = Position::new(line.x + 3, line.y);
+            let t = render_sized(&View { hover: Some(at), ..with_lists(Sidebar::ProjectsOnTop) }, W, TALL.height);
+            assert_eq!(t.backend().buffer()[(at.x, at.y)].fg, Color::Cyan);
+        }
+
+        #[rstest]
+        #[case::projects_on_top_10_rows(Sidebar::ProjectsOnTop, 10)]
+        #[case::projects_on_top_11_rows(Sidebar::ProjectsOnTop, 11)]
+        #[case::workspaces_on_top_10_rows(Sidebar::WorkspacesOnTop, 10)]
+        #[case::workspaces_on_top_11_rows(Sidebar::WorkspacesOnTop, 11)]
+        fn a_short_terminal_still_shows_the_footer(#[case] sidebar: Sidebar, #[case] height: u16) {
+            let a = layout_with(Rect { height, ..TALL }, Widths::default(), false, sidebar);
+            let t = render_sized(&with_lists(sidebar), W, height);
+            let text = |r: Rect| row_text(&t, r).trim().to_string();
+            assert_eq!(
+                (text(a.issues), text(a.settings), text(a.quit)),
+                ("issues".into(), "settings".into(), "quit".into())
+            );
+        }
+
+        #[test]
+        fn short_terminals_do_not_panic() {
+            for height in 1..=TALL.height {
+                render_sized(&with_lists(Sidebar::WorkspacesOnTop), W, height);
+            }
         }
     }
 

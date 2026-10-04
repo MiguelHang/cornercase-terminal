@@ -271,12 +271,13 @@ mod tests {
             assert_eq!(load(&path), Some(state(&["/a", "/b"])));
         }
 
-        #[test]
-        fn round_trips_the_column_widths() {
+        #[rstest::rstest]
+        #[case::column_widths(Widths { projects: 40, workspaces: 20, ..Widths::default() })]
+        #[case::stacked_line(Widths { stack: Some(12), ..Widths::default() })]
+        fn round_trips_the_widths(#[case] widths: Widths) {
             let tmp = TempDir::new();
             let path = tmp.path().join("session.json");
-            let saved =
-                State { widths: Some(Widths { projects: 40, workspaces: 20, ..Widths::default() }), ..state(&["/a"]) };
+            let saved = State { widths: Some(widths), ..state(&["/a"]) };
 
             save(&path, &saved).expect("save");
 
@@ -290,6 +291,18 @@ mod tests {
             std::fs::write(&path, r#"{"version":3,"projects":[],"active":0}"#).expect("write");
 
             assert_eq!(load(&path).expect("load").widths, None);
+        }
+
+        #[test]
+        fn widths_saved_before_the_line_load_without_it() {
+            let tmp = TempDir::new();
+            let path = tmp.path().join("session.json");
+            let text = r#"{"version":4,"projects":[],"active":0,"widths":{"projects":40,"workspaces":20}}"#;
+            std::fs::write(&path, text).expect("write");
+
+            let widths = load(&path).expect("load").widths;
+
+            assert_eq!(widths, Some(Widths { projects: 40, workspaces: 20, ..Widths::default() }));
         }
 
         #[test]

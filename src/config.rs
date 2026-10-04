@@ -9,6 +9,7 @@ use crate::agents;
 use crate::notify;
 use crate::protocol;
 use crate::state;
+use crate::ui;
 
 pub const DEFAULT_WORKTREES_DIR: &str = "~/.cornercase/worktrees";
 pub const DEFAULT_PROMPT: &str = "{url}";
@@ -32,6 +33,7 @@ pub struct Config {
     pub auto_accept_trust_prompt: bool,
     pub trust_prompt_pattern: String,
     pub gh: String,
+    pub sidebar: String,
     pub dim_inactive_panes: bool,
     pub desktop_notifications: String,
     pub check_updates: bool,
@@ -52,6 +54,7 @@ impl Default for Config {
             auto_accept_trust_prompt: true,
             trust_prompt_pattern: agents::DEFAULT_TRUST_PROMPT.into(),
             gh: DEFAULT_GH.into(),
+            sidebar: ui::Sidebar::default().id().into(),
             dim_inactive_panes: true,
             desktop_notifications: notify::AUTO.into(),
             check_updates: true,
@@ -158,6 +161,11 @@ mod tests {
             std::fs::write(&path, r#"{"worktrees_dir": "/srv/w"}"#).expect("write");
 
             assert_eq!(load(&path), Config { worktrees_dir: "/srv/w".into(), ..Config::default() });
+        }
+
+        #[test]
+        fn the_sidebar_starts_side_by_side() {
+            assert_eq!(ui::Sidebar::from_setting(&Config::default().sidebar), ui::Sidebar::SideBySide);
         }
     }
 

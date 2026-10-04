@@ -2,7 +2,7 @@ import type { Cursor } from '../term/canvas';
 import { BOLD, Grid, type Rect, contains } from '../term/grid';
 import { AGENTS, FOLDERS, ISSUES, type Issue, MODES, type Tree } from './data';
 import { BASES, type ChangesMode, type FileDiff, type HunkAction, hasChanges, workspaceDiff } from './changes';
-import { type Border, GROUP_COLOURS, GROUP_ICONS, type Rows, type SidebarRow, type Widths, activeRow, dragged, layout, mainWidth, sidebarLayout, sidebarRows } from './layout';
+import { type Border, GROUP_COLOURS, GROUP_ICONS, type Rows, SIDEBARS, type Sidebar, type SidebarRow, type Widths, activeRow, dragged, draggedStacked, layout, mainWidth, sidebarLayout, sidebarRows } from './layout';
 import { render as markdown } from './markdown';
 import {
   type Activity,
@@ -333,7 +333,7 @@ export class App {
     const p = this.project();
     if (!p || p.id === this.followed) return;
     this.followed = p.id;
-    const { list, pitch } = layout(this.cols, this.rows, this.widths, 'projects');
+    const { list, pitch } = layout(this.cols, this.rows, this.widths, 'projects', false, this.sidebar());
     const sidebar = this.sidebarRows();
     const i = activeRow(sidebar, this.active, this.groupIndex(p.group));
     if (i >= 0) this.projectsScroll = sidebarLayout(list, pitch, sidebar, this.projectsScroll).reveal(i);
@@ -506,8 +506,13 @@ export class App {
   }
 
   resetBorder(border: Border): void {
-    this.widths = { ...this.widths, [border]: border === 'projects' ? 32 : border === 'workspaces' ? 26 : null };
+    const reset = { projects: 32, workspaces: 26, stack: null, changes: null }[border];
+    this.widths = { ...this.widths, [border]: reset };
     this.dirty();
+  }
+
+  sidebar(): Sidebar {
+    return SIDEBARS.find(([id]) => id === this.config.sidebar)?.[0] ?? 'side_by_side';
   }
 
   toggleNav(): void {
@@ -1073,6 +1078,7 @@ export class App {
       return rows;
     }
     return [
+      { id: 'sidebar', section: '', label: 'sidebar', value: this.sidebar(), note: 'where the workspaces column goes' },
       { id: 'dim', section: '', label: 'inactive panes', value: c.dim ? '[x] dimmed' : '[ ] as bright as the active one', note: 'in a split tab' },
       { id: 'notify', section: '', label: 'desktop notifications', value: c.notify, note: 'when an agent in another tab needs you or finishes' },
       { id: 'updates', section: '', label: 'check for updates', value: c.updates ? '[x] once a day' : '[ ] never', note: 'asks GitHub for the latest release' },
@@ -1113,6 +1119,9 @@ export class App {
     } else if (row.id === 'updates') {
       c.updates = !c.updates;
       o.notice = c.updates ? 'cornercase looks for new versions' : 'cornercase no longer looks for new versions';
+    } else if (row.id === 'sidebar') {
+      const items = SIDEBARS.map(([value, note]) => ({ value, note }));
+      o.pick = { row: row.id, title: 'Where should the workspaces column go?', items, selected: Math.max(0, items.findIndex((i) => i.value === this.sidebar())), filter: '' };
     } else if (row.id === 'notify') {
       const items = NOTIFY_CHOICES.map(([value, note]) => ({ value, note }));
       o.pick = { row: row.id, title: 'How should your terminal notify you?', items, selected: Math.max(0, items.findIndex((i) => i.value === c.notify)), filter: '' };
@@ -1166,6 +1175,9 @@ export class App {
     if (row === 'agent') {
       c.agent = item.value;
       o.notice = `default agent: ${item.value}`;
+    } else if (row === 'sidebar') {
+      c.sidebar = item.value;
+      o.notice = `sidebar: ${item.value}`;
     } else if (row === 'notify') {
       c.notify = item.value;
       o.notice = `desktop notifications: ${item.value}`;
@@ -1708,8 +1720,12 @@ export class App {
     this.hover = { x, y };
     if (this.dragging && buttons & 1) {
       if (this.dragging.kind === 'border') {
-        const total = this.dragging.border === 'changes' ? this.cols : mainWidth(this.widths, this.cols, this.changesShown());
-        this.widths = dragged(this.widths, this.dragging.border, x, total);
+        const { border } = this.dragging;
+        const total = border === 'changes' ? this.cols : mainWidth(this.widths, this.cols, this.changesShown());
+        this.widths =
+          border !== 'changes' && this.sidebar() !== 'side_by_side'
+            ? draggedStacked(this.widths, border, x, y, total, this.rows)
+            : dragged(this.widths, border, x, total);
       }
       else {
         const { tab, divider } = this.dragging;
