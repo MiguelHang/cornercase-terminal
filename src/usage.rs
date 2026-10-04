@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -231,25 +231,35 @@ fn command(program: &str) -> Command {
     cmd
 }
 
-pub fn probe(program: &str, timeout: Duration) -> Result<Report> {
-    let mut child = command(program).spawn().map_err(|e| Error::Usage(format!("could not run {program}: {e}")))?;
-    let mut stdin = child.stdin.take();
-    let written = stdin.as_mut().map(|s| s.write_all(REQUESTS.as_bytes()).and_then(|()| s.flush()));
+fn await_answer(
+    written: Option<std::io::Result<()>>,
+    stdout: Option<impl Read + Send + 'static>,
+    timeout: Duration,
+) -> Result<Report> {
     let (tx, rx) = mpsc::channel();
-    if let (Some(Ok(())), Some(stdout)) = (written, child.stdout.take()) {
+    if let (Some(Ok(())), Some(stdout)) = (written, stdout) {
         std::thread::spawn(move || {
             let _ = tx.send(read_answer(BufReader::new(stdout)));
         });
+    } else {
+        drop(tx);
     }
-    let answer = rx.recv_timeout(timeout);
-    let _ = child.kill();
-    let _ = child.wait();
-    drop(stdin);
-    match answer {
+    match rx.recv_timeout(timeout) {
         Ok(result) => result,
         Err(mpsc::RecvTimeoutError::Timeout) => Err(Error::Usage("claude did not answer in time".into())),
         Err(mpsc::RecvTimeoutError::Disconnected) => Err(Error::Usage("claude exited without answering".into())),
     }
+}
+
+pub fn probe(program: &str, timeout: Duration) -> Result<Report> {
+    let mut child = command(program).spawn().map_err(|e| Error::Usage(format!("could not run {program}: {e}")))?;
+    let mut stdin = child.stdin.take();
+    let written = stdin.as_mut().map(|s| s.write_all(REQUESTS.as_bytes()).and_then(|()| s.flush()));
+    let answer = await_answer(written, child.stdout.take(), timeout);
+    let _ = child.kill();
+    let _ = child.wait();
+    drop(stdin);
+    answer
 }
 
 fn until(secs: i64) -> String {
@@ -512,6 +522,13 @@ mod tests {
         let (_dir, command) = fake_claude(script);
         let error = probe(&command, timeout).expect_err("no report");
         assert_eq!(error.to_string(), expected);
+    }
+
+    #[test]
+    fn a_claude_gone_before_the_requests_fails_at_once() {
+        let gone = Some(Err(std::io::ErrorKind::BrokenPipe.into()));
+        let error = await_answer(gone, None::<&'static [u8]>, Duration::from_secs(2)).expect_err("no report");
+        assert_eq!(error.to_string(), "claude exited without answering");
     }
 
     #[test]
