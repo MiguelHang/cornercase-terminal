@@ -1,16 +1,16 @@
-[38;5;99m ▄▀▀▀ [1mc[39mornercase[0m                               [38;5;8m│[39m test checkout::tests::coupons_[38;5;8m│[39m [1;2m[38;5;6mshop[0;2m [38;5;5m❯[39m git log --oneline --gr
-[0m[38;5;99m █[38;5;8m┌[1m issues · shop [0m[38;5;8m─────────────────────────────────────────────────────────────────────────────────────────┐[2m[39m
-[0m  [38;5;8m│[39m [1m[38;5;0m[48;5;6m All [0m [38;5;7m GitHub [39m [38;5;7m Shortcut [39m [38;5;7m Linear [39m                                           [ ] closed    [ ] people  [38;5;8m│[1;2m[38;5;2mat
-[0m [38;5;8m[48;5;236m [49m│[39m                                                                                                        [38;5;8m│[2m[39mea
-[0m  [38;5;8m│[39m [38;5;6m› [39m                                                                                                     [38;5;8m│[2m[39m
-[0;1m[38;5;8m p[0m[38;5;8m│[39m                                                                                                        [38;5;8m│[2m[39mn
-[0m  [38;5;8m│[39m [1m[38;5;0m[48;5;6m #482  Returns page crashes on empty address                                          bug · ana · 3d  [0m [38;5;8m│[2m[39m
-[0m[38;5;6m[48;5;236m▌ [38;5;8m[49m│[39m [1m[38;5;0m[48;5;6m #479  Dark mode for the checkout                                        feature, design · luis · 5d  [0m [38;5;8m│[2m[39m s
-[0m[38;5;6m  [38;5;8m│[39m [38;5;6m #476  [39mRefund emails show the wrong currency                                        [38;5;8mbug · marta · 8d [39m  [38;5;8m│[2m[39m
-[0m[38;5;6m  [38;5;8m│[39m [38;5;6m #471  [39mAdd Apple Pay to the checkout                                             [38;5;8mfeature · ana · 15d [39m  [38;5;8m│[2m[39m
-[0m[38;5;6m  [38;5;8m│[39m [38;5;6m #468  [39mFlaky test: returns::label_is_printed                                         [38;5;8mci · luis · 22d [39m  [38;5;8m│[2m[39m
+[0m [0m[38;5;8;48;5;236m ⌕ search projects, workspaces, tabs[0m[48;5;236m         [0m [0m[38;5;8m│[0m test checkout::tests::coupons_[0m[38;5;8m│[0m [0m[1;2;38;5;6mshop[0m[2m [0m[2;38;5;5m❯[0m[2m git log --oneline --gr
+[0m  [0m[38;5;8m┌[0m[1;38;5;8m issues · shop [0m[38;5;8m─────────────────────────────────────────────────────────────────────────────────────────┐
+[0m[0m[1;38;5;8m p[0m[38;5;8m│[0m [0m[1;38;5;0;48;5;6m All [0m [0m[38;5;7m GitHub [0m [0m[38;5;7m Shortcut [0m [0m[38;5;7m Linear [0m                                           [ ] closed    [ ] people  [0m[38;5;8m│[0m[1;2;38;5;2mat
+[0m  [0m[38;5;8m│[0m                                                                                                        [0m[38;5;8m│[0m[2mea
+[0m[0m[38;5;6;48;5;236m▌ [0m[38;5;8m│[0m [0m[38;5;6m› [0m                                                                                                     [0m[38;5;8m│
+[0m[0m[38;5;6m  [0m[38;5;8m│[0m                                                                                                        [0m[38;5;8m│[0m[2mn
+[0m[0m[38;5;6m  [0m[38;5;8m│[0m [0m[1;38;5;0;48;5;6m #482  Returns page crashes on empty address                                          bug · ana · 3d  [0m [0m[38;5;8m│
+[0m[0m[38;5;6m  [0m[38;5;8m│[0m [0m[1;38;5;0;48;5;6m #479  Dark mode for the checkout                                        feature, design · luis · 5d  [0m [0m[38;5;8m│[0m[2m s
+[0m  [0m[38;5;8m│[0m [0m[38;5;6m #476  [0mRefund emails show the wrong currency                                        [0m[38;5;8mbug · marta · 8d [0m  [0m[38;5;8m│
+[0m [0m[38;5;6m [0m[38;5;8m│[0m [0m[38;5;6m #471  [0mAdd Apple Pay to the checkout                                             [0m[38;5;8mfeature · ana · 15d [0m  [0m[38;5;8m│
+[0m  [0m[38;5;8m│[0m [0m[38;5;6m #468  [0mFlaky test: returns::label_is_printed                                         [0m[38;5;8mci · luis · 22d [0m  [0m[38;5;8m│
 [0m  [38;5;8m│[39m [38;5;6m #455  [39mRate-limit the public returns endpoint                                 [38;5;8msecurity · marta · 1mo [39m  [38;5;8m│[2m[39m
-[0m [38;5;6m [38;5;8m│[39m                                                                                                        [38;5;8m│[2m[39m
+[0m  [0m[38;5;8m│[0m                                                                                                        [0m[38;5;8m│
 [0m  [38;5;8m│[39m                                                                                                        [38;5;8m│[2m[39m
 [0m  [38;5;8m│[39m                                                                                                        [38;5;8m│[2m[39m
 [0m  [38;5;8m│[39m                                                                                                        [38;5;8m│──

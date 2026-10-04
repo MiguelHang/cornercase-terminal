@@ -1,11 +1,8 @@
 ---
 source: src/ui.rs
-expression: render(&with_context(opus(17))).backend()
+expression: render(&with_context(Some(opus(17)))).backend()
 ---
-" ▄▀▀▀ cornercase                                         │  no tab open                             "
-" █                                                       │                                          "
-"                                                         │                                          "
-"  ⌕ search projects, workspaces, tabs                    │                                          "
+"  ⌕ search projects, workspaces, tabs                    │  no tab open                             "
 "                                                         │                                          "
 " projects                      │ workspaces              │                                          "
 "                               │                         │                                          "
@@ -16,6 +13,9 @@ expression: render(&with_context(opus(17))).backend()
 "                               │    + tab                │                                          "
 "                               │                         │                                          "
 "                               │  + new workspace        │                                          "
+"                               │                         │                                          "
+"                               │                         │                                          "
+"                               │                         │                                          "
 " ───────────────────────────── │                         │                                          "
 "  settings                     │                         │                                          "
 "  usage                        │                         │                                          "

@@ -2,14 +2,14 @@
 source: src/ui.rs
 expression: render(&with(i)).backend()
 ---
-" ▄▀▀▀ cornercase                                         │                                          "
-" █┌ issues · shop ───────────────────────────────────────────────────────────────────────────────┐  "
-"  │  All   GitHub   Shortcut   Linear                                    [ ] closed    [x] mine  │  "
+"  ⌕ search projects, workspaces, tabs                    │                                          "
+"  ┌ issues · shop ───────────────────────────────────────────────────────────────────────────────┐  "
+" p│  All   GitHub   Shortcut   Linear                                    [ ] closed    [x] mine  │  "
 "  │                                                                                              │  "
-"  │ › API token •••                                                                              │  "
-" p│                                                                                              │  "
+"▌ │ › API token •••                                                                              │  "
+"  │                                                                                              │  "
 "  │  Connect Shortcut.                                                                           │  "
-"▌ │                                                                                              │  "
+"  │                                                                                              │  "
 "  │  Paste a token.                                                                              │  "
 "  │                                                                                              │  "
 "  │                                                                                              │  "

@@ -2,16 +2,16 @@
 source: src/ui.rs
 expression: render(&v).backend()
 ---
-" ▄▀▀▀ cornercase                                         │ $ echo hello                             "
-" █                                                       │ hello                                    "
-"                                                         │ $                                        "
-"  ⌕ search projects, workspaces, tabs                    │                                          "
-"                                                         │                                          "
-" projects                      │ workspaces              │                                          "
+"  ⌕ search projects, workspaces, tabs                    │ $ echo hello                             "
+"                                                         │ hello                                    "
+" projects                      │ workspaces              │ $                                        "
 "                               │                         │                                          "
 "▌ ~ (1)                        │                         │                                          "
 "                               │                         │                                          "
 "  + new project                │                         │                                          "
+"                               │                         │                                          "
+"                               │                         │                                          "
+"                               │                         │                                          "
 "                               │                         │                                          "
 "                               │                         │                                          "
 "                               │                         │                                          "
