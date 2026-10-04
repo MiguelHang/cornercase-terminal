@@ -50,6 +50,7 @@ src/config.rs     user settings (config.json), `~` expansion, validation
 src/settings.rs   the settings modal's state; returns Actions for App
 src/agents.rs     known coding agents, their modes and arguments, which agent takes an issue, detection, trust prompt
 src/activity.rs   what the agent in a pane is doing: Claude Code's session file, its title glyph, done-but-unseen, rollups
+src/notify.rs     desktop notifications through the outer terminal: which escape sequence a terminal understands, encoding
 src/launch.rs     starting an agent in a new tab (pure state machine)
 src/secrets.rs    Shortcut / Linear tokens in secrets.json (0600)
 src/markdown.rs   Markdown -> wrapped ratatui Lines
@@ -70,7 +71,7 @@ src/emulator.rs   wraps libghostty-vt; takes plain Snapshots for ui
 src/ui.rs         layout, hit testing and drawing from a plain View (no PTYs); ui/changes.rs draws the changes panel
 src/keys.rs       KeyEvent -> bytes (Ghostty's encoder for special keys, legacy encoder for the rest)
 src/mouse.rs      MouseEvent -> bytes in the protocol the program asked for
-src/host_theme.rs asks the outer terminal for its colours
+src/host_theme.rs asks the outer terminal for its colours and its name (XTVERSION)
 src/git.rs        branch from .git/HEAD, repo roots, linked worktrees (no git process)
 src/update.rs     update check against GitHub releases, download, checksum, binary swap
 src/error.rs      library error type
@@ -147,6 +148,9 @@ src/error.rs      library error type
 - `Status` adds done: a pane that went from working or waiting to idle while its tab was not the visible one (`App::visible_tab`: the active tab, unless the compact menu covers the pane) is done until that tab is shown. `watch_agents` clears it for the visible tab on every `refresh`, not only every 500 ms, so a click shows `○` at once. An unknown state counts as idle, so a fresh Claude never looks done.
 - A tab shows its most urgent pane (`Tab::status`, the order of `Status`): waiting `!` > done `✓` > working `◐` > idle `○`, before the name. Workspace, project and collapsed group rows show only what needs you (`activity::attention`: waiting or done), right-aligned and before `↓n`; working stays on the tab so the sidebar is not always full of icons. The compact `≡` shows the same for every tab but the visible one (`View::attention`).
 - Only Claude Code for now; another agent plugs in by returning an `Activity` from its own signals. A Claude running through `ssh` or in a container is not seen (no local process, no local file).
+- **Notifications**: `Pane::update` returns `Waiting` or `Done` once that status has held for `NOTIFY_AFTER` (1 s) and its tab was not shown meanwhile, once per change, so a prompt answered at once stays quiet. `App::notify` sets a toast with the status icon (`claude needs you in <project> › <workspace>`, control characters stripped) and queues a `notify::Notification`, which the server encodes per client. They go through the outer terminal like OSC 52, so they work over SSH (no `notify-send`/`osascript` on the server's machine).
+- The channel is the client's: inside tmux, screen or Zellij it is BEL (tmux drops notification OSCs, passthrough is off by default, BEL goes through); otherwise `notify::detect` trusts the XTVERSION reply when there is one (asked with the colours, so it survives SSH, where only `TERM` arrives; env vars may also be inherited from another terminal), else `TERM_PROGRAM`, `LC_TERMINAL` (iTerm2 sets it for SSH), `TERM`, `KITTY_WINDOW_ID`, `KONSOLE_VERSION`. OSC 777 for Ghostty, WezTerm, foot, Konsole, Warp and Rio; OSC 9 for iTerm2 (its only one); OSC 99 with `o=unfocused` for kitty, Contour and VS Code (VS Code knows only 99); BEL otherwise. Never several, since terminals that know several would show each.
+- OSC 9 and 777 end with BEL, which every parser accepts; OSC 99 with ST, as kitty's spec says. `;` in the text becomes `,`: WezTerm, Rio and Konsole cut the body at it, WezTerm drops an OSC 9 holding one. Ghostty on macOS, foot, Konsole and Warp hide notifications while their window is focused; the others show them. `desktop_notifications` (`auto`, a channel, `off`) overrides the channel; the toast always shows. The visible tab never notifies, even while the outer window is unfocused (that would need focus reporting, `CSI ? 1004 h`).
 
 **Settings (`config.rs`, `settings.rs`)**
 - Tabs: Worktrees, Agents, Issues, TUI. Every change is saved to `config.json` at once. File: `$XDG_CONFIG_HOME/cornercase/config.json`, or next to the socket when `CORNERCASE_SOCKET` is set (so tests never touch the real one). Missing keys take defaults; a corrupt file means all defaults.
@@ -154,7 +158,7 @@ src/error.rs      library error type
 **Terminals (`term.rs`, `emulator.rs`)**
 - The emulator is libghostty-vt: it answers terminal queries (DSR, DA, DECRQM, kitty keyboard…) that programs like fzf and nvim wait for, and reflows on resize.
 - Its types are `!Send`, so the emulator lives on the server's main thread; the reader thread only forwards bytes. Query replies go out from `on_pty_write`, ordered with the output that asked.
-- Cells keep palette indices so the outer theme applies. The client asks the outer terminal for its colours (OSC 10/11/4, then DA1 as an end marker) before starting the input thread, and every emulator uses them as defaults.
+- Cells keep palette indices so the outer theme applies. The client asks the outer terminal for its colours (OSC 10/11/4, then XTVERSION, then DA1 as an end marker) before starting the input thread, and every emulator uses them as defaults.
 - cwd, name and arguments of the PTY's foreground process group leader come from `process.rs`: `/proc` on Linux, `proc_pidinfo` / `proc_name` / `sysctl(KERN_PROCARGS2)` on macOS (the only `unsafe` and the only use of `libc`). In a pipeline the leader may be dead (`process::alive`), so the shell is used instead. Agent launch and detection depend on it.
 
 **Keys and mouse (`keys.rs`, `mouse.rs`)**
@@ -168,7 +172,7 @@ src/error.rs      library error type
 - The server renders, the client only writes frames. Input travels as serialized crossterm events. Several clients mirror each other; the shared size is the last used client's (attach, key, paste or mouse other than a bare move), like tmux's `window-size latest`, so a hung client (a phone whose SSH dropped) never shrinks a new one. Ping/pong would not catch that: the hung client is a healthy local process. Smaller clients get the frame cropped by `CropBackend`.
 - Every shell gets `CORNERCASE=1`; a client seeing it refuses to start (no nesting).
 - Every shell loses Claude Code's per-session variables (`activity::CLAUDE_SESSION_ENV`): a server started from inside Claude Code would otherwise make every pane's `claude` a child of that session and expose its messaging token. An explicit list, not a `CLAUDE_CODE_*` prefix, so user settings like `CLAUDE_CODE_USE_BEDROCK` and `CLAUDE_CONFIG_DIR` pass through.
-- `Hello` carries a protocol version and build id; a server from another build rejects the client. Keep `ClientMessage::KillServer` and `ServerMessage::Rejected` as the first variants (`protocol::tests::compatibility`).
+- `Hello` carries a protocol version and build id, and the notification channel of the client's terminal; a server from another build rejects the client. Keep `ClientMessage::KillServer` and `ServerMessage::Rejected` as the first variants (`protocol::tests::compatibility`).
 - Socket: `$XDG_RUNTIME_DIR/cornercase/server.sock` or `$TMPDIR/cornercase-<uid>/server.sock`; `CORNERCASE_SOCKET` overrides it. Paths must fit in 108 bytes.
 
 **Updates (`update.rs`)**

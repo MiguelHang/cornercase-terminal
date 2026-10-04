@@ -20,6 +20,7 @@ use crate::app::{App, AppEvent};
 use crate::config;
 use crate::error::{Error, Result};
 use crate::host_theme::HostTheme;
+use crate::notify::Channel;
 use crate::protocol::{self, ClientMessage, Hello, ServerMessage};
 use crate::state::{self, Saver};
 
@@ -122,6 +123,7 @@ struct Client {
     id: u64,
     size: Option<(u16, u16)>,
     used: u64,
+    notify: Channel,
     screen: Option<Screen>,
     out: Sender<ServerMessage>,
     writer: JoinHandle<()>,
@@ -292,6 +294,11 @@ impl Server {
                 client.send(ServerMessage::Frame(bytes.clone()));
             }
         }
+        for notification in app.take_notifications() {
+            for client in clients.iter().filter(|c| c.screen.is_some()) {
+                client.send(ServerMessage::Frame(notification.encode(client.notify)));
+            }
+        }
         app.resize(area);
         for screen in clients.iter_mut().filter_map(|c| c.screen.as_mut()) {
             let _ = screen.draw(|f| app.draw(f));
@@ -328,7 +335,7 @@ impl Server {
         let (out, out_rx) = mpsc::channel();
         let writer = spawn_client_writer(stream, out_rx);
         spawn_client_reader(id, reader, self.tx.clone());
-        self.clients.push(Client { id, size: None, used: 0, screen: None, out, writer });
+        self.clients.push(Client { id, size: None, used: 0, notify: Channel::Bell, screen: None, out, writer });
     }
 
     fn client_mut(&mut self, id: u64) -> Option<&mut Client> {
@@ -342,6 +349,7 @@ impl Server {
         }
         let Some(client) = self.client_mut(id) else { return };
         client.size = Some((hello.cols, hello.rows));
+        client.notify = hello.notify;
         self.touch(id);
         self.fit(Some(id));
         if !self.started {

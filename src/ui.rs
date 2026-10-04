@@ -1337,6 +1337,12 @@ pub struct ChangesButton {
     pub open: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Toast<'a> {
+    pub message: &'a str,
+    pub status: Option<Status>,
+}
+
 pub struct TabView {
     pub layout: Node<usize>,
     pub screens: Vec<Snapshot>,
@@ -1362,7 +1368,7 @@ pub struct View<'a> {
     pub light: bool,
     pub tab: Option<TabView>,
     pub overlay: Option<Overlay>,
-    pub toast: Option<&'a str>,
+    pub toast: Option<Toast<'a>>,
     pub nav: Option<Nav>,
     pub update: Option<String>,
     pub changes: Option<changes::View>,
@@ -1458,8 +1464,8 @@ pub fn draw(f: &mut Frame, view: &View) {
         Some(Overlay::Search(search)) if search.showing_results() => draw_results(f, view, search, areas.results),
         Some(Overlay::Search(_)) | None => {}
     }
-    if let Some(message) = view.toast {
-        draw_toast(f, message);
+    if let Some(toast) = view.toast {
+        draw_toast(f, toast);
     }
 }
 
@@ -1472,12 +1478,16 @@ pub fn toast_area(area: Rect, message: &str) -> Rect {
     Rect::new(x, y, width, height)
 }
 
-fn draw_toast(f: &mut Frame, message: &str) {
-    let r = toast_area(f.area(), message);
+fn draw_toast(f: &mut Frame, toast: Toast) {
+    let r = toast_area(f.area(), toast.message);
+    let icon = match toast.status.map(status_icon) {
+        Some(icon) => Span::styled(format!(" {} ", icon.content), icon.style),
+        None => Span::styled(TOAST_ICON, Style::default().fg(Color::Green)),
+    };
+    let border = Style::default().fg(icon.style.fg.unwrap_or(Color::Green));
     f.render_widget(Clear, r);
-    f.render_widget(Block::bordered().border_style(Style::default().fg(Color::Green)), r);
-    let line = Line::from(vec![Span::styled(TOAST_ICON, Style::default().fg(Color::Green)), Span::raw(message)]);
-    f.render_widget(Paragraph::new(line), r.inner(Margin::new(1, 1)));
+    f.render_widget(Block::bordered().border_style(border), r);
+    f.render_widget(Paragraph::new(Line::from(vec![icon, Span::raw(toast.message)])), r.inner(Margin::new(1, 1)));
 }
 
 fn draw_tab(f: &mut Frame, view: &View, tab: &TabView, area: Rect) {
@@ -4003,8 +4013,21 @@ mod tests {
         #[test]
         fn renders_over_the_pane() {
             let snap = screen(b"$ echo hello\r\nhello\r\n$ ");
-            let v = View { tab: Some(single(snap)), toast: Some("copied to clipboard"), ..view(&["~"]) };
+            let toast = Toast { message: "copied to clipboard", status: None };
+            let v = View { tab: Some(single(snap)), toast: Some(toast), ..view(&["~"]) };
             insta::assert_snapshot!(render(&v).backend());
+        }
+
+        #[rstest]
+        #[case::waiting(Status::Waiting, "!", WAITING_COLOR)]
+        #[case::done(Status::Done, "✓", Color::Green)]
+        fn about_an_agent_shows_its_status(#[case] status: Status, #[case] glyph: &str, #[case] colour: Color) {
+            let message = "claude needs you in shop › main";
+            let r = toast_area(AREA, message);
+            let v = View { toast: Some(Toast { message, status: Some(status) }), ..view(&["~"]) };
+            let t = render(&v);
+            let (icon, border) = (&t.backend().buffer()[(r.x + 2, r.y + 1)], &t.backend().buffer()[(r.x, r.y)]);
+            assert_eq!((icon.symbol(), icon.fg, border.fg), (glyph, colour, colour));
         }
     }
 

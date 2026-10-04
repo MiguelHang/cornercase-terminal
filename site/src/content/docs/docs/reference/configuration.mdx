@@ -68,13 +68,14 @@ Modes whose name says *dangerous* are shown in red. Extra arguments are split li
 
 <Screen
   name="settings-tui"
-  crop={[2, 1, 106, 6]}
-  alt="The TUI tab: inactive panes dimmed, in a split tab; check for updates once a day, asks GitHub for the latest release"
+  crop={[2, 1, 106, 7]}
+  alt="The TUI tab: inactive panes dimmed, in a split tab; desktop notifications auto, when an agent in another tab needs you or finishes; check for updates once a day, asks GitHub for the latest release"
 />
 
 | Row | What it sets |
 | --- | --- |
 | **inactive panes** | Dim the panes you aren't typing in, in a split tab. |
+| **desktop notifications** | How your terminal tells you that an agent in another tab needs you or finished: *auto* picks what your terminal understands, *osc777*, *osc9*, *osc99* or *bell* force one, *off* sends none. The toast in cornercase shows either way; see [Notifications](../../guides/projects-workspaces-tabs/#notifications). |
 | **check for updates** | *Once a day*: ask GitHub for the latest release when the server starts and then daily, and offer to [update](../../installation/#update) when there is a newer one. *Never*: don't ask. |
 
 ### Keys in the settings modal
@@ -117,6 +118,7 @@ Every key is optional: a missing key takes its default. Here is a complete file,
   "trust_prompt_pattern": "trust the files|trust this (folder|directory|workspace|repository)|do you trust|yes, proceed",
   "gh": "gh",
   "dim_inactive_panes": true,
+  "desktop_notifications": "auto",
   "check_updates": true
 }
 ```
@@ -138,6 +140,7 @@ Every key is optional: a missing key takes its default. Here is a complete file,
 | [`trust_prompt_pattern`](#trust_prompt_pattern) | string | see below |
 | [`gh`](#gh) | string | `"gh"` |
 | [`dim_inactive_panes`](#dim_inactive_panes) | boolean | `true` |
+| [`desktop_notifications`](#desktop_notifications) | string | `"auto"` |
 | [`check_updates`](#check_updates) | boolean | `true` |
 
 #### `worktrees_dir`
@@ -195,6 +198,10 @@ The GitHub CLI to run for GitHub issues: a name looked up in your `PATH`, or a p
 #### `dim_inactive_panes`
 
 Whether panes you aren't typing in are dimmed, in tabs split into several panes.
+
+#### `desktop_notifications`
+
+How cornercase asks your terminal for a desktop notification when an agent in another tab needs you or finishes: `"auto"` picks it from each terminal, `"osc777"`, `"osc9"`, `"osc99"` or `"bell"` forces one, and `"off"` sends none. An unknown value counts as `"auto"`. The toast inside cornercase shows either way; see [Notifications](../../guides/projects-workspaces-tabs/#notifications).
 
 #### `check_updates`
 

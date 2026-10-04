@@ -13,6 +13,8 @@ export interface Pane {
   rightClicks: boolean;
   activity?: Activity | null;
   unseen?: boolean;
+  since?: number;
+  notified?: boolean;
 }
 
 export type Activity = 'working' | 'waiting' | 'idle';
@@ -133,6 +135,7 @@ export interface Config {
   submit: boolean;
   trust: boolean;
   dim: boolean;
+  notify: string;
   updates: boolean;
   agentArgs: Record<string, string[]>;
   sources: string[];
@@ -146,6 +149,7 @@ export const defaultConfig = (): Config => ({
   submit: false,
   trust: true,
   dim: true,
+  notify: 'auto',
   updates: true,
   agentArgs: { claude: ['--permission-mode', 'plan'] },
   sources: ['all', 'github', 'shortcut', 'linear'],
@@ -161,10 +165,32 @@ export function activePane(t: Tab): Pane | undefined {
 
 export const tabLabel = (t: Tab) => t.name || activePane(t)?.shell.name || 'bash';
 
-export function watchPane(pane: Pane, activity: Activity | null, seen: boolean): void {
+export const NOTIFY_AFTER = 1000;
+
+export const NOTIFY_CHOICES: [string, string][] = [
+  ['auto', 'what your terminal understands'],
+  ['osc777', 'Ghostty, WezTerm, foot, Konsole, Warp, Rio'],
+  ['osc9', 'iTerm2'],
+  ['osc99', 'kitty, Contour, VS Code'],
+  ['bell', 'a beep or a mark on the window, in any terminal'],
+  ['off', 'only the toast and the marks in cornercase'],
+];
+
+export function watchPane(pane: Pane, activity: Activity | null, seen: boolean, now: number): Status | null {
+  const before = paneStatus(pane);
   const finished = pane.activity === 'working' || pane.activity === 'waiting';
   pane.unseen = activity === 'idle' && !seen && (!!pane.unseen || finished);
   pane.activity = activity;
+  const status = paneStatus(pane);
+  if (status !== before) {
+    pane.since = now;
+    pane.notified = false;
+  }
+  if (seen) pane.notified = true;
+  const settled = pane.since !== undefined && now - pane.since >= NOTIFY_AFTER;
+  if (!settled || pane.notified || (status !== 'done' && status !== 'waiting')) return null;
+  pane.notified = true;
+  return status;
 }
 
 export function paneStatus(pane: Pane): Status | null {

@@ -121,6 +121,26 @@ So that a finished or waiting agent in another project doesn't go unnoticed, `!`
 
 cornercase reads what Claude Code reports about itself: the small file it keeps for each running session in `~/.claude/sessions` (or in `$CLAUDE_CONFIG_DIR/sessions`), the same one `claude agents --json` reads. Nothing is installed and none of Claude's settings change. Without that file, for example with an older Claude Code, cornercase falls back to the title Claude gives the terminal, which only tells working from idle. Other agents don't get an icon yet.
 
+### Notifications
+
+When Claude Code asks you something or finishes in a tab you aren't looking at, cornercase also tells you:
+
+- a **toast** in the bottom right corner says where, such as `! claude needs you in shop › main` or `✓ claude finished in shop › main`;
+- your terminal shows a **desktop notification**, so you find out while you are in another window.
+
+cornercase waits a second before telling you, so a question answered at once stays quiet, and it tells you once each time. The tab on screen doesn't notify you, even while cornercase's window is in the background.
+
+The desktop notification is an escape sequence that cornercase writes to your terminal, the way it [copies to your clipboard](../panes-and-splits/#copy-text), so it also arrives when cornercase runs on another machine over SSH. When cornercase starts, it asks your terminal for its name and looks at variables such as `TERM_PROGRAM`, then picks what that terminal understands:
+
+| Terminal | Notification |
+| --- | --- |
+| Ghostty, WezTerm, foot, Konsole, Warp, Rio | OSC 777 |
+| iTerm2 | OSC 9 |
+| kitty, Contour, VS Code | OSC 99, shown only while the terminal isn't focused |
+| Any other, or cornercase inside tmux, screen or Zellij | A bell, which most terminals turn into a sound or a mark on the window |
+
+Some terminals, such as Ghostty on macOS, foot, Konsole and Warp, don't show a notification while their window is in front; the toast tells you then. Each attached cornercase gets what its own terminal understands. To choose one yourself, or to turn them off, use **settings → TUI → desktop notifications**; the toast and the marks stay either way. If none shows up, see [No desktop notification shows up](../../help/troubleshooting/#no-desktop-notification-shows-up).
+
 ## Rename
 
 Right-click a project, group, workspace or tab to open its menu, then choose **rename**:
