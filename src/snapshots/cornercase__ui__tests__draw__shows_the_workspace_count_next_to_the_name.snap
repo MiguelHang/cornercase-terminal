@@ -16,7 +16,7 @@ expression: render(&v).backend()
 "  + new project                │                         │                                          "
 "                               │                         │                                          "
 "                               │                         │                                          "
-"                               │                         │                                          "
 " ───────────────────────────── │                         │                                          "
 "  settings                     │                         │                                          "
+"  usage                        │                         │                                          "
 "  quit                         │                         │                                          "

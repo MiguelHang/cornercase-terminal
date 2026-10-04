@@ -14,6 +14,7 @@ pub mod changes;
 use crate::activity::{self, Status};
 use crate::emulator::Snapshot;
 use crate::split::{Dir, Node};
+use crate::usage::Severity;
 
 pub const SIDEBAR_WIDTH: u16 = 32;
 pub const WORKSPACES_WIDTH: u16 = 26;
@@ -42,6 +43,9 @@ const BACK_LABEL: &str = "‹ projects";
 const CRUMB_SEPARATOR: &str = " › ";
 const CANCEL_LABEL: &str = "cancel";
 const ISSUES_LABEL: &str = "issues";
+const USAGE_LABEL: &str = "usage";
+const USAGE_FILLED: &str = "█";
+const USAGE_EMPTY: &str = "░";
 const CHANGES_ICON: &str = "±";
 const BRAND_COLOR: Color = Color::Indexed(99);
 const DARK_SURFACE: Color = Color::Indexed(236);
@@ -157,6 +161,7 @@ pub struct Areas {
     pub list: Rect,
     pub separator: Rect,
     pub settings: Rect,
+    pub usage: Rect,
     pub quit: Rect,
     pub workspaces: Rect,
     pub workspaces_title: Rect,
@@ -204,6 +209,7 @@ impl Areas {
                 list: hidden,
                 separator: hidden,
                 settings: hidden,
+                usage: hidden,
                 quit: hidden,
                 ..self
             }
@@ -232,17 +238,18 @@ fn sidebar_block() -> Block<'static> {
     Block::default().borders(Borders::RIGHT).border_style(Style::default().fg(Color::DarkGray))
 }
 
-fn projects_column(r: Rect) -> [Rect; 5] {
-    let [title, _, list, separator, settings, quit] = Layout::vertical([
+fn projects_column(r: Rect) -> [Rect; 6] {
+    let [title, _, list, separator, settings, usage, quit] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(GAP),
         Constraint::Min(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
+        Constraint::Length(1),
     ])
     .areas(r);
-    [title, list, separator, settings, quit]
+    [title, list, separator, settings, usage, quit]
 }
 
 fn workspaces_column(r: Rect) -> [Rect; 4] {
@@ -252,7 +259,7 @@ fn workspaces_column(r: Rect) -> [Rect; 4] {
         Constraint::Min(1),
         Constraint::Length(1),
         Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(2),
     ])
     .areas(r);
     [title, list, separator, issues]
@@ -300,7 +307,7 @@ fn wide_layout(area: Rect, widths: Widths) -> Areas {
     ])
     .areas(header);
     let sidebar = below_header(left);
-    let [title, list, separator, settings, quit] = projects_column(sidebar_block().inner(sidebar));
+    let [title, list, separator, settings, usage, quit] = projects_column(sidebar_block().inner(sidebar));
     let [workspaces_title, workspaces_list, workspaces_separator, issues] =
         workspaces_column(below_header(sidebar_block().inner(workspaces)));
     let search = search.inner(Margin::new(1, 0));
@@ -316,6 +323,7 @@ fn wide_layout(area: Rect, widths: Widths) -> Areas {
         list,
         separator,
         settings,
+        usage,
         quit,
         workspaces,
         workspaces_title,
@@ -351,7 +359,8 @@ fn compact_layout(area: Rect, changes: bool) -> Areas {
         .areas::<5>(menu)
     };
     let [title, _, list, separator, footer] = column(pitch);
-    let [settings, quit] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).areas(footer);
+    let [settings, usage, quit] =
+        Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1), Constraint::Fill(1)]).areas(footer);
     let [workspaces_title, _, workspaces_list, workspaces_separator, issues] = column(pitch);
     let back = Rect { width: button_width(BACK_LABEL) + 2, ..workspaces_title }.intersection(workspaces_title);
     Areas {
@@ -366,6 +375,7 @@ fn compact_layout(area: Rect, changes: bool) -> Areas {
         list,
         separator,
         settings,
+        usage,
         quit,
         workspaces: below,
         workspaces_title,
@@ -798,6 +808,27 @@ pub fn update_scroll(area: Rect, lines: usize, scroll: usize) -> usize {
     scroll.min(lines.saturating_sub(usize::from(update_notes(area).height)))
 }
 
+fn usage_body_height(usage: &Usage) -> u16 {
+    let windows = u16::try_from(usage.windows.len()).unwrap_or(u16::MAX).saturating_mul(3);
+    let empty = if usage.empty.is_some() { 2 } else { 0 };
+    let extra = if usage.extra.is_some() { 2 } else { 0 };
+    windows.saturating_add(empty + extra + 2)
+}
+
+pub fn usage_area(area: Rect, usage: &Usage) -> Rect {
+    let width = area.width.saturating_sub(4).min(FORM_WIDTH);
+    let height = usage_body_height(usage).saturating_add(4).min(area.height);
+    Rect::new(area.x + (area.width - width) / 2, area.y + (area.height - height) / 2, width, height)
+}
+
+fn usage_rows(usage: Rect) -> [Rect; 3] {
+    Layout::vertical([Constraint::Min(0), Constraint::Length(1), Constraint::Length(1)]).areas(form_inner(usage))
+}
+
+pub fn usage_done(area: Rect, usage: &Usage) -> Rect {
+    update_button(usage_rows(usage_area(area, usage))[2], crate::settings::DONE)
+}
+
 pub fn picker_list(picker: Rect) -> Rect {
     picker_rows(picker)[1]
 }
@@ -1137,6 +1168,7 @@ pub fn result_hit(results: Rect, items: usize, scroll: usize, pos: Position) -> 
     (i < items).then_some(i)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Note {
     Error(String),
     Busy(&'static str),
@@ -1170,6 +1202,22 @@ pub struct Update {
     pub scroll: usize,
     pub note: Option<Note>,
     pub submit: &'static str,
+}
+
+pub struct UsageWindow {
+    pub label: String,
+    pub percent: u16,
+    pub severity: Severity,
+    pub resets: String,
+}
+
+pub struct Usage {
+    pub title: String,
+    pub windows: Vec<UsageWindow>,
+    pub empty: Option<&'static str>,
+    pub extra: Option<String>,
+    pub age: String,
+    pub note: Option<Note>,
 }
 
 pub struct Picker {
@@ -1275,6 +1323,7 @@ pub enum Overlay {
     GroupStyle(GroupEntry),
     Confirm(Confirm),
     Update(Update),
+    Usage(Usage),
     Picker(Picker),
     Issues(Issues),
     Settings(Settings),
@@ -1458,6 +1507,7 @@ pub fn draw(f: &mut Frame, view: &View) {
         Some(Overlay::GroupStyle(group)) => draw_group_style(f, view, group),
         Some(Overlay::Confirm(confirm)) => draw_confirm(f, view, confirm),
         Some(Overlay::Update(update)) => draw_update(f, view, update),
+        Some(Overlay::Usage(usage)) => draw_usage(f, view, usage),
         Some(Overlay::Picker(picker)) => draw_picker(f, view, picker),
         Some(Overlay::Issues(issues)) => draw_issues(f, view, issues),
         Some(Overlay::Settings(settings)) => draw_settings(f, view, settings),
@@ -1739,6 +1789,64 @@ fn draw_update(f: &mut Frame, view: &View, update: &Update) {
     f.render_widget(Paragraph::new(visible), notes);
     draw_note(f, update.note.as_ref(), note);
     draw_dialog_buttons(f, view, update_buttons(f.area(), update.submit), update.submit);
+}
+
+fn severity_color(severity: Severity) -> Color {
+    match severity {
+        Severity::Normal => Color::Green,
+        Severity::Warning => WAITING_COLOR,
+        Severity::Critical => Color::Red,
+    }
+}
+
+fn usage_lines(usage: &Usage, width: u16) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let width = usize::from(width);
+    let mut lines = vec![
+        Line::from(Span::styled(usage.title.clone(), Style::default().add_modifier(Modifier::BOLD))),
+        Line::default(),
+    ];
+    for w in &usage.windows {
+        let colour = Style::default().fg(severity_color(w.severity));
+        let percent = format!("{}%", w.percent);
+        let resets = if w.resets.is_empty() { String::new() } else { format!(" · {}", w.resets) };
+        let used = w.label.chars().count() + percent.chars().count() + resets.chars().count();
+        let filled = (width * usize::from(w.percent.min(100))).div_ceil(100);
+        lines.extend([
+            Line::from(vec![
+                Span::raw(w.label.clone()),
+                Span::raw(" ".repeat(width.saturating_sub(used))),
+                Span::styled(percent, colour.add_modifier(Modifier::BOLD)),
+                Span::styled(resets, dim),
+            ]),
+            Line::from(vec![
+                Span::styled(USAGE_FILLED.repeat(filled), colour),
+                Span::styled(USAGE_EMPTY.repeat(width - filled), dim),
+            ]),
+            Line::default(),
+        ]);
+    }
+    if let Some(empty) = usage.empty {
+        lines.extend([Line::from(Span::styled(empty, dim)), Line::default()]);
+    }
+    if let Some(extra) = &usage.extra {
+        lines.extend([Line::from(extra.clone()), Line::default()]);
+    }
+    lines
+}
+
+fn draw_usage(f: &mut Frame, view: &View, usage: &Usage) {
+    let r = usage_area(f.area(), usage);
+    f.render_widget(Clear, r);
+    f.render_widget(overlay_block(USAGE_LABEL), r);
+    let [body, note, _] = usage_rows(r);
+    f.render_widget(Paragraph::new(usage_lines(usage, body.width)), body);
+    if usage.note.is_some() {
+        draw_note(f, usage.note.as_ref(), note);
+    } else {
+        f.render_widget(Paragraph::new(Span::styled(usage.age.as_str(), Style::default().fg(Color::DarkGray))), note);
+    }
+    draw_submit(f, view, usage_done(f.area(), usage), crate::settings::DONE);
 }
 
 fn draw_submit(f: &mut Frame, view: &View, r: Rect, label: &str) {
@@ -2078,6 +2186,7 @@ fn draw_sidebar(f: &mut Frame, view: &View, areas: &Areas) {
         settings.width -= r.width;
     }
     draw_settings_button(f, view, settings);
+    draw_usage_button(f, view, areas.usage);
     draw_quit_button(f, view, areas.quit);
 }
 
@@ -2480,6 +2589,11 @@ fn draw_settings_button(f: &mut Frame, view: &View, r: Rect) {
     draw_button(f, r, " ", "settings", style);
 }
 
+fn draw_usage_button(f: &mut Frame, view: &View, r: Rect) {
+    let style = button_style(view, r, Style::default().fg(Color::DarkGray), Color::Cyan);
+    draw_button(f, r, " ", USAGE_LABEL, style);
+}
+
 fn draw_quit_button(f: &mut Frame, view: &View, r: Rect) {
     let style = button_style(view, r, Style::default().fg(Color::DarkGray), Color::Red);
     draw_button(f, r, " ", "quit", style);
@@ -2815,8 +2929,9 @@ mod tests {
         }
 
         #[test]
-        fn settings_button_sits_right_above_the_quit_button() {
-            assert_eq!(areas().settings, Rect::new(0, H - 2, SIDEBAR_WIDTH - 1, 1));
+        fn settings_and_usage_buttons_sit_right_above_the_quit_button() {
+            let row = |y| Rect::new(0, y, SIDEBAR_WIDTH - 1, 1);
+            assert_eq!((areas().settings, areas().usage), (row(H - 3), row(H - 2)));
         }
 
         #[test]
@@ -3334,10 +3449,10 @@ mod tests {
 
         #[rstest]
         #[case::down(0, 3, 3)]
-        #[case::stops_at_the_last_entry(0, 100, 14)]
+        #[case::stops_at_the_last_entry(0, 100, 15)]
         #[case::up(5, -3, 2)]
         #[case::stops_at_the_first_entry(2, -3, 0)]
-        #[case::a_stale_scroll_is_clamped_first(100, -3, 11)]
+        #[case::a_stale_scroll_is_clamped_first(100, -3, 12)]
         fn the_wheel_moves_within_the_entries(#[case] scroll: usize, #[case] delta: isize, #[case] expected: usize) {
             assert_eq!(rows(20, scroll).scrolled(delta), expected);
         }
@@ -3349,7 +3464,7 @@ mod tests {
 
         #[rstest]
         #[case::already_visible(0, 2, 0)]
-        #[case::below(0, 10, 5)]
+        #[case::below(0, 10, 6)]
         #[case::above(10, 4, 4)]
         fn reveal_scrolls_as_little_as_it_can(#[case] scroll: usize, #[case] i: usize, #[case] expected: usize) {
             assert_eq!(rows(20, scroll).reveal(i), expected);
@@ -3357,14 +3472,14 @@ mod tests {
 
         #[test]
         fn hidden_entries_are_counted_above_and_below() {
-            assert_eq!(rows(20, 3).hidden(), (0..3, 9..20));
+            assert_eq!(rows(20, 3).hidden(), (0..3, 8..20));
         }
 
         #[test]
         fn shows_how_many_projects_are_hidden() {
             let t = render(&many(20, 3));
             assert_eq!(row_text(&t, more_above(list())).trim_end(), "  ↑ 3 more");
-            assert_eq!(row_text(&t, rows(20, 3).more_below()).trim_end(), "  ↓ 11 more");
+            assert_eq!(row_text(&t, rows(20, 3).more_below()).trim_end(), "  ↓ 12 more");
         }
 
         #[test]
@@ -3399,7 +3514,7 @@ mod tests {
             };
             let t = render(&v);
             let below = workspace_layout(areas().workspaces_list, 1, &[10], 0).more_below();
-            assert_eq!(row_text(&t, below).trim_end(), "  ↓ 5 more");
+            assert_eq!(row_text(&t, below).trim_end(), "  ↓ 6 more");
         }
     }
 
@@ -3756,8 +3871,9 @@ mod tests {
         fn an_expanded_group_leaves_the_mark_to_its_projects() {
             let mut v = with_agents();
             v.groups[0].collapsed = false;
+            v.projects[2].status = Some(Status::Waiting);
             let (group, _) = mark_cell(&v, sidebar_row(&v, SidebarRow::Group(0)));
-            let (project, _) = mark_cell(&v, sidebar_row(&v, SidebarRow::Project(3)));
+            let (project, _) = mark_cell(&v, sidebar_row(&v, SidebarRow::Project(2)));
             assert_eq!((group.as_str(), project.as_str()), (" ", "!"));
         }
 
@@ -3801,6 +3917,53 @@ mod tests {
         fn the_toggle_row_is_hit() {
             let pos = form_toggle(form_area(AREA)).as_position();
             assert_eq!(form_hit(AREA, "create", pos), Some(FormHit::Toggle));
+        }
+
+        fn usage_window(label: &str, percent: u16, severity: Severity, resets: &str) -> UsageWindow {
+            UsageWindow { label: label.into(), percent, severity, resets: resets.into() }
+        }
+
+        fn usage() -> Usage {
+            Usage {
+                title: "Claude Code · max plan".into(),
+                windows: vec![
+                    usage_window("session (5h)", 7, Severity::Normal, "resets in 2h 13m"),
+                    usage_window("week", 82, Severity::Warning, "resets in 3d 4h"),
+                    usage_window("week · Fable", 100, Severity::Critical, ""),
+                ],
+                empty: None,
+                extra: Some("extra usage: 12.34 USD of 50.00 USD".into()),
+                age: "updated 2m ago".into(),
+                note: None,
+            }
+        }
+
+        #[test]
+        fn renders_the_usage_windows() {
+            insta::assert_snapshot!(render(&with(Overlay::Usage(usage()))).backend());
+        }
+
+        #[test]
+        fn renders_usage_while_loading() {
+            let loading = Usage { windows: Vec::new(), extra: None, note: Some(Note::Busy("loading…")), ..usage() };
+            insta::assert_snapshot!(render(&with(Overlay::Usage(loading))).backend());
+        }
+
+        #[rstest]
+        #[case::normal(0, Color::Green)]
+        #[case::warning(1, Color::Indexed(208))]
+        #[case::critical(2, Color::Red)]
+        fn usage_bars_take_the_severity_colour(#[case] window: u16, #[case] expected: Color) {
+            let t = render(&with(Overlay::Usage(usage())));
+            let body = usage_rows(usage_area(AREA, &usage()))[0];
+            let bar = Position::new(body.x, body.y + 3 + window * 3);
+            assert_eq!(t.backend().buffer()[bar].fg, expected);
+        }
+
+        #[test]
+        fn the_usage_done_button_sits_on_the_last_row() {
+            let r = usage_area(AREA, &usage());
+            assert_eq!(usage_done(AREA, &usage()).y, r.bottom() - 2);
         }
 
         #[test]

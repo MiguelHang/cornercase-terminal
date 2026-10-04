@@ -39,6 +39,7 @@ use crate::ui::changes::{self as panel, Action as HunkAction, Hit as PanelHit};
 use crate::ui::{self, FormHit, PickerHit, SidebarHit, SidebarRow, WorkspaceHit, WorkspaceRow};
 use crate::update::{self, Install, Release, Updates};
 use crate::upstream;
+use crate::usage;
 use crate::worktree;
 
 #[derive(Debug)]
@@ -100,6 +101,7 @@ pub enum AppEvent {
     },
     UpdateChecked(Result<Option<Release>>),
     Updated(Result<()>),
+    Usage(Result<usage::Report>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,6 +218,7 @@ enum Overlay {
     Issues(Box<Browser>),
     Search(Search),
     Update(UpdateStep),
+    Usage,
     Branches(BranchPicker),
 }
 
@@ -335,6 +338,8 @@ pub struct App {
     editor_env: Vec<(String, String)>,
     claude_dir: Option<PathBuf>,
     watched: Option<Instant>,
+    usage: usage::State,
+    usage_timeout: Duration,
 }
 
 struct Apis {
@@ -417,6 +422,8 @@ impl App {
             editor_env: Vec::new(),
             claude_dir,
             watched: None,
+            usage: usage::State::default(),
+            usage_timeout: usage::TIMEOUT,
         }
     }
 
@@ -987,6 +994,7 @@ impl App {
             AppEvent::Gap { workspace, file, hunk, lines } => self.gap_loaded(workspace, &file, hunk, lines),
             AppEvent::UpdateChecked(result) => self.update_checked(result),
             AppEvent::Updated(result) => self.updated(result),
+            AppEvent::Usage(result) => self.usage.answered(result, Instant::now()),
             AppEvent::Output(id, bytes) => {
                 if let Some(launch) = self.launches.iter_mut().find(|l| l.term == id) {
                     launch.output(Instant::now());
@@ -2108,6 +2116,13 @@ impl App {
         if matches!(self.overlay, Some(Overlay::Update(_))) {
             return self.update_mouse(ev, pos, area);
         }
+        if matches!(self.overlay, Some(Overlay::Usage)) {
+            let done = ui::usage_done(area, &self.usage_view());
+            if ev.kind == MouseEventKind::Down(MouseButton::Left) && done.contains(pos) {
+                self.overlay = None;
+            }
+            return Ok(());
+        }
         if let Some(Overlay::GroupStyle { group }) = self.overlay {
             self.group_style_mouse(group, ev, pos, area);
             return Ok(());
@@ -2273,7 +2288,7 @@ impl App {
             Overlay::NewGroup { input } => {
                 Some(Overlay::GroupStyle { group: self.add_group(input.trim().to_string()) })
             }
-            Overlay::GroupStyle { .. } => None,
+            Overlay::GroupStyle { .. } | Overlay::Usage => None,
             Overlay::RemoveWorkspace { project, workspace, force, removing: false, .. } => {
                 self.remove_worktree(project, workspace, force)
             }
@@ -2285,13 +2300,15 @@ impl App {
 
     fn footer_mouse(&mut self, areas: &ui::Areas, pos: Position, left: bool) -> bool {
         let update = self.update_label().is_some_and(|label| ui::update_button(areas.settings, &label).contains(pos));
-        let hit = update || areas.quit.contains(pos) || areas.settings.contains(pos);
+        let hit = update || [areas.quit, areas.usage, areas.settings].iter().any(|r| r.contains(pos));
         if hit && left {
             self.nav = None;
             if update {
                 self.open_update();
             } else if areas.quit.contains(pos) {
                 self.detach = true;
+            } else if areas.usage.contains(pos) {
+                self.open_usage();
             } else {
                 self.open_settings();
             }
@@ -2442,6 +2459,22 @@ impl App {
         let submit = Overlay::Update(step.clone()).submit_label();
         let notes = self.update_notes(area);
         ui::Overlay::Update(ui::Update { message, notes, scroll: self.update_scroll, note, submit })
+    }
+
+    fn open_usage(&mut self) {
+        self.overlay = Some(Overlay::Usage);
+        if !self.usage.start() {
+            return;
+        }
+        let (command, timeout, tx) =
+            (agents::command(&self.config, agents::CLAUDE), self.usage_timeout, self.tx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(AppEvent::Usage(usage::probe(&command, timeout)));
+        });
+    }
+
+    fn usage_view(&self) -> ui::Usage {
+        self.usage.view(Instant::now(), issues::now())
     }
 
     fn open_settings(&mut self) {
@@ -2841,6 +2874,7 @@ impl App {
             Overlay::Issues(b) => b.view(area, issues::now()),
             Overlay::Search(search) => self.search_view(search),
             Overlay::Update(step) => self.update_view(step, area),
+            Overlay::Usage => ui::Overlay::Usage(self.usage_view()),
             Overlay::Branches(picker) => Self::branches_view(picker),
         })
     }
@@ -4956,6 +4990,16 @@ rm -f "$s"
         }
 
         #[test]
+        fn the_usage_button_opens_the_usage_modal() {
+            let (mut app, _rx) = app();
+            app.config.agent_commands.insert(agents::CLAUDE.into(), "/nonexistent/claude".into());
+            open_menu(&mut app);
+            press(&mut app, small().back.as_position());
+            press(&mut app, small().usage.as_position());
+            assert_eq!((matches!(app.overlay, Some(Overlay::Usage)), app.nav), (true, None));
+        }
+
+        #[test]
         fn escape_closes_the_menu() {
             let (mut app, _rx) = app();
             open_menu(&mut app);
@@ -4990,7 +5034,7 @@ rm -f "$s"
     mod sidebar_scroll {
         use super::*;
 
-        const SHORT: Rect = Rect { x: 0, y: 0, width: 100, height: 14 };
+        const SHORT: Rect = Rect { x: 0, y: 0, width: 100, height: 15 };
 
         fn short() -> ui::Areas {
             ui::layout(SHORT, ui::Widths::default())
@@ -6790,6 +6834,83 @@ rm -f "$s"
             app.refresh(Instant::now());
 
             assert_eq!(app.updates.checked, None);
+        }
+    }
+
+    mod usage_modal {
+        use super::*;
+        use crate::test_util::write_executable;
+
+        const ANSWER: &str = r#"{"type":"control_response","response":{"subtype":"success","request_id":"usage","response":{"subscription_type":"max","rate_limits_available":true,"rate_limits":{"limits":[{"kind":"session","percent":42,"severity":"normal","resets_at":null}]}}}}"#;
+
+        fn with_claude(script: &str) -> (App, Receiver<AppEvent>, TempDir) {
+            let dir = TempDir::new();
+            let claude = dir.path().join("claude");
+            write_executable(&claude, &format!("#!/bin/sh\n{script}\n"));
+            let (mut app, rx) = empty_app();
+            app.config.agent_commands.insert(agents::CLAUDE.into(), claude.display().to_string());
+            (app, rx, dir)
+        }
+
+        fn shown(app: &App) -> Option<ui::Usage> {
+            match app.overlay_view(app.overlay.as_ref()?, AREA)? {
+                ui::Overlay::Usage(usage) => Some(usage),
+                _ => None,
+            }
+        }
+
+        fn windows(app: &App) -> Vec<(String, u16)> {
+            shown(app).map(|u| u.windows.into_iter().map(|w| (w.label, w.percent)).collect()).unwrap_or_default()
+        }
+
+        fn note(app: &App) -> Option<ui::Note> {
+            shown(app).and_then(|u| u.note)
+        }
+
+        #[test]
+        fn the_button_shows_loading_then_the_windows() {
+            let (mut app, rx, _dir) = with_claude(&format!("read -r a\nread -r b\necho '{ANSWER}'"));
+            click(&mut app, areas().usage.as_position());
+            assert_eq!((windows(&app), note(&app)), (Vec::new(), Some(ui::Note::Busy("loading…"))));
+
+            pump_until(&mut app, &rx, "the usage arrives", |a| !windows(a).is_empty());
+            assert_eq!((windows(&app), note(&app)), (vec![("session (5h)".into(), 42)], None));
+        }
+
+        #[test]
+        fn a_claude_that_hangs_shows_usage_unavailable() {
+            let (mut app, rx, _dir) = with_claude("exec sleep 30");
+            app.usage_timeout = Duration::from_millis(200);
+            click(&mut app, areas().usage.as_position());
+            pump_until(&mut app, &rx, "the probe times out", |a| matches!(note(a), Some(ui::Note::Error(_))));
+            assert_eq!(note(&app), Some(ui::Note::Error("usage unavailable: claude did not answer in time".into())));
+        }
+
+        #[test]
+        fn reopening_while_loading_starts_no_second_probe() {
+            let (mut app, rx, dir) = with_claude("echo run >> \"$(dirname \"$0\")/runs\"\nexec sleep 30");
+            app.usage_timeout = Duration::from_millis(300);
+            click(&mut app, areas().usage.as_position());
+            send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            click(&mut app, areas().usage.as_position());
+            pump_until(&mut app, &rx, "the probe times out", |a| matches!(note(a), Some(ui::Note::Error(_))));
+            let runs = std::fs::read_to_string(dir.path().join("runs")).expect("the probe ran");
+            assert_eq!(runs.lines().count(), 1);
+        }
+
+        #[rstest::rstest]
+        #[case::done_button(true)]
+        #[case::escape(false)]
+        fn done_and_escape_close_it(#[case] button: bool) {
+            let (mut app, _rx, _dir) = with_claude("exit 1");
+            click(&mut app, areas().usage.as_position());
+            if button {
+                let usage = shown(&app).expect("the modal is open");
+                click(&mut app, ui::usage_done(AREA, &usage).as_position());
+            } else {
+                send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            }
+            assert!(app.overlay.is_none());
         }
     }
 

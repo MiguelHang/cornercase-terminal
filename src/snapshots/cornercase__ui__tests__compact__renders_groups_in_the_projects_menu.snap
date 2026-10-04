@@ -30,5 +30,5 @@ expression: "render_small(&with_groups(in_a_project(Some(Nav::Projects)))).backe
 "                                                                                "
 " ────────────────────────────────────────────────────────────────────────────── "
 "                                                                                "
-"  settings                                quit                                  "
+"  settings                   usage                     quit                     "
 "                                                                                "
