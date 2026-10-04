@@ -157,7 +157,6 @@ export class Painter {
       if (app.nav) this.g.clear(areas.pane);
     } else {
       this.borders(areas);
-      this.brand(areas.brand);
       this.searchBar(areas.search);
     }
     if (!isEmpty(areas.sidebar)) this.sidebar(areas);
@@ -288,14 +287,6 @@ export class Painter {
     this.region({ r: line, drag: { kind: 'border', border: 'stack' }, double: () => app.resetBorder('stack'), cursor: 'row-resize' });
   }
 
-
-  private brand(r: Rect): void {
-    const mark: Style = { fg: BRAND };
-    let x = this.span(r.x, r.y, ' ▄▀▀▀ ', mark);
-    x = this.span(x, r.y, 'c', { fg: BRAND, add: BOLD });
-    this.span(x, r.y, 'ornercase', { add: BOLD });
-    this.span(r.x, r.y + 1, ' █', mark);
-  }
 
   private searchBar(r: Rect): void {
     const app = this.app;

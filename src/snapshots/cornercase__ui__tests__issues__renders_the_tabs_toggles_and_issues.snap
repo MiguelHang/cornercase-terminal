@@ -2,14 +2,14 @@
 source: src/ui.rs
 expression: render(&with(issues(list(Some(0))))).backend()
 ---
-" ▄▀▀▀ cornercase                                         │                                          "
-" █┌ issues · shop ───────────────────────────────────────────────────────────────────────────────┐  "
-"  │  All   GitHub   Shortcut   Linear                                    [ ] closed    [x] mine  │  "
+"  ⌕ search projects, workspaces, tabs                    │                                          "
+"  ┌ issues · shop ───────────────────────────────────────────────────────────────────────────────┐  "
+" p│  All   GitHub   Shortcut   Linear                                    [ ] closed    [x] mine  │  "
 "  │                                                                                              │  "
-"  │ ›                                                                                            │  "
-" p│                                                                                              │  "
+"▌ │ ›                                                                                            │  "
+"  │                                                                                              │  "
 "  │  #482   Returns page crashes on empty address                               bug · ana · 3d   │  "
-"▌ │  sc-48  Dark mode                                                   In Review · luis · 2mo   │  "
+"  │  sc-48  Dark mode                                                   In Review · luis · 2mo   │  "
 "  │                                                                                              │  "
 "  │                                                                                              │  "
 "  │                                                                                              │  "

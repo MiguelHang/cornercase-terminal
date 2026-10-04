@@ -27,8 +27,7 @@ pub const COMPACT_PITCH: u16 = 3;
 pub const MIN_STACK_SECTION: u16 = 5;
 const STACK_FOOTER: u16 = 5;
 const COMPACT_BUTTON_WIDTH: u16 = 7;
-const BRAND_HEIGHT: u16 = 2;
-const HEADER_HEIGHT: u16 = BRAND_HEIGHT + 3;
+const HEADER_HEIGHT: u16 = 2;
 const GAP: u16 = 1;
 const FORM_WIDTH: u16 = 64;
 const FORM_HEIGHT: u16 = 10;
@@ -234,7 +233,6 @@ pub enum Nav {
 pub struct Areas {
     pub pitch: u16,
     pub bar: Rect,
-    pub brand: Rect,
     pub search: Rect,
     pub search_button: Rect,
     pub back: Rect,
@@ -374,15 +372,8 @@ pub fn layout_with(area: Rect, widths: Widths, changes: bool, sidebar: Sidebar) 
     Areas { changes: content, changes_border: border, ..columns(main) }
 }
 
-fn header_areas(header: Rect) -> (Rect, Rect) {
-    let [brand, _, search, _] = Layout::vertical([
-        Constraint::Length(BRAND_HEIGHT),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(header);
-    (brand, search.inner(Margin::new(1, 0)))
+fn search_area(header: Rect) -> Rect {
+    Rect { height: header.height.min(1), ..header }.inner(Margin::new(1, 0))
 }
 
 fn wide_layout(area: Rect, widths: Widths) -> Areas {
@@ -397,7 +388,7 @@ fn wide_layout(area: Rect, widths: Widths) -> Areas {
         Layout::horizontal([Constraint::Length(projects), Constraint::Length(workspaces)]).areas(columns);
     let [header, results] = Layout::vertical([Constraint::Length(HEADER_HEIGHT), Constraint::Min(0)])
         .areas(Rect { width: columns.width.saturating_sub(1), ..columns });
-    let (brand, search) = header_areas(header);
+    let search = search_area(header);
     let sidebar = below_header(left);
     let [title, list, separator, settings, usage, quit] = projects_column(sidebar_block().inner(sidebar));
     let [workspaces_title, workspaces_list, workspaces_separator, issues] =
@@ -405,7 +396,6 @@ fn wide_layout(area: Rect, widths: Widths) -> Areas {
     Areas {
         pitch: 1,
         bar: Rect::default(),
-        brand,
         search,
         search_button: search,
         back: Rect::default(),
@@ -444,7 +434,7 @@ fn stacked_layout(area: Rect, widths: Widths, sidebar: Sidebar) -> Areas {
     let pane = Rect { x: pane_x, width: area.right() - pane_x, ..area };
     let inner = sidebar_block().inner(column);
     let [header, results] = Layout::vertical([Constraint::Length(HEADER_HEIGHT), Constraint::Min(0)]).areas(inner);
-    let (brand, search) = header_areas(header);
+    let search = search_area(header);
     let room = stack_room(inner);
     let top_rows = widths.top_rows(room.height);
     let footer_y = inner.bottom().saturating_sub(STACK_FOOTER).max(room.y);
@@ -460,7 +450,6 @@ fn stacked_layout(area: Rect, widths: Widths, sidebar: Sidebar) -> Areas {
     let widen = |r: Rect| Rect { x: column.x, width: column.width, ..r };
     Areas {
         pitch: 1,
-        brand,
         search,
         search_button: search,
         sidebar: widen(projects),
@@ -508,7 +497,6 @@ fn compact_layout(area: Rect, changes: bool) -> Areas {
     Areas {
         pitch,
         bar,
-        brand: Rect::default(),
         search: bar,
         search_button,
         back,
@@ -1635,7 +1623,6 @@ pub fn draw(f: &mut Frame, view: &View) {
         draw_column_border(f, areas.workspaces_border);
         draw_separator(f, areas.stack_border);
         draw_borders(f, view, &areas);
-        draw_brand(f, areas.brand);
         draw_search_bar(f, view, areas.search);
     }
     if !areas.sidebar.is_empty() {
@@ -2371,19 +2358,6 @@ fn draw_border(f: &mut Frame, view: &View, r: Rect, border: Border) {
             }
         }
     }
-}
-
-fn draw_brand(f: &mut Frame, r: Rect) {
-    let mark = Style::default().fg(BRAND_COLOR);
-    let lines = vec![
-        Line::from(vec![
-            Span::styled(" ▄▀▀▀ ", mark),
-            Span::styled("c", mark.add_modifier(Modifier::BOLD)),
-            Span::styled("ornercase", Style::default().add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(Span::styled(" █", mark)),
-    ];
-    f.render_widget(Paragraph::new(lines), r);
 }
 
 fn draw_search_bar(f: &mut Frame, view: &View, r: Rect) {
@@ -3129,14 +3103,9 @@ mod tests {
         }
 
         #[test]
-        fn brand_spans_both_columns_at_the_top() {
-            assert_eq!(areas().brand, Rect::new(0, 0, SIDEBAR_WIDTH + WORKSPACES_WIDTH - 1, BRAND_HEIGHT));
-        }
-
-        #[test]
-        fn search_spans_both_columns_a_row_below_the_brand() {
+        fn search_spans_both_columns_on_the_first_row() {
             let search = areas().search;
-            assert_eq!(search, Rect::new(1, BRAND_HEIGHT + 1, SIDEBAR_WIDTH + WORKSPACES_WIDTH - 3, 1));
+            assert_eq!(search, Rect::new(1, 0, SIDEBAR_WIDTH + WORKSPACES_WIDTH - 3, 1));
         }
 
         #[test]
@@ -3420,7 +3389,7 @@ mod tests {
             let a = stacked(Sidebar::ProjectsOnTop);
             assert_eq!(
                 (a.list.bottom(), a.stack_border.y, a.workspaces_title.y),
-                (HEADER_HEIGHT + 9, HEADER_HEIGHT + 9, HEADER_HEIGHT + 10)
+                (HEADER_HEIGHT + 11, HEADER_HEIGHT + 11, HEADER_HEIGHT + 12)
             );
         }
 
@@ -3443,7 +3412,7 @@ mod tests {
         }
 
         #[rstest]
-        #[case::line(Position::new(3, HEADER_HEIGHT + 9), Some(Border::Stack))]
+        #[case::line(Position::new(3, HEADER_HEIGHT + 11), Some(Border::Stack))]
         #[case::column(Position::new(SIDEBAR_WIDTH - 1, 2), Some(Border::Projects))]
         #[case::list(Position::new(3, HEADER_HEIGHT + 4), None)]
         fn hit_finds_the_line_and_the_column_border(#[case] pos: Position, #[case] expected: Option<Border>) {
@@ -3557,7 +3526,7 @@ mod tests {
         }
 
         #[rstest]
-        #[case::brand(areas().brand.y)]
+        #[case::search(areas().search.y)]
         #[case::title(areas().title.y)]
         fn header_rows_are_ignored(#[case] y: u16) {
             assert_eq!(sidebar_hit(list(), 1, &plain(1), 0, Position::new(3, y)), None);
@@ -3704,8 +3673,9 @@ mod tests {
 
         #[test]
         fn the_more_counts_skip_the_gaps() {
-            let t = render(&View { projects_scroll: 2, ..grouped(0, false) });
-            let above = row_text(&t, more_above(list()));
+            let short = H - 3;
+            let t = render_sized(&View { projects_scroll: 2, ..grouped(0, false) }, W, short);
+            let above = row_text(&t, more_above(layout(Rect::new(0, 0, W, short), Widths::default()).list));
             assert!(above.contains("↑ 1 more"), "{above:?}");
         }
     }
@@ -3886,10 +3856,10 @@ mod tests {
 
         #[rstest]
         #[case::down(0, 3, 3)]
-        #[case::stops_at_the_last_entry(0, 100, 15)]
+        #[case::stops_at_the_last_entry(0, 100, 12)]
         #[case::up(5, -3, 2)]
         #[case::stops_at_the_first_entry(2, -3, 0)]
-        #[case::a_stale_scroll_is_clamped_first(100, -3, 12)]
+        #[case::a_stale_scroll_is_clamped_first(100, -3, 9)]
         fn the_wheel_moves_within_the_entries(#[case] scroll: usize, #[case] delta: isize, #[case] expected: usize) {
             assert_eq!(rows(20, scroll).scrolled(delta), expected);
         }
@@ -3901,7 +3871,7 @@ mod tests {
 
         #[rstest]
         #[case::already_visible(0, 2, 0)]
-        #[case::below(0, 10, 6)]
+        #[case::below(0, 10, 3)]
         #[case::above(10, 4, 4)]
         fn reveal_scrolls_as_little_as_it_can(#[case] scroll: usize, #[case] i: usize, #[case] expected: usize) {
             assert_eq!(rows(20, scroll).reveal(i), expected);
@@ -3909,14 +3879,14 @@ mod tests {
 
         #[test]
         fn hidden_entries_are_counted_above_and_below() {
-            assert_eq!(rows(20, 3).hidden(), (0..3, 8..20));
+            assert_eq!(rows(20, 3).hidden(), (0..3, 11..20));
         }
 
         #[test]
         fn shows_how_many_projects_are_hidden() {
             let t = render(&many(20, 3));
             assert_eq!(row_text(&t, more_above(list())).trim_end(), "  ↑ 3 more");
-            assert_eq!(row_text(&t, rows(20, 3).more_below()).trim_end(), "  ↓ 12 more");
+            assert_eq!(row_text(&t, rows(20, 3).more_below()).trim_end(), "  ↓ 9 more");
         }
 
         #[test]
@@ -3951,7 +3921,7 @@ mod tests {
             };
             let t = render(&v);
             let below = workspace_layout(areas().workspaces_list, 1, &tabs(&[10]), 0).more_below();
-            assert_eq!(row_text(&t, below).trim_end(), "  ↓ 6 more");
+            assert_eq!(row_text(&t, below).trim_end(), "  ↓ 3 more");
         }
     }
 
@@ -4565,14 +4535,6 @@ mod tests {
 
     mod draw {
         use super::*;
-
-        #[rstest]
-        #[case::icon(Position::new(1, 0))]
-        #[case::icon_stem(Position::new(1, 1))]
-        #[case::first_letter(Position::new(6, 0))]
-        fn brand_uses_the_brand_color(#[case] pos: Position) {
-            assert_eq!(render(&view(&["~"])).backend().buffer()[pos].fg, BRAND_COLOR);
-        }
 
         #[test]
         fn renders_sidebar_with_active_entry() {

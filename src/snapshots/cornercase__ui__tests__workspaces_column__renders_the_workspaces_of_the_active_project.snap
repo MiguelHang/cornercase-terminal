@@ -2,10 +2,7 @@
 source: src/ui.rs
 expression: render(&with_workspaces(Some(0))).backend()
 ---
-" ▄▀▀▀ cornercase                                         │  no tab open                             "
-" █                                                       │                                          "
-"                                                         │                                          "
-"  ⌕ search projects, workspaces, tabs                    │                                          "
+"  ⌕ search projects, workspaces, tabs                    │  no tab open                             "
 "                                                         │                                          "
 " projects                      │ workspaces              │                                          "
 "                               │                         │                                          "
@@ -14,7 +11,10 @@ expression: render(&with_workspaces(Some(0))).backend()
 "  + new project                │    nvim                 │                                          "
 "                               │    + tab                │                                          "
 "                               │                         │                                          "
-"                               │  ↓ 2 more               │                                          "
+"                               │  main                   │                                          "
+"                               │    zsh                  │                                          "
+"                               │    + tab                │                                          "
+"                               │                         │                                          "
 "                               │  + new workspace        │                                          "
 " ───────────────────────────── │                         │                                          "
 "  settings                     │                         │                                          "

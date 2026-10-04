@@ -2,6 +2,10 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.1.14
+
+- More room for your projects and workspaces: the cornercase logo at the top of the sidebar is gone, so the search bar sits on the first row and both lists start three rows higher.
+
 ## 0.1.13
 
 - See how full Claude Code's context is without opening its tab: once Claude has answered, a second line under the tab's name shows its model and how much of its context window the conversation takes up, such as `Opus 5.5 · 23%`, the same percentage as Claude's own status line. It turns orange from 75% and red from 90%.

@@ -346,12 +346,12 @@ fn shell_output_shows_in_the_pane() {
 }
 
 #[test]
-fn sidebar_shows_the_brand_and_the_title() {
+fn sidebar_shows_the_search_and_the_title() {
     let app = Harness::start();
     let areas = areas();
 
-    let brand = app.row(areas.brand.y);
-    assert!(brand.contains("cornercase"), "brand row: {brand:?}");
+    let search = app.row(areas.search.y);
+    assert!(search.contains("search projects"), "search row: {search:?}");
     let title = app.row(areas.title.y);
     assert!(title.starts_with(" projects"), "title row: {title:?}");
 }

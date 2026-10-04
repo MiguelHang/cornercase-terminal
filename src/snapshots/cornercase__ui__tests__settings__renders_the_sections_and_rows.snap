@@ -2,14 +2,14 @@
 source: src/ui.rs
 expression: render(&with(settings(1))).backend()
 ---
-" ▄▀▀▀ cornercase                                         │                                          "
-" █┌ settings ────────────────────────────────────────────────────────────────────────────────────┐  "
-"  │  Worktrees   Agents   Issues   TUI                                                           │  "
+"  ⌕ search projects, workspaces, tabs                    │                                          "
+"  ┌ settings ────────────────────────────────────────────────────────────────────────────────────┐  "
+" p│  Worktrees   Agents   Issues   TUI                                                           │  "
 "  │                                                                                              │  "
-"  │ Accounts                                                                                     │  "
-" p│   Shortcut API token        @ana in acme  saved                                              │  "
+"▌ │ Accounts                                                                                     │  "
+"  │   Shortcut API token        @ana in acme  saved                                              │  "
 "  │ › Linear API key            not connected  enter pastes one                                  │  "
-"▌ │                                                                                              │  "
+"  │                                                                                              │  "
 "  │ Sources shown                                                                                │  "
 "  │   [x] All                   every source together                                            │  "
 "  │   [x] GitHub                                                                                 │  "

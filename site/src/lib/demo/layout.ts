@@ -10,7 +10,7 @@ const PANE_PADDING = 1;
 const MIN_PANE_WIDTH = 20;
 const COMPACT_PITCH = 3;
 const COMPACT_BUTTON_WIDTH = 7;
-const HEADER_HEIGHT = 5;
+const HEADER_HEIGHT = 2;
 export const GAP = 1;
 const FORM_WIDTH = 64;
 const FORM_HEIGHT = 10;
@@ -117,7 +117,6 @@ export interface Areas {
   compact: boolean;
   pitch: number;
   bar: Rect;
-  brand: Rect;
   search: Rect;
   searchButton: Rect;
   back: Rect;
@@ -182,9 +181,8 @@ function wide(cols: number, rows: number, widths: Widths): Areas {
     compact: false,
     pitch: 1,
     bar: EMPTY,
-    brand: rect(0, 0, header.w, 2),
-    search: rect(1, 3, header.w - 2, 1),
-    searchButton: rect(1, 3, header.w - 2, 1),
+    search: rect(1, 0, header.w - 2, 1),
+    searchButton: rect(1, 0, header.w - 2, 1),
     back: EMPTY,
     sidebar,
     title,
@@ -248,9 +246,8 @@ function stacked(cols: number, rows: number, widths: Widths, sidebar: Sidebar): 
     compact: false,
     pitch: 1,
     bar: EMPTY,
-    brand: rect(0, 0, inner, 2),
-    search: rect(1, 3, inner - 2, 1),
-    searchButton: rect(1, 3, inner - 2, 1),
+    search: rect(1, 0, inner - 2, 1),
+    searchButton: rect(1, 0, inner - 2, 1),
     back: EMPTY,
     sidebar: { ...projects, w: width },
     title,
@@ -291,7 +288,6 @@ function compact(cols: number, rows: number, changes: boolean): Areas {
     compact: true,
     pitch,
     bar,
-    brand: EMPTY,
     search: bar,
     searchButton: rect(cols - searchWidth, 0, searchWidth, pitch),
     back: intersect(rect(0, title.y, '‹ projects'.length + 2 + 2, pitch), title),

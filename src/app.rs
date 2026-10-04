@@ -5076,7 +5076,7 @@ rm -f "$1/sessions/$$.json"
     mod sidebar_scroll {
         use super::*;
 
-        const SHORT: Rect = Rect { x: 0, y: 0, width: 100, height: 15 };
+        const SHORT: Rect = Rect { x: 0, y: 0, width: 100, height: 12 };
 
         fn short() -> ui::Areas {
             ui::layout(SHORT, ui::Widths::default())

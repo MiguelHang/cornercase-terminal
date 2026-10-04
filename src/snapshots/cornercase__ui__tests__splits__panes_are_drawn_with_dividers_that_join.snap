@@ -2,16 +2,16 @@
 source: src/ui.rs
 expression: render(&v).backend()
 ---
-" ▄▀▀▀ cornercase                                         │ $ left              │ $ top              "
-" █                                                       │                     │                    "
-"                                                         │                     │                    "
-"  ⌕ search projects, workspaces, tabs                    │                     │                    "
+"  ⌕ search projects, workspaces, tabs                    │ $ left              │ $ top              "
 "                                                         │                     │                    "
 " projects                      │ workspaces              │                     │                    "
 "                               │                         │                     │                    "
 "▌ ~ (1)                        │                         │                     │                    "
 "                               │                         │                     │                    "
-"  + new project                │                         │                     ├────────────────────"
+"  + new project                │                         │                     │                    "
+"                               │                         │                     │                    "
+"                               │                         │                     │                    "
+"                               │                         │                     ├────────────────────"
 "                               │                         │                     │ $ bottom           "
 "                               │                         │                     │                    "
 "                               │                         │                     │                    "

@@ -2,10 +2,7 @@
 source: src/ui.rs
 expression: render(&v).backend()
 ---
-" ▄▀▀▀ cornercase                                         │  no tab open                             "
-" █                                                       │                                          "
-"                                                         │                                          "
-"  ⌕ search projects, workspaces, tabs                    │                                          "
+"  ⌕ search projects, workspaces, tabs                    │  no tab open                             "
 "                                                         │                                          "
 " projects                      │ workspaces              │                                          "
 "                               │                         │                                          "
@@ -14,7 +11,10 @@ expression: render(&v).backend()
 "  + new project                │    nvim                 │                                          "
 "                               │    + tab                │                                          "
 "                               │                         │                                          "
-"                               │  ↓ 2 more               │                                          "
+"                               │  main             ↓1    │                                          "
+"                               │    zsh                  │                                          "
+"                               │    + tab                │                                          "
+"                               │                         │                                          "
 "                               │  + new workspace        │                                          "
 " ───────────────────────────── │                         │                                          "
 "  settings                     │                         │                                          "

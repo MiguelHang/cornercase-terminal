@@ -94,7 +94,7 @@ export const SCENES: Record<string, Scene> = {
   },
   search: {
     cols: 104,
-    rows: 11,
+    rows: 8,
     build: (app) => {
       world(app);
       app.openSearch();
@@ -151,7 +151,7 @@ export const SCENES: Record<string, Scene> = {
   },
   sidebar: {
     cols: 104,
-    rows: 22,
+    rows: 19,
     build: (app) => {
       world(app);
       app.advance(3000);
@@ -172,7 +172,7 @@ export const SCENES: Record<string, Scene> = {
   },
   projects: {
     cols: 104,
-    rows: 18,
+    rows: 15,
     build: (app) => {
       world(app);
       return rect(0, 0, 32, app.rows);
@@ -180,7 +180,7 @@ export const SCENES: Record<string, Scene> = {
   },
   projectsLight: {
     cols: 104,
-    rows: 18,
+    rows: 15,
     light: true,
     build: (app) => {
       world(app);
