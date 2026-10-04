@@ -108,6 +108,7 @@ src/error.rs      library error type
 **Splits (`split.rs`)**
 - A binary tree (`Leaf` / `Split { dir, ratio, first, second }`). Right-click in a pane opens split/close/right-click-passthrough; this works even when the program captured the mouse, since almost no program uses the right button.
 - A vertical divider is followed by a blank column so text does not touch it. Inactive panes are dimmed (configurable). A left click on an inactive pane only focuses it. Dividers drag like column borders.
+- A pane can end up with no room (a divider dragged to the edge over a nested split, or a small client). Its PTY is still sized at least 1×1, and mouse events for it are dropped (`pane_cell` returns `None`), never clamped into an empty range: `clamp` panics when `min > max`, and a panic ends the server and every shell.
 
 **Search (`search.rs`)**
 - One global search across groups, projects, workspaces (label and branch) and tabs (label and their workspace's keys). Ranking: exact, prefix, substring; ties by kind (group, project, workspace, tab) then sidebar order. A group result expands it and activates its first project. Results are recomputed on every key and draw; the query is never kept after closing.
