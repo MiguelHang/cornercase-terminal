@@ -6,6 +6,10 @@ Every pull request that changes the app adds a section here for its new version.
 
 - Give your panes more room: settings → TUI → sidebar puts the workspaces column below the projects column (projects_on_top), or above it (workspaces_on_top), in one column. Drag the line between the two lists to share the height, and double-click it to split it in half again.
 
+## 0.1.11
+
+- Fixed a crash that could close every shell and agent at once. Once a pane in a split had no room left (after dragging a divider to the edge, or on a small window), a middle click or a drag that started in the sidebar took the server down with it.
+
 ## 0.1.10
 
 - See how much of your Claude Code plan you have used without leaving what you are doing: the new `usage` button, under `settings`, opens a dialog with the five-hour session, the week and any per-model weekly limit, each with a bar and when it resets. Extra usage shows too when it is turned on.
