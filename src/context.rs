@@ -158,7 +158,10 @@ impl Transcript {
     }
 
     fn update(&mut self) {
-        let Ok(len) = std::fs::metadata(&self.path).map(|m| m.len()) else { return };
+        let Ok(len) = std::fs::metadata(&self.path).map(|m| m.len()) else {
+            *self = Self::new(std::mem::take(&mut self.path));
+            return;
+        };
         if len == self.len {
             return;
         }
@@ -499,6 +502,17 @@ mod tests {
             file.transcript.update();
 
             assert_eq!(file.transcript.reply, Some(reply("claude-haiku-4-5", 10)));
+        }
+
+        #[test]
+        fn a_transcript_that_goes_away_takes_its_reply_with_it() {
+            let mut file = Written::new();
+            file.lines(&[assistant("claude-opus-5-5", 1, 0, 9)]);
+            std::fs::remove_file(file.dir.path().join("session.jsonl")).expect("remove the transcript");
+
+            file.transcript.update();
+
+            assert_eq!(file.transcript.reply, None);
         }
 
         #[test]
