@@ -54,6 +54,9 @@ impl Term {
         cmd.args(args);
         cmd.env("TERM", "xterm-256color");
         cmd.env(protocol::NESTED_ENV, "1");
+        for key in activity::CLAUDE_SESSION_ENV {
+            cmd.env_remove(key);
+        }
         for (key, value) in env {
             cmd.env(key, value);
         }

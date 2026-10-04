@@ -167,6 +167,7 @@ src/error.rs      library error type
 - One server per socket, guarded by `flock` on `server.lock`. The server calls `setsid` and ignores SIGHUP.
 - The server renders, the client only writes frames. Input travels as serialized crossterm events. Several clients mirror each other; the shared size is the last used client's (attach, key, paste or mouse other than a bare move), like tmux's `window-size latest`, so a hung client (a phone whose SSH dropped) never shrinks a new one. Ping/pong would not catch that: the hung client is a healthy local process. Smaller clients get the frame cropped by `CropBackend`.
 - Every shell gets `CORNERCASE=1`; a client seeing it refuses to start (no nesting).
+- Every shell loses Claude Code's per-session variables (`activity::CLAUDE_SESSION_ENV`): a server started from inside Claude Code would otherwise make every pane's `claude` a child of that session and expose its messaging token. An explicit list, not a `CLAUDE_CODE_*` prefix, so user settings like `CLAUDE_CODE_USE_BEDROCK` and `CLAUDE_CONFIG_DIR` pass through.
 - `Hello` carries a protocol version and build id; a server from another build rejects the client. Keep `ClientMessage::KillServer` and `ServerMessage::Rejected` as the first variants (`protocol::tests::compatibility`).
 - Socket: `$XDG_RUNTIME_DIR/cornercase/server.sock` or `$TMPDIR/cornercase-<uid>/server.sock`; `CORNERCASE_SOCKET` overrides it. Paths must fit in 108 bytes.
 

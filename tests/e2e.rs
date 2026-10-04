@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cornercase::activity::CLAUDE_DIR_ENV;
+use cornercase::activity::{CLAUDE_DIR_ENV, CLAUDE_SESSION_ENV};
 use cornercase::protocol::{NESTED_ENV, SOCKET_ENV};
 use cornercase::split::{self, Dir};
 use cornercase::ui::{self, SidebarRow, WorkspaceRow};
@@ -122,6 +122,10 @@ impl Harness {
     }
 
     fn open(session: Arc<Session>, rows: u16, cols: u16) -> Self {
+        Self::open_with(session, rows, cols, &[])
+    }
+
+    fn open_with(session: Arc<Session>, rows: u16, cols: u16, env: &[(&str, &str)]) -> Self {
         let pair =
             native_pty_system().openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).expect("open pty");
         let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_cornercase"));
@@ -132,6 +136,9 @@ impl Harness {
         cmd.env_remove(NESTED_ENV);
         cmd.env_remove("SHORTCUT_API_TOKEN");
         cmd.env_remove("LINEAR_API_KEY");
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
         cmd.cwd(std::env::temp_dir());
         let child = pair.slave.spawn_command(cmd).expect("spawn cornercase");
         drop(pair.slave);
@@ -736,6 +743,19 @@ fn running_cornercase_inside_itself_is_refused() {
     app.send(format!("{bin} 2>/dev/null; echo exit-\"\"code-$?\r").as_bytes());
 
     app.wait_for("nested client fails", |s| s.contains("exit-code-1"));
+}
+
+#[test]
+fn shells_do_not_inherit_the_claude_code_session_that_started_the_server() {
+    let mut env: Vec<(&str, &str)> = CLAUDE_SESSION_ENV.iter().map(|key| (*key, "leaked")).collect();
+    env.push(("CORNERCASE_E2E_KEPT", "kept"));
+    let mut app = Harness::open_with(Session::new(), ROWS, COLS, &env);
+    app.wait_for("app starts with one terminal", |s| s.contains(&first_entry()));
+
+    let vars = CLAUDE_SESSION_ENV.map(|key| format!("${{{key}}}")).concat();
+    app.send(format!("echo \"session-[{vars}]-$CORNERCASE_E2E_KEPT\"\r").as_bytes());
+
+    app.wait_for("only the unrelated variable reaches the shell", |s| s.contains("session-[]-kept"));
 }
 
 #[test]
