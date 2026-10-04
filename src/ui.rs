@@ -2849,8 +2849,9 @@ fn draw_project(f: &mut Frame, view: &View, p: usize, r: Rect, pitch: u16) {
     let bg = view.row_background(r, p == view.active);
     let indent = if entry.group.is_some() { GROUP_INDENT } else { "" };
     let count = format!(" ({})", entry.workspaces);
-    let reserved =
-        NAME_RESERVED_COLS + indent.len() + usize::from(row_close_button(r, pitch).width - CLOSE_BUTTON_WIDTH);
+    let reserved = NAME_RESERVED_COLS
+        + indent.len()
+        + usize::from(row_close_button(r, pitch).width.saturating_sub(CLOSE_BUTTON_WIDTH));
     let room = usize::from(r.width).saturating_sub(reserved);
     let marks =
         Tags::fit(entry.status.map(status_icon).into_iter().collect(), room.saturating_sub(count.chars().count()));
@@ -3740,6 +3741,12 @@ mod tests {
         #[case::wide(COMPACT_WIDTH, false)]
         fn narrow_terminals_get_the_menu_bar(#[case] width: u16, #[case] compact: bool) {
             assert_eq!(layout(Rect::new(0, 0, width, 20), Widths::default()).compact(), compact);
+        }
+
+        #[test]
+        fn the_projects_menu_draws_in_a_terminal_two_columns_wide() {
+            let t = render_sized(&in_a_project(Some(Nav::Projects)), 2, SMALL.height);
+            assert_eq!(t.backend().buffer().area.width, 2);
         }
 
         #[test]
