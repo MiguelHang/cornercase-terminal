@@ -71,7 +71,6 @@ pub struct Report {
 #[derive(Deserialize)]
 struct Body {
     subscription_type: Option<String>,
-    #[serde(default)]
     rate_limits_available: bool,
     rate_limits: Option<Limits>,
 }
@@ -190,8 +189,13 @@ fn extra(spend: &Spend) -> Option<String> {
 }
 
 pub fn parse(body: Value) -> Result<Report> {
-    let body: Body = serde_json::from_value(body).map_err(|e| Error::Usage(format!("unexpected answer: {e}")))?;
-    let limits = body.rate_limits.filter(|_| body.rate_limits_available);
+    let unexpected = |e: &dyn std::fmt::Display| Error::Usage(format!("unexpected answer: {e}"));
+    let body: Body = serde_json::from_value(body).map_err(|e| unexpected(&e))?;
+    let limits = match (body.rate_limits_available, body.rate_limits) {
+        (false, _) => None,
+        (true, Some(limits)) => Some(limits),
+        (true, None) => return Err(unexpected(&"rate limits are available but missing")),
+    };
     Ok(Report {
         plan: body.subscription_type,
         limited: limits.is_some(),
@@ -390,6 +394,16 @@ mod tests {
     fn an_account_without_rate_limits_has_no_windows() {
         let body = json!({"subscription_type": null, "rate_limits_available": false, "rate_limits": null});
         assert_eq!(parse(body).expect("a report"), Report::default());
+    }
+
+    #[rstest]
+    #[case::empty(json!({}), "unexpected answer: missing field `rate_limits_available`")]
+    #[case::available_but_missing(
+        json!({"rate_limits_available": true, "rate_limits": null}),
+        "unexpected answer: rate limits are available but missing"
+    )]
+    fn an_answer_without_the_usage_fields_is_unavailable(#[case] body: Value, #[case] expected: &str) {
+        assert_eq!(parse(body).expect_err("no report").to_string(), expected);
     }
 
     #[test]
