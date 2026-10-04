@@ -25,6 +25,7 @@ use crate::issues::{
 use crate::launch::{self, Launch, Step};
 use crate::markdown;
 use crate::mouse;
+use crate::notify::{self, Notification};
 use crate::picker::Picker;
 use crate::process;
 use crate::project::{Group, Project, Tab, Workspace, shift_active};
@@ -258,6 +259,19 @@ struct Focus {
     tab: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Toast {
+    message: String,
+    status: Option<activity::Status>,
+    at: Instant,
+}
+
+impl Toast {
+    fn new(message: impl Into<String>, status: Option<activity::Status>) -> Self {
+        Self { message: message.into(), status, at: Instant::now() }
+    }
+}
+
 fn claude_activity(config: &Config, dir: Option<&Path>, term: &Term) -> Option<Activity> {
     let pid = term.foreground_pid()?;
     let agent = agents::detect(config, &process::args(pid))?;
@@ -289,7 +303,7 @@ pub struct App {
     divider_drag: Option<(u64, Vec<bool>)>,
     divider_click: Option<(u64, Vec<bool>, Instant)>,
     selecting: Option<u64>,
-    toast: Option<(&'static str, Instant)>,
+    toast: Option<Toast>,
     overlay: Option<Overlay>,
     config: Config,
     config_path: PathBuf,
@@ -303,6 +317,7 @@ pub struct App {
     issue_people: People,
     people_cache: HashMap<(Source, Option<u64>), Vec<Person>>,
     host_writes: Vec<Vec<u8>>,
+    notifications: Vec<Notification>,
     accounts: HashMap<Source, Account>,
     issue_tab: Option<IssueTab>,
     settings_page: Page,
@@ -384,6 +399,7 @@ impl App {
             issue_people: People::default(),
             people_cache: HashMap::new(),
             host_writes: Vec::new(),
+            notifications: Vec::new(),
             accounts: HashMap::new(),
             issue_tab: None,
             settings_page: Page::default(),
@@ -479,17 +495,39 @@ impl App {
             self.watched = Some(now);
         }
         let (config, dir) = (&self.config, self.claude_dir.as_deref());
-        for tab in self.projects.iter_mut().flat_map(|p| &mut p.workspaces).flat_map(|w| &mut w.tabs) {
-            let seen = visible == Some(tab.id);
-            for term in &mut tab.panes {
-                if read {
-                    let activity = claude_activity(config, dir, term);
-                    term.agent.update(activity, seen);
-                } else if seen {
-                    term.agent.see();
+        let mut notices = Vec::new();
+        for project in &mut self.projects {
+            for workspace in &mut project.workspaces {
+                for tab in &mut workspace.tabs {
+                    let seen = visible == Some(tab.id);
+                    for term in &mut tab.panes {
+                        if read {
+                            let activity = claude_activity(config, dir, term);
+                            if let Some(status) = term.agent.update(activity, seen, now)
+                                && !notices.contains(&(status, project.id, workspace.id))
+                            {
+                                notices.push((status, project.id, workspace.id));
+                            }
+                        } else if seen {
+                            term.agent.see();
+                        }
+                    }
                 }
             }
         }
+        for (status, project, workspace) in notices {
+            self.notify(status, project, workspace);
+        }
+    }
+
+    fn notify(&mut self, status: activity::Status, project: u64, workspace: u64) {
+        let Some((p, w)) = self.workspace_index(project, workspace) else { return };
+        let what = if status == activity::Status::Waiting { "needs you" } else { "finished" };
+        let project = &self.projects[p];
+        let place = format!("{} › {}", self.project_label(project), project.workspaces[w].label());
+        let message = notify::clean(&format!("{} {what} in {place}", agents::CLAUDE));
+        self.notifications.extend(Notification::new(&message, &self.config.desktop_notifications));
+        self.toast = Some(Toast::new(message, Some(status)));
     }
 
     fn count_behind(&mut self, now: Instant) {
@@ -1615,6 +1653,10 @@ impl App {
         std::mem::take(&mut self.host_writes)
     }
 
+    pub fn take_notifications(&mut self) -> Vec<Notification> {
+        std::mem::take(&mut self.notifications)
+    }
+
     fn cache_key(&self, source: Source, project: u64, query: &Query) -> CacheKey {
         let project = (source == Source::Github)
             .then(|| self.project_index(project).map(|p| self.projects[p].path.clone()))
@@ -2272,7 +2314,7 @@ impl App {
         match result {
             Ok(Some(release)) if !self.updates.installed => {
                 if self.updates.available.as_ref().is_none_or(|known| known.version != release.version) {
-                    self.toast = Some((UPDATE_AVAILABLE, Instant::now()));
+                    self.toast = Some(Toast::new(UPDATE_AVAILABLE, None));
                 }
                 self.updates.available = Some(release);
             }
@@ -2705,7 +2747,7 @@ impl App {
             let dragging = dragging.filter(|(id, _)| *id == tab.id).map(|(_, path)| path);
             Some(ui::TabView { layout, screens, active: tab.active, dim_inactive, dragging })
         });
-        self.toast = self.toast.filter(|(_, at)| at.elapsed() < TOAST_FOR);
+        self.toast = self.toast.take().filter(|t| t.at.elapsed() < TOAST_FOR);
         let visible = self.visible_tab();
         let tabs = self.projects.iter().flat_map(|p| &p.workspaces).flat_map(|w| &w.tabs);
         let attention = activity::attention(tabs.filter(|t| Some(t.id) != visible).map(Tab::status));
@@ -2726,7 +2768,7 @@ impl App {
             light: self.theme.is_light() == Some(true),
             tab,
             overlay,
-            toast: self.toast.map(|(message, _)| message),
+            toast: self.toast.as_ref().map(|t| ui::Toast { message: &t.message, status: t.status }),
             nav: self.nav,
             update: self.update_label(),
             changes: if self.changes_shown() { self.panel_view() } else { None },
@@ -3013,7 +3055,7 @@ impl App {
         });
         let Some((t, id)) = found else {
             self.host_writes.push(clipboard::osc52(text.trim_end()));
-            self.toast = Some((NO_AGENT, Instant::now()));
+            self.toast = Some(Toast::new(NO_AGENT, None));
             return;
         };
         let ws = &mut self.projects[p].workspaces[w];
@@ -3025,7 +3067,7 @@ impl App {
                 if term.emulator.bracketed_paste() { format!("\x1b[200~{text}\x1b[201~") } else { text.to_string() };
             term.write(bytes.as_bytes());
         }
-        self.toast = Some((SENT_TO_AGENT, Instant::now()));
+        self.toast = Some(Toast::new(SENT_TO_AGENT, None));
     }
 
     fn open_branches(&mut self, target: &Checkout) {
@@ -3127,9 +3169,9 @@ impl App {
     }
 }
 
-fn copy(host_writes: &mut Vec<Vec<u8>>, toast: &mut Option<(&'static str, Instant)>, text: &str) {
+fn copy(host_writes: &mut Vec<Vec<u8>>, toast: &mut Option<Toast>, text: &str) {
     host_writes.push(clipboard::osc52(text));
-    *toast = Some((COPIED, Instant::now()));
+    *toast = Some(Toast::new(COPIED, None));
 }
 
 fn pane_cell(pane: Rect, ev: MouseEvent) -> Position {
@@ -3191,6 +3233,10 @@ mod tests {
 
     fn canonical(dir: &TempDir) -> PathBuf {
         dir.path().canonicalize().expect("canonicalize")
+    }
+
+    fn toast(app: &App) -> Option<&str> {
+        app.toast.as_ref().map(|t| t.message.as_str())
     }
 
     fn pump_until(app: &mut App, rx: &Receiver<AppEvent>, what: &str, cond: impl Fn(&App) -> bool) {
@@ -4572,6 +4618,8 @@ while [ -d "$1" ] && [ ! -e "$1/quit" ]; do sleep 0.02; done
 rm -f "$s"
 "#;
 
+        const SILENT_CLAUDE: &str = "#!/bin/sh\nwhile [ -d \"$1\" ] && [ ! -e \"$1/quit\" ]; do sleep 0.02; done\n";
+
         struct Claude {
             dir: TempDir,
             _bin: TempDir,
@@ -4580,11 +4628,15 @@ rm -f "$s"
 
         impl Claude {
             fn new() -> Self {
+                Self::running(FAKE_CLAUDE)
+            }
+
+            fn running(script: &str) -> Self {
                 let (dir, bin) = (TempDir::new(), TempDir::new());
                 std::fs::create_dir(dir.path().join("sessions")).expect("create the sessions folder");
-                let script = bin.path().join("claude");
-                write_executable(&script, FAKE_CLAUDE);
-                Self { dir, _bin: bin, script }
+                let path = bin.path().join("claude");
+                write_executable(&path, script);
+                Self { dir, _bin: bin, script: path }
             }
 
             fn start(&self, app: &mut App) {
@@ -4595,6 +4647,18 @@ rm -f "$s"
             fn signal(&self, name: &str) {
                 std::fs::write(self.dir.path().join(name), "").expect("write the signal");
             }
+
+            fn report(&self, pid: i32, status: &str) {
+                let next = self.dir.path().join("next.json");
+                std::fs::write(&next, format!(r#"{{"pid":{pid},"status":"{status}"}}"#)).expect("write the session");
+                let session = self.dir.path().join("sessions").join(format!("{pid}.json"));
+                std::fs::rename(next, session).expect("put the session in place");
+            }
+        }
+
+        fn tick(app: &mut App) {
+            let now = app.watched.map_or_else(Instant::now, |at| at + WATCH_AGENTS_EVERY);
+            app.watch_agents(now);
         }
 
         fn watch_until(app: &mut App, rx: &Receiver<AppEvent>, what: &str, cond: impl Fn(&App) -> bool) {
@@ -4602,8 +4666,7 @@ rm -f "$s"
                 while let Ok(ev) = rx.try_recv() {
                     app.handle_event(ev, AREA).expect("handle event");
                 }
-                let now = app.watched.map_or_else(Instant::now, |at| at + WATCH_AGENTS_EVERY);
-                app.watch_agents(now);
+                tick(app);
                 cond(app)
             });
         }
@@ -4689,6 +4752,96 @@ rm -f "$s"
             let bar = text(&rendered(&mut app, small), Rect::new(0, 1, 7, 1));
 
             assert_eq!((sidebar.trim_end().ends_with('✓'), bar.as_str()), (true, "   ≡ ✓ "));
+        }
+
+        struct Watched {
+            app: App,
+            _rx: Receiver<AppEvent>,
+            _dirs: Vec<TempDir>,
+            claude: Claude,
+            pid: i32,
+        }
+
+        impl Watched {
+            fn start(hidden: bool) -> Self {
+                let (mut app, rx, dirs) = app_with(1);
+                let claude = Claude::running(SILENT_CLAUDE);
+                claude.start(&mut app);
+                pump_until(&mut app, &rx, "claude runs", |a| claude_activity(&a.config, None, term(a, 0)).is_some());
+                let pid = term(&app, 0).foreground_pid().expect("the pid of claude");
+                let mut watched = Self { app, _rx: rx, _dirs: dirs, claude, pid };
+                watched.report("busy", 1);
+                if hidden {
+                    watched.app.add_tab(0, 0, AREA).expect("add a tab");
+                }
+                watched
+            }
+
+            fn report(&mut self, status: &str, ticks: usize) {
+                self.claude.report(self.pid, status);
+                for _ in 0..ticks {
+                    tick(&mut self.app);
+                }
+            }
+
+            fn place(&self) -> String {
+                format!("{} › default", self.app.project_label(&self.app.projects[0]))
+            }
+
+            fn told(&mut self) -> (Option<String>, Vec<Notification>) {
+                (toast(&self.app).map(str::to_owned), self.app.take_notifications())
+            }
+        }
+
+        #[test]
+        fn a_hidden_tab_that_needs_you_shows_a_toast_and_sends_one_notification() {
+            let mut w = Watched::start(true);
+
+            w.report("waiting", 6);
+
+            let text = format!("claude needs you in {}", w.place());
+            let notification = Notification { text: text.clone(), channel: None };
+            assert_eq!(w.told(), (Some(text), vec![notification]));
+        }
+
+        #[test]
+        fn a_hidden_tab_that_finishes_says_so() {
+            let mut w = Watched::start(true);
+
+            w.report("idle", 6);
+
+            let text = format!("claude finished in {}", w.place());
+            assert_eq!(w.told().1, [Notification { text, channel: None }]);
+        }
+
+        #[test]
+        fn the_visible_tab_stays_quiet() {
+            let mut w = Watched::start(false);
+
+            w.report("waiting", 6);
+
+            assert_eq!(w.told(), (None, Vec::new()));
+        }
+
+        #[test]
+        fn a_question_answered_at_once_stays_quiet() {
+            let mut w = Watched::start(true);
+            w.report("waiting", 1);
+
+            w.report("busy", 6);
+
+            assert_eq!(w.told(), (None, Vec::new()));
+        }
+
+        #[test]
+        fn turned_off_only_the_toast_shows() {
+            let mut w = Watched::start(true);
+            w.app.config.desktop_notifications = notify::OFF.into();
+
+            w.report("waiting", 6);
+
+            let (shown, sent) = w.told();
+            assert_eq!((shown.is_some(), sent), (true, Vec::new()));
         }
     }
 
@@ -5211,7 +5364,7 @@ rm -f "$s"
         fn a_click_on_a_tab_shows_its_rows() {
             let mut s = open();
             show(&mut s.app, Page::Tui);
-            assert_eq!(form(&s.app).rows(), [Row::DimPanes, Row::Updates]);
+            assert_eq!(form(&s.app).rows(), [Row::DimPanes, Row::Notifications, Row::Updates]);
         }
 
         #[test]
@@ -5377,7 +5530,7 @@ rm -f "$s"
 
             drag(&mut app, cell(0, 0), cell(4, 0));
 
-            assert_eq!(app.toast.map(|(message, _)| message), Some(COPIED));
+            assert_eq!(toast(&app), Some(COPIED));
         }
 
         #[test]
@@ -5387,7 +5540,7 @@ rm -f "$s"
             click(&mut app, cell(2, 0));
             mouse(&mut app, MouseEventKind::Up(MouseButton::Left), cell(2, 0));
 
-            assert_eq!((app.take_host_writes(), app.toast), (Vec::<Vec<u8>>::new(), None));
+            assert_eq!((app.take_host_writes(), toast(&app)), (Vec::<Vec<u8>>::new(), None));
         }
 
         #[test]
@@ -5426,16 +5579,13 @@ rm -f "$s"
 
             app.handle_event(AppEvent::Output(id, b"\x1b]52;c;aGVsbG8=\x07".to_vec()), AREA).expect("handle output");
 
-            assert_eq!(
-                (app.take_host_writes(), app.toast.map(|(message, _)| message)),
-                (vec![clipboard::osc52("hello")], Some(COPIED))
-            );
+            assert_eq!((app.take_host_writes(), toast(&app)), (vec![clipboard::osc52("hello")], Some(COPIED)));
         }
 
         #[test]
         fn the_toast_goes_away_after_a_while() {
             let (mut app, _rx) = showing("hello world");
-            app.toast = Instant::now().checked_sub(TOAST_FOR).map(|at| (COPIED, at));
+            app.toast = Instant::now().checked_sub(TOAST_FOR).map(|at| Toast { at, ..Toast::new(COPIED, None) });
             let mut t = Terminal::new(TestBackend::new(AREA.width, AREA.height)).expect("test backend");
 
             t.draw(|f| app.draw(f)).expect("draw");
@@ -6502,14 +6652,14 @@ rm -f "$s"
         fn a_newer_release_shows_a_button_and_a_toast() {
             let (app, _rx) = found(replaced());
             assert_eq!(app.update_label().as_deref(), Some("↑ 9.0.0"));
-            assert_eq!(app.toast.map(|(message, _)| message), Some(UPDATE_AVAILABLE));
+            assert_eq!(toast(&app), Some(UPDATE_AVAILABLE));
         }
 
         #[test]
         fn nothing_new_shows_nothing() {
             let (mut app, _rx) = empty_app();
             app.handle_event(AppEvent::UpdateChecked(Ok(None)), AREA).expect("handle check");
-            assert_eq!((app.update_label(), app.toast), (None, None));
+            assert_eq!((app.update_label(), toast(&app)), (None, None));
         }
 
         #[test]
@@ -6818,10 +6968,7 @@ rm -f "$s"
             let file = app.changed_diff(&target).expect("diff").files[0].clone();
             app.hunk_action(&target, &file, 0, HunkAction::Copy, AREA).expect("copy");
             let patch = file.hunks[0].patch();
-            assert_eq!(
-                (app.take_host_writes(), app.toast.map(|t| t.0)),
-                (vec![clipboard::osc52(&patch)], Some(COPIED))
-            );
+            assert_eq!((app.take_host_writes(), toast(&app)), (vec![clipboard::osc52(&patch)], Some(COPIED)));
         }
 
         #[test]

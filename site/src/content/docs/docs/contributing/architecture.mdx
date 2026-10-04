@@ -20,7 +20,7 @@ cornercase is a single Rust binary that plays two roles: a **server** that owns 
 ```
 
 - `src/main.rs` picks the role from the first argument: none for the client, `server`, or `kill-server`; `--version` only prints the version.
-- The **client** (`client.rs`) starts the server if needed, queries the outer terminal's colours, sets up raw mode, mouse capture, bracketed paste and the kitty keyboard flags, sends a `Hello`, then has two jobs: write every frame it receives to stdout, and send every crossterm event it reads to the server.
+- The **client** (`client.rs`) starts the server if needed, queries the outer terminal's colours and name, sets up raw mode, mouse capture, bracketed paste and the kitty keyboard flags, sends a `Hello`, then has two jobs: write every frame it receives to stdout, and send every crossterm event it reads to the server.
 - The **server** (`server.rs`) owns the `App`, every PTY and every emulator. It renders a ratatui frame for each client and sends the bytes.
 
 ## The server loop
@@ -57,7 +57,7 @@ Panes are emulated with [libghostty-vt](https://github.com/ghostty-org/ghostty),
 
 - It answers the terminal queries programs wait for (DSR, DA, DECRQM, kitty keyboard queries…) and reflows text on resize.
 - Its types are `!Send`, so every emulator lives on the server's main thread; each PTY's reader thread only forwards bytes. Replies go out from `on_pty_write`, in order with the output that asked for them.
-- Cells keep palette indices. The colours queried from the outer terminal (OSC 10, 11 and 4, with DA1 as an end marker) become every emulator's defaults.
+- Cells keep palette indices. The colours queried from the outer terminal (OSC 10, 11 and 4, with DA1 as an end marker) become every emulator's defaults. The same query asks for the terminal's name (XTVERSION), which decides how desktop notifications are written to it.
 - `take_copied` hands over OSC 52 clipboard writes from programs; reads and primary-selection writes are dropped.
 
 Keys are encoded in `keys.rs`: Ghostty's encoder for special keys, and for every key once a program enables the kitty protocol; a legacy encoder for the rest. Mouse events are encoded in `mouse.rs`, in the mode and encoding the program asked for, relative to its pane.
@@ -86,7 +86,8 @@ Keys are encoded in `keys.rs`: Ghostty's encoder for special keys, and for every
 | `term.rs` | A shell in a PTY, its emulator, and the reader thread. |
 | `emulator.rs` | The libghostty-vt wrapper; plain snapshots for the UI. |
 | `keys.rs`, `mouse.rs` | Key and mouse encoding for programs. |
-| `host_theme.rs` | Asking the outer terminal for its colours. |
+| `host_theme.rs` | Asking the outer terminal for its colours and its name. |
+| `notify.rs` | Desktop notifications through the outer terminal: which escape sequence each terminal understands, and how it is written. |
 | `process.rs` | A process's cwd, name and arguments, per platform. |
 | `git.rs` | Branch from `.git/HEAD`, repository roots, linked worktrees, without running git. |
 | `worktree.rs` | `git worktree add` and `remove`, checkout paths, `.worktreeinclude`. |

@@ -11,6 +11,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::host_theme::HostTheme;
+use crate::notify::Channel;
 
 pub const VERSION: u32 = 1;
 pub const SOCKET_ENV: &str = "CORNERCASE_SOCKET";
@@ -31,6 +32,7 @@ pub struct Hello {
     pub cols: u16,
     pub rows: u16,
     pub theme: HostTheme,
+    pub notify: Channel,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

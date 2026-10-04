@@ -93,6 +93,16 @@ cornercase copies with the OSC 52 escape sequence, which your terminal has to al
 
 Over SSH, it's your local terminal that needs to allow it.
 
+### No desktop notification shows up
+
+- Only a tab you aren't looking at notifies you, and only when Claude Code runs in it; see [Notifications](../../guides/projects-workspaces-tabs/#notifications).
+- Check that **settings → TUI → desktop notifications** isn't *off*. With *auto*, cornercase picks from your terminal's name; if it picks wrong, for example over SSH with a terminal that doesn't say its name, choose the one your terminal understands.
+- Your system must let your terminal show notifications: on macOS, in **System Settings → Notifications**.
+- **iTerm2** shows them only with *Notification Center Alerts* on, in **Settings → Profiles → Terminal**.
+- **foot** shows them with `notify-send`, which has to be installed.
+- Ghostty on macOS, foot, Konsole and Warp don't show one while their window is in front, and kitty, Contour and VS Code are asked not to: look for the toast.
+- Inside tmux, screen or Zellij, cornercase only rings the bell, which your multiplexer decides what to do with.
+
 ### Dragging doesn't select text
 
 The program in the pane is using the mouse, so the drag goes to it. Many such programs have their own way to select and copy, or a setting to turn their mouse support off.

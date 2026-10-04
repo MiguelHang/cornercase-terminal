@@ -68,7 +68,7 @@ impl HostTheme {
         for i in 0..PALETTE_LEN {
             let _ = write!(query, "\x1b]4;{i};?\x1b\\");
         }
-        query.push_str("\x1b[c");
+        query.push_str("\x1b[>q\x1b[c");
         query
     }
 
@@ -97,6 +97,7 @@ impl HostTheme {
 pub struct ThemeProbe {
     pending: Vec<u8>,
     theme: HostTheme,
+    terminal: Option<String>,
     done: bool,
 }
 
@@ -109,6 +110,12 @@ impl ThemeProbe {
                 Reply::Incomplete => break,
                 Reply::Osc(body, len) => {
                     self.theme.apply_osc(&body);
+                    start += len;
+                }
+                Reply::Dcs(body, len) => {
+                    if let Some(name) = body.strip_prefix(">|") {
+                        self.terminal = Some(name.to_string());
+                    }
                     start += len;
                 }
                 Reply::DeviceAttributes(len) => {
@@ -125,6 +132,10 @@ impl ThemeProbe {
         self.done
     }
 
+    pub fn terminal(&self) -> Option<&str> {
+        self.terminal.as_deref()
+    }
+
     pub fn finish(self) -> HostTheme {
         self.theme
     }
@@ -133,6 +144,7 @@ impl ThemeProbe {
 enum Reply {
     Incomplete,
     Osc(String, usize),
+    Dcs(String, usize),
     DeviceAttributes(usize),
     Other(usize),
 }
@@ -140,9 +152,11 @@ enum Reply {
 fn parse_reply(buf: &[u8]) -> Reply {
     match buf {
         [ESC] | [ESC, b'['] => Reply::Incomplete,
-        [ESC, b']', rest @ ..] => match osc_end(rest) {
+        [ESC, kind @ (b']' | b'P'), rest @ ..] => match string_end(rest) {
             Some((body_len, term_len)) => {
-                Reply::Osc(String::from_utf8_lossy(&rest[..body_len]).into_owned(), 2 + body_len + term_len)
+                let body = String::from_utf8_lossy(&rest[..body_len]).into_owned();
+                let len = 2 + body_len + term_len;
+                if *kind == b']' { Reply::Osc(body, len) } else { Reply::Dcs(body, len) }
             }
             None => Reply::Incomplete,
         },
@@ -155,7 +169,7 @@ fn parse_reply(buf: &[u8]) -> Reply {
     }
 }
 
-fn osc_end(rest: &[u8]) -> Option<(usize, usize)> {
+fn string_end(rest: &[u8]) -> Option<(usize, usize)> {
     rest.iter().enumerate().find_map(|(i, &b)| match (b, rest.get(i + 1)) {
         (BEL, _) => Some((i, 1)),
         (ESC, Some(b'\\')) => Some((i, 2)),
@@ -267,6 +281,17 @@ mod tests {
         fn skips_unrelated_bytes() {
             assert_eq!(probe(b"abc\x1b[A\x1b]11;#000000\x07").finish().background, Some(rgb(0, 0, 0)));
         }
+
+        #[test]
+        fn reads_the_terminal_name_and_version() {
+            let p = probe(b"\x1b]11;rgb:00/00/00\x1b\\\x1bP>|ghostty 1.2.0\x1b\\\x1b[?62;22c");
+            assert_eq!((p.terminal(), p.is_done()), (Some("ghostty 1.2.0"), true));
+        }
+
+        #[test]
+        fn has_no_terminal_name_when_the_terminal_does_not_say() {
+            assert_eq!(probe(b"\x1bP1$r0m\x1b\\\x1b[?62;22c").terminal(), None);
+        }
     }
 
     mod query {
@@ -275,7 +300,7 @@ mod tests {
         #[test]
         fn asks_for_colors_and_ends_with_device_attributes() {
             let q = HostTheme::query();
-            assert!(q.starts_with("\x1b]10;?\x1b\\\x1b]11;?\x1b\\") && q.ends_with("\x1b]4;255;?\x1b\\\x1b[c"));
+            assert!(q.starts_with("\x1b]10;?\x1b\\\x1b]11;?\x1b\\") && q.ends_with("\x1b]4;255;?\x1b\\\x1b[>q\x1b[c"));
         }
     }
 

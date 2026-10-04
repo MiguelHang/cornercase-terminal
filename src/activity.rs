@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -20,6 +21,7 @@ pub const CLAUDE_SESSION_ENV: [&str; 10] = [
 const SPINNER: [char; 4] = ['◐', '◓', '◑', '◒'];
 const BRAILLE: RangeInclusive<char> = '\u{2800}'..='\u{28ff}';
 const IDLE: char = '✳';
+const NOTIFY_AFTER: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Activity {
@@ -50,17 +52,33 @@ pub fn attention(statuses: impl IntoIterator<Item = Option<Status>>) -> Option<S
 pub struct Pane {
     activity: Option<Activity>,
     unseen: bool,
+    since: Option<Instant>,
+    notified: bool,
 }
 
 impl Pane {
-    pub fn update(&mut self, activity: Option<Activity>, seen: bool) {
+    pub fn update(&mut self, activity: Option<Activity>, seen: bool, now: Instant) -> Option<Status> {
+        let before = self.status();
         let finished = matches!(self.activity, Some(Activity::Working | Activity::Waiting));
         self.unseen = activity == Some(Activity::Idle) && !seen && (self.unseen || finished);
         self.activity = activity;
+        let status = self.status();
+        if status != before {
+            self.since = Some(now);
+            self.notified = false;
+        }
+        self.notified |= seen;
+        let settled = self.since.is_some_and(|since| now.duration_since(since) >= NOTIFY_AFTER);
+        if !settled || self.notified || !status.is_some_and(Status::needs_you) {
+            return None;
+        }
+        self.notified = true;
+        status
     }
 
     pub fn see(&mut self) {
         self.unseen = false;
+        self.notified = true;
     }
 
     pub fn status(self) -> Option<Status> {
@@ -192,8 +210,9 @@ mod tests {
 
         fn after(steps: &[(Option<Activity>, bool)]) -> Option<Status> {
             let mut pane = Pane::default();
+            let now = Instant::now();
             for (activity, seen) in steps {
-                pane.update(*activity, *seen);
+                pane.update(*activity, *seen, now);
             }
             pane.status()
         }
@@ -226,12 +245,65 @@ mod tests {
         #[test]
         fn seeing_it_clears_done() {
             let mut pane = Pane::default();
-            pane.update(Some(Activity::Working), false);
-            pane.update(Some(Activity::Idle), false);
+            let now = Instant::now();
+            pane.update(Some(Activity::Working), false, now);
+            pane.update(Some(Activity::Idle), false, now);
 
             pane.see();
 
             assert_eq!(pane.status(), Some(Status::Idle));
+        }
+    }
+
+    mod notice {
+        use super::*;
+
+        const WORKING: (Option<Activity>, bool) = (Some(Activity::Working), false);
+        const WAITING: (Option<Activity>, bool) = (Some(Activity::Waiting), false);
+        const IDLE: (Option<Activity>, bool) = (Some(Activity::Idle), false);
+        const WAITING_IN_SIGHT: (Option<Activity>, bool) = (Some(Activity::Waiting), true);
+        const TICK: Duration = Duration::from_millis(500);
+
+        fn notices(steps: &[(Option<Activity>, bool)]) -> Vec<(usize, Status)> {
+            let mut pane = Pane::default();
+            let start = Instant::now();
+            let mut now = start;
+            let mut notices = Vec::new();
+            for (i, (activity, seen)) in steps.iter().enumerate() {
+                if let Some(status) = pane.update(*activity, *seen, now) {
+                    notices.push((i, status));
+                }
+                now += TICK;
+            }
+            notices
+        }
+
+        #[rstest]
+        #[case::asks_out_of_sight(&[WORKING, WAITING, WAITING, WAITING, WAITING], &[(3, Status::Waiting)])]
+        #[case::finishes_out_of_sight(&[WORKING, IDLE, IDLE, IDLE, IDLE], &[(3, Status::Done)])]
+        #[case::asks_in_sight(&[WORKING, WAITING_IN_SIGHT, WAITING_IN_SIGHT, WAITING_IN_SIGHT], &[])]
+        #[case::flips_straight_back(&[WORKING, WAITING, WORKING, WORKING, WORKING], &[])]
+        #[case::seen_before_it_settled(&[WORKING, WAITING_IN_SIGHT, WAITING, WAITING, WAITING], &[])]
+        #[case::asks_then_finishes(&[WORKING, WAITING, WAITING, WAITING, IDLE, IDLE, IDLE], &[(3, Status::Waiting), (6, Status::Done)])]
+        #[case::finishes_twice(&[WORKING, IDLE, IDLE, IDLE, WORKING, IDLE, IDLE, IDLE], &[(3, Status::Done), (7, Status::Done)])]
+        #[case::only_works(&[WORKING, WORKING, WORKING, IDLE], &[])]
+        fn comes_once_the_change_settles(
+            #[case] steps: &[(Option<Activity>, bool)],
+            #[case] expected: &[(usize, Status)],
+        ) {
+            assert_eq!(notices(steps), expected);
+        }
+
+        #[test]
+        fn none_comes_once_the_tab_was_seen() {
+            let mut pane = Pane::default();
+            let now = Instant::now();
+            pane.update(Some(Activity::Working), false, now);
+            pane.update(Some(Activity::Waiting), false, now);
+
+            pane.see();
+
+            assert_eq!(pane.update(Some(Activity::Waiting), false, now + NOTIFY_AFTER), None);
         }
     }
 

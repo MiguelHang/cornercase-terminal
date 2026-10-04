@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::agents;
+use crate::notify;
 use crate::protocol;
 use crate::state;
 
@@ -32,6 +33,7 @@ pub struct Config {
     pub trust_prompt_pattern: String,
     pub gh: String,
     pub dim_inactive_panes: bool,
+    pub desktop_notifications: String,
     pub check_updates: bool,
 }
 
@@ -51,6 +53,7 @@ impl Default for Config {
             trust_prompt_pattern: agents::DEFAULT_TRUST_PROMPT.into(),
             gh: DEFAULT_GH.into(),
             dim_inactive_panes: true,
+            desktop_notifications: notify::AUTO.into(),
             check_updates: true,
         }
     }

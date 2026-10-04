@@ -15,6 +15,7 @@ pub mod keys;
 pub mod launch;
 pub mod markdown;
 pub mod mouse;
+pub mod notify;
 pub mod picker;
 pub mod process;
 pub mod project;

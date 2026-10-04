@@ -145,7 +145,7 @@ export class Painter {
     if (!isEmpty(areas.workspaces)) this.workspaces(areas);
     if (app.changesShown() && !isEmpty(areas.changes)) drawChanges(this, areas);
     this.overlay(areas);
-    if (app.toast) this.toast(app.toast.text);
+    if (app.toast) this.toast(app.toast.text, app.toast.status);
     return { regions: this.regions, cursor: this.cursor, areas };
   }
 
@@ -838,14 +838,15 @@ export class Painter {
     if (selected) this.span(hint.x, hint.y, `  ${truncateLeft(`enter goes to ${selected.name}`, hint.w - 2)}`, DARK);
   }
 
-  private toast(message: string): void {
+  private toast(message: string, status?: Status): void {
     const app = this.app;
     const w = Math.min(3 + [...message].length + 1 + 2, app.cols);
     const h = Math.min(3, app.rows);
     const r = rect(Math.max(0, app.cols - w - 1), Math.max(0, app.rows - h - 1), w, h);
+    const icon = status ? STATUS_ICONS[status] : seg('✓', { fg: 2 });
     this.g.clear(r);
-    this.g.box(r, { fg: 2 });
-    const x = this.span(r.x + 1, r.y + 1, ' ✓ ', { fg: 2 });
+    this.g.box(r, { fg: icon.s?.fg ?? 2 });
+    const x = this.span(r.x + 1, r.y + 1, ` ${icon.t} `, icon.s ?? {});
     this.span(x, r.y + 1, message, {}, right(r) - 1 - x);
   }
 }

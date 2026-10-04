@@ -20,6 +20,7 @@ use signal_hook::iterator::Signals;
 
 use crate::error::{Error, Result};
 use crate::host_theme::{HostTheme, ThemeProbe};
+use crate::notify;
 use crate::protocol::{self, ClientMessage, Hello, ServerMessage};
 
 const THEME_QUERY_TIMEOUT: Duration = Duration::from_secs(1);
@@ -143,11 +144,13 @@ fn restore_input_modes() {
 }
 
 fn attach(stream: UnixStream, terminal: &DefaultTerminal) -> Result<Option<PathBuf>> {
-    let theme = HostTheme { truecolor: truecolor(), ..query_host_theme() };
+    let (theme, name) = query_host();
+    let theme = HostTheme { truecolor: truecolor(), ..theme };
+    let notify = notify::detect(name.as_deref(), |var| std::env::var(var).ok());
     let size = terminal.size()?;
     let mut writer = stream.try_clone()?;
-    let hello =
-        Hello { version: protocol::VERSION, build: protocol::build_id(), cols: size.width, rows: size.height, theme };
+    let (version, build) = (protocol::VERSION, protocol::build_id());
+    let hello = Hello { version, build, cols: size.width, rows: size.height, theme, notify };
     protocol::send(&mut writer, &ClientMessage::Hello(Box::new(hello)))?;
     spawn_input_thread(writer);
     spawn_signal_thread(stream.try_clone()?)?;
@@ -174,10 +177,10 @@ fn truecolor() -> bool {
     std::env::var("COLORTERM").is_ok_and(|v| matches!(v.as_str(), "truecolor" | "24bit"))
 }
 
-fn query_host_theme() -> HostTheme {
+fn query_host() -> (HostTheme, Option<String>) {
     let mut out = stdout();
     if out.write_all(HostTheme::query().as_bytes()).and_then(|()| out.flush()).is_err() {
-        return HostTheme::default();
+        return (HostTheme::default(), None);
     }
     let input = stdin();
     let deadline = Instant::now() + THEME_QUERY_TIMEOUT;
@@ -194,7 +197,8 @@ fn query_host_theme() -> HostTheme {
             _ => break,
         }
     }
-    probe.finish()
+    let name = probe.terminal().map(str::to_owned);
+    (probe.finish(), name)
 }
 
 fn spawn_input_thread(mut writer: UnixStream) {

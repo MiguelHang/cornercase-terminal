@@ -5,6 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::agents;
 use crate::config::{self, Config};
 use crate::issues::{Account, Secret, Source};
+use crate::notify;
 use crate::search::Search;
 use crate::ui;
 
@@ -24,6 +25,7 @@ pub enum Row {
     Folder,
     Fetch,
     DimPanes,
+    Notifications,
     Updates,
     Token(Source),
     Tab(&'static str),
@@ -37,7 +39,7 @@ pub enum Row {
 impl Row {
     pub fn section(&self) -> &'static str {
         match self {
-            Self::Folder | Self::Fetch | Self::DimPanes | Self::Updates => "",
+            Self::Folder | Self::Fetch | Self::DimPanes | Self::Notifications | Self::Updates => "",
             Self::Token(_) => "Accounts",
             Self::Tab(_) => "Sources shown",
             Self::DefaultAgent | Self::Submit | Self::Trust => "Agent",
@@ -50,7 +52,7 @@ impl Row {
             Self::Folder | Self::Fetch => Page::Worktrees,
             Self::DefaultAgent | Self::Submit | Self::Trust | Self::Kind(_) | Self::AddAgent => Page::Agents,
             Self::Token(_) | Self::Tab(_) => Page::Issues,
-            Self::DimPanes | Self::Updates => Page::Tui,
+            Self::DimPanes | Self::Notifications | Self::Updates => Page::Tui,
         }
     }
 }
@@ -186,7 +188,7 @@ impl Settings {
         rows.extend(shown.iter().copied().chain(hidden).map(Row::Tab));
         rows.extend([Row::DefaultAgent, Row::Submit, Row::Trust]);
         rows.extend(self.listed_kinds().into_iter().map(Row::Kind));
-        rows.extend([Row::AddAgent, Row::DimPanes, Row::Updates]);
+        rows.extend([Row::AddAgent, Row::DimPanes, Row::Notifications, Row::Updates]);
         rows.retain(|row| row.page() == self.page);
         rows
     }
@@ -265,6 +267,14 @@ impl Settings {
                 let notice = if on { "inactive panes are dimmed" } else { "every pane looks the same" };
                 self.save(Config { dim_inactive_panes: on, ..self.config.clone() }, notice.into())
             }
+            Row::Notifications => {
+                let items = notify::choices()
+                    .into_iter()
+                    .map(|(value, note)| PickItem { value: value.into(), note: note.into(), dangerous: false })
+                    .collect();
+                self.open_pick(row, items);
+                Action::None
+            }
             Row::Updates => {
                 let on = !self.config.check_updates;
                 let notice = if on {
@@ -328,6 +338,7 @@ impl Settings {
     fn open_pick(&mut self, row: Row, items: Vec<PickItem>) {
         let current = match &row {
             Row::DefaultAgent => Some(self.config.agent.clone()),
+            Row::Notifications => Some(self.config.desktop_notifications.trim().to_lowercase()),
             Row::Kind(kind) => Some(
                 agents::mode_of(&agents::args(&self.config, kind), &agents::modes(&self.config, kind))
                     .unwrap_or_else(|| "default".into()),
@@ -358,6 +369,10 @@ impl Settings {
             Row::DefaultAgent => {
                 let notice = format!("default agent: {value}");
                 self.save(Config { agent: value, ..self.config.clone() }, notice)
+            }
+            Row::Notifications => {
+                let notice = format!("desktop notifications: {value}");
+                self.save(Config { desktop_notifications: value, ..self.config.clone() }, notice)
             }
             Row::Kind(kind) if value == EXTRA_ARGS => {
                 self.edit_extra(&kind);
@@ -623,6 +638,12 @@ impl Settings {
                 let value = if config.dim_inactive_panes { "[x] dimmed" } else { "[ ] as bright as the active one" };
                 ("inactive panes".into(), value.into(), "in a split tab".into(), false)
             }
+            Row::Notifications => (
+                "desktop notifications".into(),
+                config.desktop_notifications.clone(),
+                "when an agent in another tab needs you or finishes".into(),
+                false,
+            ),
             Row::Updates => {
                 let value = if config.check_updates { "[x] once a day" } else { "[ ] never" };
                 ("check for updates".into(), value.into(), "asks GitHub for the latest release".into(), false)
@@ -680,6 +701,7 @@ impl Settings {
             let choices = self.pick_choices();
             let title = match &pick.row {
                 Row::DefaultAgent => "Which agent takes an issue by default?".to_string(),
+                Row::Notifications => "How should your terminal notify you?".to_string(),
                 Row::Kind(kind) => format!("How should {kind} start?"),
                 _ => "Which agent do you want to set up?".to_string(),
             };
@@ -1002,6 +1024,30 @@ mod tests {
             let mut s = settings();
             go_to(&mut s, &Row::DimPanes);
             assert!(!saved(press(&mut s, KeyCode::Enter)).dim_inactive_panes);
+        }
+    }
+
+    mod notifications {
+        use super::*;
+
+        #[test]
+        fn are_picked_from_a_list() {
+            let mut s = settings();
+            go_to(&mut s, &Row::Notifications);
+            press(&mut s, KeyCode::Enter);
+            type_text(&mut s, "off");
+            assert_eq!(saved(press(&mut s, KeyCode::Enter)).desktop_notifications, "off");
+        }
+
+        #[test]
+        fn the_list_starts_on_the_current_choice() {
+            let mut s = settings();
+            s.config.desktop_notifications = "osc9".into();
+            go_to(&mut s, &Row::Notifications);
+            press(&mut s, KeyCode::Enter);
+            let ui::Overlay::Settings(view) = s.view() else { panic!("not the settings") };
+            let pick = view.pick.expect("a pick list");
+            assert_eq!(pick.selected.map(|i| pick.items[i].0.as_str()), Some("osc9"));
         }
     }
 

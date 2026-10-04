@@ -21,6 +21,8 @@ import {
   type Tab,
   type Target,
   type Workspace,
+  NOTIFY_AFTER,
+  NOTIFY_CHOICES,
   activePane,
   attention,
   defaultConfig,
@@ -103,7 +105,7 @@ export class App {
   workspacesScroll = 0;
   overlay: Overlay | null = null;
   hover: Pos | null = null;
-  toast: { text: string; until: number } | null = null;
+  toast: { text: string; until: number; status?: Status } | null = null;
   focused = false;
   selection: { pane: number; from: Pos; to: Pos; rect: Rect } | null = null;
   dragging: Drag | null = null;
@@ -214,8 +216,17 @@ export class App {
 
   private watchAgents(): void {
     const visible = this.visibleTab();
-    for (const t of this.projects.flatMap((p) => p.workspaces.flatMap((w) => w.tabs))) {
-      for (const pane of t.panes) watchPane(pane, agentActivity(pane), t === visible);
+    const now = this.now();
+    for (const p of this.projects) {
+      for (const w of p.workspaces) {
+        for (const t of w.tabs) {
+          for (const pane of t.panes) {
+            const status = watchPane(pane, agentActivity(pane), t === visible, now);
+            if (status) this.notify(`claude ${status === 'waiting' ? 'needs you' : 'finished'} in ${projectLabel(p)} › ${workspaceLabel(w)}`, status);
+            else if (pane.since === now && !pane.notified) this.after(NOTIFY_AFTER, () => this.dirty());
+          }
+        }
+      }
     }
   }
 
@@ -296,8 +307,8 @@ export class App {
     return n;
   }
 
-  notify(text: string): void {
-    this.toast = { text, until: this.now() + 2000 };
+  notify(text: string, status?: Status): void {
+    this.toast = { text, until: this.now() + 2000, status };
     this.after(2050, () => this.dirty());
     this.dirty();
   }
@@ -1063,6 +1074,7 @@ export class App {
     }
     return [
       { id: 'dim', section: '', label: 'inactive panes', value: c.dim ? '[x] dimmed' : '[ ] as bright as the active one', note: 'in a split tab' },
+      { id: 'notify', section: '', label: 'desktop notifications', value: c.notify, note: 'when an agent in another tab needs you or finishes' },
       { id: 'updates', section: '', label: 'check for updates', value: c.updates ? '[x] once a day' : '[ ] never', note: 'asks GitHub for the latest release' },
     ];
   }
@@ -1101,6 +1113,9 @@ export class App {
     } else if (row.id === 'updates') {
       c.updates = !c.updates;
       o.notice = c.updates ? 'cornercase looks for new versions' : 'cornercase no longer looks for new versions';
+    } else if (row.id === 'notify') {
+      const items = NOTIFY_CHOICES.map(([value, note]) => ({ value, note }));
+      o.pick = { row: row.id, title: 'How should your terminal notify you?', items, selected: Math.max(0, items.findIndex((i) => i.value === c.notify)), filter: '' };
     } else if (row.id === 'agent') {
       o.pick = {
         row: row.id,
@@ -1151,6 +1166,9 @@ export class App {
     if (row === 'agent') {
       c.agent = item.value;
       o.notice = `default agent: ${item.value}`;
+    } else if (row === 'notify') {
+      c.notify = item.value;
+      o.notice = `desktop notifications: ${item.value}`;
     } else if (row.startsWith('kind:')) {
       const kind = row.slice(5);
       if (item.value === 'extra arguments…') {
