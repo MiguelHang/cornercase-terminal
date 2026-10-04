@@ -2,6 +2,10 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.1.9
+
+- A Claude Code tab no longer shows `✓` and notifies you that Claude finished while a command it started in the background (a build, a test run) is still running. The tab keeps `◐` until Claude is really done, and you hear about it once.
+
 ## 0.1.8
 
 - Find out when Claude Code needs you or finishes in a tab you aren't looking at: a toast says where (`claude needs you in shop › main`), and your terminal shows a desktop notification, so you hear about it from another window too. It works over SSH, because the notification travels through your terminal.

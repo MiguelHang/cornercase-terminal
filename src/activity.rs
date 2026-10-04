@@ -121,9 +121,9 @@ fn session(text: &str, pid: i32) -> Option<Activity> {
         return None;
     }
     match session.status.as_deref()? {
-        "busy" => Some(Activity::Working),
+        "busy" | "shell" => Some(Activity::Working),
         "waiting" => Some(Activity::Waiting),
-        "idle" | "shell" => Some(Activity::Idle),
+        "idle" => Some(Activity::Idle),
         _ => None,
     }
 }
@@ -158,7 +158,7 @@ mod tests {
         #[case::permission(r#"{"pid":7,"status":"waiting","waitingFor":"permission prompt"}"#, Some(Activity::Waiting))]
         #[case::question(r#"{"pid":7,"status":"waiting","waitingFor":"input needed"}"#, Some(Activity::Waiting))]
         #[case::idle(r#"{"pid":7,"status":"idle"}"#, Some(Activity::Idle))]
-        #[case::background_shell(r#"{"pid":7,"status":"shell"}"#, Some(Activity::Idle))]
+        #[case::background_shell(r#"{"pid":7,"status":"shell"}"#, Some(Activity::Working))]
         #[case::no_status_yet(r#"{"pid":7,"sessionId":"a"}"#, None)]
         #[case::unknown_status(r#"{"pid":7,"status":"dreaming"}"#, None)]
         #[case::another_process(r#"{"pid":8,"status":"busy"}"#, None)]
@@ -292,6 +292,16 @@ mod tests {
             #[case] expected: &[(usize, Status)],
         ) {
             assert_eq!(notices(steps), expected);
+        }
+
+        #[test]
+        fn a_background_shell_finishes_once_it_ends() {
+            let steps: Vec<_> = ["busy", "shell", "shell", "shell", "shell", "idle", "idle", "idle"]
+                .iter()
+                .map(|status| (session(&format!(r#"{{"pid":7,"status":"{status}"}}"#), 7), false))
+                .collect();
+
+            assert_eq!(notices(&steps), [(7, Status::Done)]);
         }
 
         #[test]
