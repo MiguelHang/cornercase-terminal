@@ -5,6 +5,18 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 pub const CLAUDE_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
+pub const CLAUDE_SESSION_ENV: [&str; 10] = [
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+];
 const SPINNER: [char; 4] = ['◐', '◓', '◑', '◒'];
 const BRAILLE: RangeInclusive<char> = '\u{2800}'..='\u{28ff}';
 const IDLE: char = '✳';
