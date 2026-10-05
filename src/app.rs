@@ -291,10 +291,24 @@ impl Toast {
     }
 }
 
-fn claude_in(config: &Config, dir: Option<&Path>, term: &Term) -> Option<Claude> {
-    let pid = term.foreground_pid()?;
-    let args = process::args(pid);
-    (agents::detect(config, &args)? == agents::CLAUDE).then(|| Claude { pid, args, session: Session::read(dir, pid) })
+fn agent_in(config: &Config, dir: Option<&Path>, term: &mut Term) -> Option<(String, activity::Activity)> {
+    let pid = term.foreground_pid();
+    let args = pid.map(process::args).unwrap_or_default();
+    match (pid, agents::detect(config, &args)) {
+        (Some(pid), Some(agent)) if agent == agents::CLAUDE => {
+            let claude = Claude { pid, args, session: Session::read(dir, pid) };
+            term.context.update(dir, Some(&claude));
+            Some((agent, claude.activity(&term.emulator.title())))
+        }
+        (Some(pid), Some(agent)) if agent == agents::CODEX => {
+            term.context.update_codex(pid);
+            Some((agent, activity::codex(&term.emulator.title(), term.context.codex_turn())))
+        }
+        _ => {
+            term.context.update(dir, None);
+            None
+        }
+    }
 }
 
 fn wheel(kind: MouseEventKind) -> Option<isize> {
@@ -536,19 +550,16 @@ impl App {
                     let seen = visible == Some(tab.id);
                     for term in &mut tab.panes {
                         if read {
-                            let claude = claude_in(config, dir, term);
-                            let activity = claude.as_ref().map(|c| c.activity(&term.emulator.title()));
-                            if let Some(pid) = term.foreground_pid()
-                                && agents::detect(config, &process::args(pid)).as_deref() == Some(agents::CODEX)
-                            {
-                                term.context.update_codex(pid);
-                            } else {
-                                term.context.update(dir, claude.as_ref());
-                            }
+                            let found = agent_in(config, dir, term);
+                            let activity = found.as_ref().map(|(_, activity)| *activity);
+                            term.agent.follow(found.as_ref().map(|(agent, _)| agent.as_str()));
                             if let Some(status) = term.agent.update(activity, seen, now)
-                                && !notices.contains(&(status, project.id, workspace.id))
+                                && let Some((agent, _)) = found
                             {
-                                notices.push((status, project.id, workspace.id));
+                                let notice = (agent, status, project.id, workspace.id);
+                                if !notices.contains(&notice) {
+                                    notices.push(notice);
+                                }
                             }
                         } else if seen {
                             term.agent.see();
@@ -557,17 +568,17 @@ impl App {
                 }
             }
         }
-        for (status, project, workspace) in notices {
-            self.notify(status, project, workspace);
+        for (agent, status, project, workspace) in notices {
+            self.notify(&agent, status, project, workspace);
         }
     }
 
-    fn notify(&mut self, status: activity::Status, project: u64, workspace: u64) {
+    fn notify(&mut self, agent: &str, status: activity::Status, project: u64, workspace: u64) {
         let Some((p, w)) = self.workspace_index(project, workspace) else { return };
         let what = if status == activity::Status::Waiting { "needs you" } else { "finished" };
         let project = &self.projects[p];
         let place = format!("{} › {}", self.project_label(project), project.workspaces[w].label());
-        let message = notify::clean(&format!("{} {what} in {place}", agents::CLAUDE));
+        let message = notify::clean(&format!("{agent} {what} in {place}"));
         self.notifications.extend(Notification::new(&message, &self.config.desktop_notifications));
         self.toast = Some(Toast::new(message, Some(status)));
     }
@@ -5370,6 +5381,7 @@ mod tests {
     mod agent_status {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use rstest::rstest;
 
         use super::*;
         use crate::activity::Status;
@@ -5383,6 +5395,9 @@ printf '{"pid":%s,"status":"idle"}' $$ > "$s"
 while [ -d "$1" ] && [ ! -e "$1/quit" ]; do sleep 0.02; done
 rm -f "$s"
 "#;
+
+        const TURN_STARTED: &str = include_str!("../tests/fixtures/codex/0.160.0/turn-started.jsonl");
+        const TURN_COMPLETE: &str = include_str!("../tests/fixtures/codex/0.160.0/turn-complete.jsonl");
 
         const SILENT_CLAUDE: &str = "#!/bin/sh\nwhile [ -d \"$1\" ] && [ ! -e \"$1/quit\" ]; do sleep 0.02; done\n";
 
@@ -5543,7 +5558,7 @@ rm -f "$1/sessions/$$.json"
 
             assert_eq!(context(&app, 0).expect("first").model, "gpt-5.4");
             assert_eq!(context(&app, 1).expect("second").model, "gpt-5.4-mini");
-            assert_eq!(status(&app, 0, 1), None);
+            assert_eq!(status(&app, 0, 1), Some(Status::Idle));
             second.append(include_str!("../tests/fixtures/codex/0.160.0/compacted.jsonl"));
             watch_until(&mut app, &rx, "compaction clears the percentage", |a| {
                 context(a, 1).is_some_and(|c| c.percent.is_none())
@@ -5600,22 +5615,23 @@ rm -f "$1/sessions/$$.json"
             assert_eq!((sidebar.trim_end().ends_with('✓'), bar.as_str()), (true, "   ≡ ✓ "));
         }
 
+        enum Fake {
+            Claude(Claude, i32),
+            Codex(FakeCodex, usize),
+        }
+
         struct Watched {
             app: App,
-            _rx: Receiver<AppEvent>,
+            rx: Receiver<AppEvent>,
             _dirs: Vec<TempDir>,
-            claude: Claude,
-            pid: i32,
+            agents: Vec<Fake>,
         }
 
         impl Watched {
-            fn start(hidden: bool) -> Self {
-                let (mut app, rx, dirs) = app_with(1);
-                let claude = Claude::running(SILENT_CLAUDE);
-                claude.start(&mut app);
-                pump_until(&mut app, &rx, "claude runs", |a| claude_in(&a.config, None, term(a, 0)).is_some());
-                let pid = term(&app, 0).foreground_pid().expect("the pid of claude");
-                let mut watched = Self { app, _rx: rx, _dirs: dirs, claude, pid };
+            fn start(agent: &str, hidden: bool) -> Self {
+                let (app, rx, dirs) = app_with(1);
+                let mut watched = Self { app, rx, _dirs: dirs, agents: Vec::new() };
+                watched.run(agent);
                 watched.report("busy", 1);
                 if hidden {
                     watched.app.add_tab(0, 0, AREA).expect("add a tab");
@@ -5623,8 +5639,41 @@ rm -f "$1/sessions/$$.json"
                 watched
             }
 
+            fn run(&mut self, agent: &str) {
+                let (app, rx) = (&mut self.app, &self.rx);
+                let fake = if agent == agents::CODEX {
+                    let codex = FakeCodex::new("019a1234-5678-7000-8000-000000000001", "gpt-5.4", false);
+                    type_line(app, &codex.command_line());
+                    watch_until(app, rx, "codex runs", |a| a.tab().is_some_and(|t| t.context().is_some()));
+                    Fake::Codex(codex, app.projects[0].workspaces[0].active)
+                } else {
+                    let claude = Claude::running(SILENT_CLAUDE);
+                    claude.start(app);
+                    pump_until(app, rx, "claude runs", |a| runs(a, agents::CLAUDE));
+                    let pid = app.term().and_then(Term::foreground_pid).expect("the pid of claude");
+                    Fake::Claude(claude, pid)
+                };
+                self.agents.push(fake);
+            }
+
             fn report(&mut self, status: &str, ticks: usize) {
-                self.claude.report(self.pid, status);
+                for fake in &self.agents {
+                    match fake {
+                        Fake::Claude(claude, pid) => claude.report(*pid, status),
+                        Fake::Codex(codex, tab) => {
+                            let (title, event) = match status {
+                                "busy" => ("⠴ fix the login | shop", TURN_STARTED),
+                                "waiting" => ("[ ! ] Action Required | fix the login | shop", ""),
+                                _ => ("fix the login | shop", TURN_COMPLETE),
+                            };
+                            codex.append(event);
+                            codex.signal("title", title);
+                            pump_until(&mut self.app, &self.rx, "codex sets its title", |a| {
+                                tab_term(a, 0, *tab).emulator.title() == title
+                            });
+                        }
+                    }
+                }
                 for _ in 0..ticks {
                     tick(&mut self.app);
                 }
@@ -5639,39 +5688,72 @@ rm -f "$1/sessions/$$.json"
             }
         }
 
+        fn runs(app: &App, agent: &str) -> bool {
+            app.term()
+                .and_then(Term::foreground_pid)
+                .is_some_and(|pid| agents::detect(&app.config, &process::args(pid)).as_deref() == Some(agent))
+        }
+
         #[test]
-        fn a_hidden_tab_that_needs_you_shows_a_toast_and_sends_one_notification() {
-            let mut w = Watched::start(true);
+        fn a_codex_tab_follows_its_turns_and_approvals() {
+            let mut w = Watched::start(agents::CODEX, false);
+            let mut seen = vec![status(&w.app, 0, 0)];
+
+            for step in ["waiting", "busy", "idle"] {
+                w.report(step, 1);
+                seen.push(status(&w.app, 0, 0));
+            }
+
+            let expected = [Status::Working, Status::Waiting, Status::Working, Status::Idle];
+            assert_eq!(seen, expected.map(Some));
+        }
+
+        #[rstest]
+        fn a_hidden_tab_that_needs_you_shows_a_toast_and_sends_one_notification(
+            #[values(agents::CLAUDE, agents::CODEX)] agent: &str,
+        ) {
+            let mut w = Watched::start(agent, true);
 
             w.report("waiting", 6);
 
-            let text = format!("claude needs you in {}", w.place());
+            let text = format!("{agent} needs you in {}", w.place());
             let notification = Notification { text: text.clone(), channel: None };
             assert_eq!(w.told(), (Some(text), vec![notification]));
         }
 
-        #[test]
-        fn a_hidden_tab_that_finishes_says_so() {
-            let mut w = Watched::start(true);
+        #[rstest]
+        fn a_hidden_tab_that_finishes_says_so(#[values(agents::CLAUDE, agents::CODEX)] agent: &str) {
+            let mut w = Watched::start(agent, true);
 
             w.report("idle", 6);
 
-            let text = format!("claude finished in {}", w.place());
+            let text = format!("{agent} finished in {}", w.place());
             assert_eq!(w.told().1, [Notification { text, channel: None }]);
         }
 
-        #[test]
-        fn the_visible_tab_stays_quiet() {
-            let mut w = Watched::start(false);
+        #[rstest]
+        fn a_settled_change_notifies_once(#[values(agents::CLAUDE, agents::CODEX)] agent: &str) {
+            let mut w = Watched::start(agent, true);
+            w.report("waiting", 6);
+            w.told();
+
+            w.report("waiting", 6);
+
+            assert_eq!(w.told().1, []);
+        }
+
+        #[rstest]
+        fn the_visible_tab_stays_quiet(#[values(agents::CLAUDE, agents::CODEX)] agent: &str) {
+            let mut w = Watched::start(agent, false);
 
             w.report("waiting", 6);
 
             assert_eq!(w.told(), (None, Vec::new()));
         }
 
-        #[test]
-        fn a_question_answered_at_once_stays_quiet() {
-            let mut w = Watched::start(true);
+        #[rstest]
+        fn a_question_answered_at_once_stays_quiet(#[values(agents::CLAUDE, agents::CODEX)] agent: &str) {
+            let mut w = Watched::start(agent, true);
             w.report("waiting", 1);
 
             w.report("busy", 6);
@@ -5680,14 +5762,38 @@ rm -f "$1/sessions/$$.json"
         }
 
         #[test]
+        fn claude_and_codex_in_one_workspace_each_say_who_needs_you() {
+            let mut w = Watched::start(agents::CLAUDE, true);
+            w.run(agents::CODEX);
+            w.report("busy", 1);
+            w.app.add_tab(0, 0, AREA).expect("hide the codex tab");
+
+            w.report("waiting", 6);
+
+            let place = w.place();
+            let sent: Vec<String> = w.told().1.into_iter().map(|n| n.text).collect();
+            assert_eq!(sent, [format!("claude needs you in {place}"), format!("codex needs you in {place}")]);
+        }
+
+        #[test]
         fn turned_off_only_the_toast_shows() {
-            let mut w = Watched::start(true);
+            let mut w = Watched::start(agents::CLAUDE, true);
             w.app.config.desktop_notifications = notify::OFF.into();
 
             w.report("waiting", 6);
 
             let (shown, sent) = w.told();
             assert_eq!((shown.is_some(), sent), (true, Vec::new()));
+        }
+
+        #[test]
+        fn control_characters_never_reach_the_message() {
+            let mut w = Watched::start(agents::CODEX, true);
+            w.app.projects[0].name = Some("shop\x1b]0;evil\x07".into());
+
+            w.report("waiting", 6);
+
+            assert_eq!(toast(&w.app), Some("codex needs you in shop]0;evil › default"));
         }
     }
 

@@ -117,6 +117,10 @@ while [ -d "$2" ] && [ ! -e "$2/quit" ]; do
     exec 3>> "$next"
     rm "$2/switch"
   fi
+  if [ -e "$2/title" ]; then
+    printf '\033]0;%s\007' "$(cat "$2/title")"
+    rm "$2/title"
+  fi
   sleep 0.02
 done
 "#,
@@ -153,7 +157,9 @@ done
     }
 
     pub fn signal(&self, name: &str, contents: &str) {
-        std::fs::write(self.dir.path().join(name), contents).expect("signal fake codex");
+        let next = self.dir.path().join(format!(".{name}"));
+        std::fs::write(&next, contents).expect("signal fake codex");
+        std::fs::rename(next, self.dir.path().join(name)).expect("put the signal in place");
     }
 
     pub fn append(&self, text: &str) {

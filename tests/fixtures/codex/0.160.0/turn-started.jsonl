@@ -1,0 +1,1 @@
+{"timestamp":"2026-10-05T12:00:05.000Z","ordinal":1,"type":"event_msg","payload":{"type":"task_started","turn_id":"019a1234-5678-7000-8000-0000000000a1","root_turn_id":"019a1234-5678-7000-8000-0000000000a1","started_at":1791201605,"model_context_window":258400,"collaboration_mode_kind":"default","last_agent_message":null}}

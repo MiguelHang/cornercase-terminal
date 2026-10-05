@@ -95,6 +95,10 @@ impl Pane {
     pub fn context(&self) -> Option<&Context> {
         self.shown.as_ref()
     }
+
+    pub fn codex_turn(&self) -> bool {
+        self.codex.as_ref().is_some_and(codex::Rollout::turn)
+    }
 }
 
 fn transcript_path(dir: &Path, cwd: &Path, id: &str) -> Option<PathBuf> {

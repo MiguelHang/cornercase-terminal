@@ -11,6 +11,7 @@ export interface Pane {
   id: number;
   shell: Shell;
   rightClicks: boolean;
+  agent?: string | null;
   activity?: Activity | null;
   context?: Context | null;
   unseen?: boolean;
@@ -188,6 +189,15 @@ export const NOTIFY_CHOICES: [string, string][] = [
   ['bell', 'a beep or a mark on the window, in any terminal'],
   ['off', 'only the toast and the marks in cornercase'],
 ];
+
+export function followAgent(pane: Pane, agent: string | null): void {
+  if ((pane.agent ?? null) === agent) return;
+  pane.agent = agent;
+  pane.activity = null;
+  pane.unseen = false;
+  pane.since = undefined;
+  pane.notified = false;
+}
 
 export function watchPane(pane: Pane, activity: Activity | null, seen: boolean, now: number): Status | null {
   const before = paneStatus(pane);
