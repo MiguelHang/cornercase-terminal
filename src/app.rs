@@ -552,6 +552,7 @@ impl App {
                         if read {
                             let found = agent_in(config, dir, term);
                             let activity = found.as_ref().map(|(_, activity)| *activity);
+                            term.agent.follow(found.as_ref().map(|(agent, _)| agent.as_str()));
                             if let Some(status) = term.agent.update(activity, seen, now)
                                 && let Some((agent, _)) = found
                             {

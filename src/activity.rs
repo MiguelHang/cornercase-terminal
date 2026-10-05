@@ -49,8 +49,9 @@ pub fn attention(statuses: impl IntoIterator<Item = Option<Status>>) -> Option<S
     statuses.into_iter().flatten().filter(|s| s.needs_you()).max()
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Pane {
+    agent: Option<String>,
     activity: Option<Activity>,
     unseen: bool,
     since: Option<Instant>,
@@ -58,6 +59,12 @@ pub struct Pane {
 }
 
 impl Pane {
+    pub fn follow(&mut self, agent: Option<&str>) {
+        if self.agent.as_deref() != agent {
+            *self = Self { agent: agent.map(str::to_string), ..Self::default() };
+        }
+    }
+
     pub fn update(&mut self, activity: Option<Activity>, seen: bool, now: Instant) -> Option<Status> {
         let before = self.status();
         let finished = matches!(self.activity, Some(Activity::Working | Activity::Waiting));
@@ -82,7 +89,7 @@ impl Pane {
         self.notified = true;
     }
 
-    pub fn status(self) -> Option<Status> {
+    pub fn status(&self) -> Option<Status> {
         Some(match self.activity? {
             Activity::Working => Status::Working,
             Activity::Waiting => Status::Waiting,
@@ -367,6 +374,34 @@ mod tests {
                 .collect();
 
             assert_eq!(notices(&steps), [(7, Status::Done)]);
+        }
+
+        #[test]
+        fn another_agent_taking_over_the_pane_tells_you_again() {
+            let mut pane = Pane::default();
+            let start = Instant::now();
+            pane.follow(Some("claude"));
+            pane.update(Some(Activity::Waiting), false, start);
+            let first = pane.update(Some(Activity::Waiting), false, start + NOTIFY_AFTER);
+
+            pane.follow(Some("codex"));
+            pane.update(Some(Activity::Waiting), false, start + NOTIFY_AFTER);
+            let second = pane.update(Some(Activity::Waiting), false, start + NOTIFY_AFTER * 2);
+
+            assert_eq!((first, second), (Some(Status::Waiting), Some(Status::Waiting)));
+        }
+
+        #[test]
+        fn the_same_agent_keeps_its_state() {
+            let mut pane = Pane::default();
+            let start = Instant::now();
+            pane.follow(Some("codex"));
+            pane.update(Some(Activity::Waiting), false, start);
+            pane.update(Some(Activity::Waiting), false, start + NOTIFY_AFTER);
+
+            pane.follow(Some("codex"));
+
+            assert_eq!(pane.update(Some(Activity::Waiting), false, start + NOTIFY_AFTER * 2), None);
         }
 
         #[test]
