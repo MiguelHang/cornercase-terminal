@@ -78,6 +78,26 @@ You ran `cornercase` from a pane of cornercase itself, where `CORNERCASE=1` is s
 
 The server didn't come up within five seconds. The message names its log file; open it to see why. If you use `CORNERCASE_SOCKET`, check that the folder can be created and that the path is short: Unix socket paths are limited to about 100 bytes.
 
+### "refusing to use `…`: it can be written by other users"
+
+cornercase keeps its socket in a folder only you can use: `$XDG_RUNTIME_DIR/cornercase`, or `cornercase-<your uid>` in your temporary folder. It refuses a folder that belongs to another user, that other users can write to, or that is a symbolic link, because whoever controls that folder could pose as the cornercase server and see what you type. The message names the folder and what is wrong with it.
+
+What to do depends on where the folder comes from.
+
+**cornercase's own folder** (you didn't set `CORNERCASE_SOCKET`). Check who owns it with `ls -ld` on that path:
+
+- **It is yours** (other users can write to it, or it is a symbolic link): remove it and start cornercase again. It creates a new one that only you can use. If it is a symbolic link, remove only the link (`rm` on the path, without a trailing `/`), never the folder it points to.
+- **It belongs to another user**: you can't remove it, and someone may be trying to pose as cornercase. Tell whoever runs the machine. Until it is gone, point `CORNERCASE_SOCKET` at a socket in a folder only you can write to, for example `export CORNERCASE_SOCKET=~/.cornercase/server.sock`. With it set, cornercase keeps its settings and session next to that socket, so it starts with default settings and a new session (see [Files and environment](../../reference/files-and-environment/)).
+
+**The folder of your own `CORNERCASE_SOCKET`**: don't remove it, since it may hold your other files. Point `CORNERCASE_SOCKET` at a socket in a folder only you can write to instead. A `CORNERCASE_SOCKET` without a folder, such as `server.sock`, uses the folder you start cornercase from.
+
+### "the other end of the cornercase socket belongs to another user"
+
+Where you see it tells you which side refused:
+
+- **In your terminal**, when you start cornercase or run `cornercase kill-server`: the socket is served by a process of another user, so cornercase refuses to talk to it. Check who owns the socket with `ls -l` on it, and handle it like a socket folder that belongs to another user (above).
+- **In `server.log`**, next to the socket: a process of another user tried to connect to your cornercase server and was turned away, so nothing reached your shells. The line gives that user's uid. Another user can only reach your socket when its folder lets others in (the folder cornercase creates doesn't) and the socket is writable by them, as a loose umask leaves it. Make the folder private with `chmod 700` on it, and tell whoever runs the machine.
+
 ### My session didn't come back
 
 Sessions are restored only by a **new** server, and projects or workspaces whose folders no longer exist are skipped. The session is saved two seconds after your layout last changed, so a change made right before a crash or a power cut may be missing.
