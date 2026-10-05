@@ -50,6 +50,7 @@ import {
   activePane,
   attention,
   defaultConfig,
+  followAgent,
   projectLabel,
   tabContext,
   tabLabel,
@@ -276,6 +277,7 @@ export class App {
             const agent = agentIn(pane);
             const fg = pane.shell.fg;
             pane.context = fg instanceof Agent ? fg.context : null;
+            followAgent(pane, agent?.name ?? null);
             const status = watchPane(pane, agentActivity(agent), t === visible, now);
             if (status && agent) this.notify(`${agent.name} ${status === 'waiting' ? 'needs you' : 'finished'} in ${projectLabel(p)} › ${workspaceLabel(w)}`, status);
             else if (pane.since === now && !pane.notified) this.after(NOTIFY_AFTER, () => this.dirty());
