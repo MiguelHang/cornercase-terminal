@@ -2,12 +2,15 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::activity::Claude;
 use crate::process;
+
+mod codex;
 
 const TAIL: u64 = 1024 * 1024;
 const DIR_NAME_MAX: usize = 200;
@@ -26,16 +29,36 @@ pub const NO_COMPACT_ENV: &str = "DISABLE_COMPACT";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Context {
     pub model: String,
-    pub percent: u16,
+    pub percent: Option<u16>,
 }
 
 #[derive(Debug, Default)]
 pub struct Pane {
     transcript: Option<Transcript>,
     shown: Option<Context>,
+    codex: Option<codex::Rollout>,
+    agent: Option<(i32, SystemTime)>,
 }
 
 impl Pane {
+    pub fn update_codex(&mut self, pid: i32) {
+        let agent = match self.agent {
+            Some((seen, since)) if seen == pid => (pid, since),
+            _ => (pid, SystemTime::now()),
+        };
+        let Some(path) = codex::rollout_path(pid, agent.1) else {
+            *self = Self { agent: Some(agent), ..Self::default() };
+            return;
+        };
+        if self.codex.as_ref().is_none_or(|r| r.path != path) {
+            *self = Self { agent: Some(agent), codex: Some(codex::Rollout::new(path)), ..Self::default() };
+        }
+        if let Some(rollout) = &mut self.codex {
+            rollout.update();
+            self.shown = rollout.context();
+        }
+    }
+
     pub fn update(&mut self, dir: Option<&Path>, claude: Option<&Claude>) {
         let found = dir.zip(claude).and_then(|(dir, claude)| {
             let session = claude.session.as_ref()?;
@@ -113,7 +136,7 @@ struct Reply {
 impl Reply {
     fn context(&self, limits: &Limits) -> Context {
         let window = limits.window(&self.model, self.tokens);
-        Context { model: model_name(&self.model), percent: percent(self.tokens, window) }
+        Context { model: model_name(&self.model), percent: Some(percent(self.tokens, window)) }
     }
 }
 
@@ -782,7 +805,7 @@ mod tests {
         fn shows_the_model_and_the_share_of_its_window() {
             let (_s, pane) = answered();
 
-            assert_eq!(pane.context(), Some(&Context { model: "Opus 5.5".into(), percent: 17 }));
+            assert_eq!(pane.context(), Some(&Context { model: "Opus 5.5".into(), percent: Some(17) }));
         }
 
         #[test]
@@ -793,7 +816,7 @@ mod tests {
 
             pane.update(Some(s.claude_dir.path()), Some(&s.claude(&["claude", "--model", "sonnet[1m]"])));
 
-            assert_eq!(pane.context().map(|c| c.percent), Some(10));
+            assert_eq!(pane.context().and_then(|c| c.percent), Some(10));
         }
 
         #[test]

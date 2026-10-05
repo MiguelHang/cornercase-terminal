@@ -271,7 +271,8 @@ export class App {
         for (const t of w.tabs) {
           for (const pane of t.panes) {
             const claude = claudeIn(pane);
-            pane.context = claude?.context ?? null;
+            const agent = pane.shell.fg;
+            pane.context = agent instanceof Agent ? agent.context : null;
             const status = watchPane(pane, agentActivity(claude), t === visible, now);
             if (status) this.notify(`claude ${status === 'waiting' ? 'needs you' : 'finished'} in ${projectLabel(p)} › ${workspaceLabel(w)}`, status);
             else if (pane.since === now && !pane.notified) this.after(NOTIFY_AFTER, () => this.dirty());

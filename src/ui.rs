@@ -2905,8 +2905,14 @@ fn draw_context(f: &mut Frame, row: Rect, pitch: u16, context: &Context, indent:
     let reserved = if close.bottom() > r.y { usize::from(close.width) } else { 0 };
     let room = usize::from(r.width).saturating_sub(indent + reserved + 1);
     let dim = Style::default().fg(Color::DarkGray);
-    let percent = format!("{}%", context.percent);
-    let level = match Severity::of(context.percent) {
+    let Some(used) = context.percent else {
+        let line =
+            Line::from(vec![Span::raw(" ".repeat(indent)), Span::styled(truncate_right(&context.model, room), dim)]);
+        f.render_widget(Paragraph::new(line), r);
+        return;
+    };
+    let percent = format!("{used}%");
+    let level = match Severity::of(used) {
         Severity::Normal => dim,
         severity => Style::default().fg(severity_color(severity)),
     };
@@ -4565,7 +4571,7 @@ mod tests {
         use super::*;
 
         fn opus(percent: u16) -> Context {
-            Context { model: "Opus 5.5".into(), percent }
+            Context { model: "Opus 5.5".into(), percent: Some(percent) }
         }
 
         fn with_context(context: Option<Context>) -> View<'static> {
@@ -4590,6 +4596,52 @@ mod tests {
         #[test]
         fn renders_the_model_and_the_context_under_the_tab() {
             insta::assert_snapshot!(render(&with_context(Some(opus(17)))).backend());
+        }
+
+        fn codex(model: &str, percent: Option<u16>) -> View<'static> {
+            let mut view = with_context(Some(Context { model: model.into(), percent }));
+            let tab = &mut view.workspaces[0].tabs[0];
+            tab.name = "codex".into();
+            tab.status = None;
+            view
+        }
+
+        #[test]
+        fn renders_codex_context_in_the_wide_layout() {
+            insta::assert_snapshot!(render(&codex("gpt-5.4", Some(20))).backend());
+        }
+
+        #[test]
+        fn renders_codex_without_a_percentage_in_the_compact_layout() {
+            let view = View { nav: Some(Nav::Workspaces), ..codex("gpt-5.4-mini", None) };
+
+            insta::assert_snapshot!(render_sized(&view, SMALL.width, SMALL.height).backend());
+        }
+
+        #[rstest]
+        #[case::wide(AREA)]
+        #[case::compact(SMALL)]
+        #[case::narrow(Rect::new(0, 0, 30, 25))]
+        fn long_codex_model_names_are_truncated_and_keep_the_percentage(#[case] area: Rect) {
+            let model = "a-very-long-codex-model-name".repeat(5);
+            let view = View { nav: Some(Nav::Workspaces), ..codex(&model, Some(91)) };
+            let r = row(&view, area, WorkspaceRow::Tab(0, 0));
+            let rendered = render_sized(&view, area.width, area.height);
+            let text = line(&rendered, r, r.height - 1);
+
+            assert!(text.contains("91%"), "{text}");
+            assert!(!text.contains(&model), "{text}");
+        }
+
+        #[test]
+        fn a_model_without_usage_is_truncated_in_the_wide_layout() {
+            let view = codex("a-very-long-codex-model-name", None);
+            let r = row(&view, AREA, WorkspaceRow::Tab(0, 0));
+            let rendered = render(&view);
+            let text = line(&rendered, r, 1);
+
+            assert!(text.contains('…'), "{text}");
+            assert!(!text.contains('%') && !text.contains('·'), "{text}");
         }
 
         #[test]

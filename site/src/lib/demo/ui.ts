@@ -386,6 +386,10 @@ export class Painter {
     const r = intersect(rect(row.x, middle(row).y + 1, row.w, 1), row);
     const close = closeButton(row, pitch);
     const room = r.w - indent - (bottom(close) > r.y ? close.w : 0) - 1;
+    if (context.percent === null) {
+      this.line(r, [seg(' '.repeat(indent)), seg(truncateRight(context.model, Math.max(0, room)), DARK)]);
+      return;
+    }
     const percent = `${context.percent}%`;
     const severity = severityOf(context.percent);
     const level: Style = severity === 'normal' ? DARK : { fg: SEVERITY[severity] };

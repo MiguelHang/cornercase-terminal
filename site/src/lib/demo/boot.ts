@@ -47,7 +47,7 @@ export const CHAPTERS: Step[][] = [
   [
     reveal(5),
     { spot: 'workspaces' },
-    { say: 'Meet the team: three agents, each in its own corner, all working at once `◐`.' },
+    { say: 'Meet the team: Claude Code and Codex, each in its own corner. Their model and context use sit under the tab name.' },
     { wait: 3800 },
     { spot: null },
     { say: 'Need one more? Pick an issue and press start. It gets its own branch and gets to work.' },

@@ -1,0 +1,22 @@
+---
+source: src/ui.rs
+expression: "render(&codex(\"gpt-5.4\", Some(20))).backend()"
+---
+"  ⌕ search projects, workspaces, tabs                    │  no tab open                             "
+"                                                         │                                          "
+" projects                      │ workspaces              │                                          "
+"                               │                         │                                          "
+"▌ shop (1)                     │  login                  │                                          "
+"                               │  ▌ codex                │                                          "
+"  + new project                │    gpt-5.4 · 20%        │                                          "
+"                               │    nvim                 │                                          "
+"                               │    + tab                │                                          "
+"                               │                         │                                          "
+"                               │  + new workspace        │                                          "
+"                               │                         │                                          "
+"                               │                         │                                          "
+"                               │                         │                                          "
+" ───────────────────────────── │                         │                                          "
+"  settings                     │                         │                                          "
+"  usage                        │                         │                                          "
+"  quit                         │                         │                                          "

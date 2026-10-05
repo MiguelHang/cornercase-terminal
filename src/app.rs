@@ -538,7 +538,13 @@ impl App {
                         if read {
                             let claude = claude_in(config, dir, term);
                             let activity = claude.as_ref().map(|c| c.activity(&term.emulator.title()));
-                            term.context.update(dir, claude.as_ref());
+                            if let Some(pid) = term.foreground_pid()
+                                && agents::detect(config, &process::args(pid)).as_deref() == Some(agents::CODEX)
+                            {
+                                term.context.update_codex(pid);
+                            } else {
+                                term.context.update(dir, claude.as_ref());
+                            }
                             if let Some(status) = term.agent.update(activity, seen, now)
                                 && !notices.contains(&(status, project.id, workspace.id))
                             {
@@ -5321,7 +5327,7 @@ mod tests {
 
         use super::*;
         use crate::activity::Status;
-        use crate::test_util::write_executable;
+        use crate::test_util::{FakeCodex, write_executable};
 
         const FAKE_CLAUDE: &str = r#"#!/bin/sh
 s="$1/sessions/$$.json"
@@ -5471,6 +5477,62 @@ rm -f "$1/sessions/$$.json"
             claude.signal("quit");
 
             assert_eq!((r.height, below.trim_end()), (2, "      Opus 5.5 · 17%"));
+        }
+
+        #[test]
+        fn concurrent_codex_sessions_in_one_directory_keep_their_own_context_and_cleanup() {
+            let (mut app, rx, _dirs) = app_with(1);
+            let first = FakeCodex::new("019a1234-5678-7000-8000-000000000001", "gpt-5.4", false);
+            let mut second = FakeCodex::new("019a1234-5678-7000-8000-000000000002", "gpt-5.4-mini", true);
+            second.home.clone_from(&first.home);
+            let path = first.rollout.parent().expect("sessions").join(second.rollout.file_name().expect("filename"));
+            std::fs::copy(&second.rollout, &path).expect("share the configured home");
+            second.rollout = path;
+            let context = |app: &App, t: usize| app.projects[0].workspaces[0].tabs[t].context().cloned();
+            type_line(&mut app, &first.command_line());
+            watch_until(&mut app, &rx, "first Codex answers", |a| context(a, 0).is_some());
+            app.add_tab(0, 0, AREA).expect("add a concurrent session");
+            type_line(&mut app, &second.command_line());
+            watch_until(&mut app, &rx, "wrapper Codex answers", |a| context(a, 1).is_some());
+
+            assert_eq!(context(&app, 0).expect("first").model, "gpt-5.4");
+            assert_eq!(context(&app, 1).expect("second").model, "gpt-5.4-mini");
+            assert_eq!(status(&app, 0, 1), None);
+            second.append(include_str!("../tests/fixtures/codex/0.160.0/compacted.jsonl"));
+            watch_until(&mut app, &rx, "compaction clears the percentage", |a| {
+                context(a, 1).is_some_and(|c| c.percent.is_none())
+            });
+            assert_eq!(context(&app, 0).expect("first").percent, Some(20));
+            second.signal("quit", "");
+            watch_until(&mut app, &rx, "the wrapper session exits", |a| context(a, 1).is_none());
+            assert_eq!(context(&app, 0).expect("first").percent, Some(20));
+            first.signal("quit", "");
+            watch_until(&mut app, &rx, "the native session exits", |a| context(a, 0).is_none());
+        }
+
+        #[test]
+        fn codex_model_and_session_changes_discard_obsolete_percentages() {
+            let (mut app, rx, _dirs) = app_with(1);
+            let fake = FakeCodex::new("019a1234-5678-7000-8000-000000000001", "gpt-5.4", false);
+            let context = |a: &App| a.projects[0].workspaces[0].tabs[0].context().cloned();
+            type_line(&mut app, &fake.command_line());
+            watch_until(&mut app, &rx, "Codex answers", |a| context(a).is_some());
+            fake.append(include_str!("../tests/fixtures/codex/0.160.0/model-change.jsonl"));
+            watch_until(&mut app, &rx, "Codex changes models", |a| {
+                context(a).is_some_and(|c| c.model == "gpt-5.4-mini" && c.percent.is_none())
+            });
+
+            let next =
+                fake.rollout.with_file_name("rollout-2026-10-05T12-00-00-019a1234-5678-7000-8000-000000000002.jsonl");
+            let header = include_str!("../tests/fixtures/codex/0.160.0/context.jsonl")
+                .lines()
+                .next()
+                .expect("header")
+                .replace("000000000001", "000000000002");
+            std::fs::write(&next, format!("{header}\n")).expect("new session");
+            fake.signal("switch", next.to_str().expect("path"));
+            watch_until(&mut app, &rx, "Codex switches to an empty session", |a| context(a).is_none());
+            fake.signal("quit", "");
         }
 
         #[test]

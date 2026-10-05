@@ -6,7 +6,7 @@ import { type Line, drawLine, paintRows, pad, plain, seg, truncateRight, wrapAll
 
 export interface Context {
   model: string;
-  percent: number;
+  percent: number | null;
 }
 
 export interface Key {
@@ -793,7 +793,12 @@ export class Agent implements Program {
   }
 
   get context(): Context | null {
-    return this.tokens ? { model: AGENT_MODEL, percent: Math.min(100, Math.round((this.tokens / AGENT_WINDOW) * 100)) } : null;
+    if (this.name === 'codex') {
+      return { model: 'gpt-5.4', percent: this.tokens ? Math.min(100, Math.round((this.tokens / 272_000) * 100)) : null };
+    }
+    return this.name === 'claude' && this.tokens
+      ? { model: AGENT_MODEL, percent: Math.min(100, Math.round((this.tokens / AGENT_WINDOW) * 100)) }
+      : null;
   }
 
   private reply(): void {

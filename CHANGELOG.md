@@ -2,6 +2,11 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.4.1
+
+- Codex tabs now show their model and context use under the tab name, such as `gpt-5.4 · 20%`, in wide and compact layouts. The percentage turns orange from 75% and red from 90%.
+- Each pane follows its own Codex session, including npm installations and sessions run by Codex's background app-server (matched by folder, so two Codex in the same folder show no line). The line appears after the first message. cornercase respects `CODEX_HOME` and uses Codex's reported context window. When the percentage is unavailable, or after a model change or compaction, it shows the model alone until fresh usage is recorded.
+
 ## 0.4.0
 
 - Closing a project now asks first. The `×` on a project row opens a dialog that says how many tabs it stops, agents included, and that its folder and worktrees stay on disk. Press **close** or `Enter` to close it, **cancel** or `Esc` to keep everything running. Tabs, and workspaces without their own worktree, still close at once.
