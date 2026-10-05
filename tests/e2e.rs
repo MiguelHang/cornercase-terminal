@@ -136,9 +136,13 @@ impl Harness {
     }
 
     fn open_with(session: Arc<Session>, rows: u16, cols: u16, env: &[(&str, &str)]) -> Self {
+        Self::open_from(std::path::Path::new(env!("CARGO_BIN_EXE_cornercase")), session, rows, cols, env)
+    }
+
+    fn open_from(bin: &std::path::Path, session: Arc<Session>, rows: u16, cols: u16, env: &[(&str, &str)]) -> Self {
         let pair =
             native_pty_system().openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).expect("open pty");
-        let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_cornercase"));
+        let mut cmd = CommandBuilder::new(bin);
         cmd.env("SHELL", "/bin/sh");
         cmd.env("PS1", "$ ");
         cmd.env(SOCKET_ENV, session.socket());
@@ -357,12 +361,12 @@ fn serve(files: impl FnOnce(&str) -> Vec<(String, Vec<u8>)>) -> String {
     url
 }
 
-fn fake_release(version: &str) -> String {
+fn fake_release(version: &str, script: &str) -> String {
     let target = update::target().expect("a released platform");
     let name = format!("cornercase-{target}");
     let build = temp_dir(&format!("release-{version}"));
     std::fs::create_dir_all(build.join(&name)).expect("archive folder");
-    write_executable(&build.join(&name).join("cornercase"), &format!("#!/bin/sh\necho 'cornercase {version}'\n"));
+    write_executable(&build.join(&name).join("cornercase"), script);
     let tar = std::process::Command::new("tar")
         .current_dir(&build)
         .args(["-czf", "release.tar.gz", &name])
@@ -858,20 +862,27 @@ fn kill_server_says_when_none_is_running() {
 
 #[test]
 fn update_installs_the_latest_release_and_restarts_the_server() {
-    let mut app = Harness::start();
+    let bin = installed_copy("update");
+    let mut app = Harness::open_from(&bin, Session::new(), ROWS, COLS, &[]);
+    app.wait_for("app starts with one terminal", |s| s.contains(&first_entry()));
     let name = format!("ccup-{}", std::process::id());
     let dir = temp_dir_named(&name);
     app.open_project(1, &dir);
     app.wait_for("project 2 appears", |s| s.contains(&entry(&name)));
     app.send(b"echo old-\"\"shell\r");
     app.wait_for("the old shell answers", |s| s.contains("old-shell"));
-    let bin = installed_copy("update");
+    let marker = bin.with_file_name("new-binary-ran");
+    let new = format!(
+        "#!/bin/sh\n[ \"$1\" = --version ] && exec echo 'cornercase 99.0.0'\ntouch '{}'\nexec '{}' \"$@\"\n",
+        marker.display(),
+        env!("CARGO_BIN_EXE_cornercase")
+    );
 
     let out = app
         .session
         .command_of(&bin)
         .args(["update", "--yes"])
-        .env(update::LATEST_ENV, fake_release("99.0.0"))
+        .env(update::LATEST_ENV, fake_release("99.0.0", &new))
         .output()
         .expect("run update");
 
@@ -879,10 +890,11 @@ fn update_installs_the_latest_release_and_restarts_the_server() {
     assert!(out.status.success(), "{out:?}");
     assert!(stdout.contains(&format!("updated cornercase {} → 99.0.0", update::CURRENT)), "{stdout}");
     assert!(stdout.contains("restarted the cornercase server"), "{stdout}");
-    assert_eq!(std::fs::read_to_string(&bin).expect("the new binary"), "#!/bin/sh\necho 'cornercase 99.0.0'\n");
+    assert_eq!(std::fs::read_to_string(&bin).expect("the new binary"), new);
     app.wait_for("the client comes back with both projects and new shells", |s| {
         !s.contains("old-shell") && s.contains(&first_entry()) && s.contains(&entry(&name))
     });
+    assert!(marker.exists(), "the client came back without running the new binary");
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(bin.parent().expect("its folder"));
 }
@@ -896,7 +908,7 @@ fn update_leaves_an_up_to_date_install_and_its_server_alone() {
         .session
         .command_of(&bin)
         .arg("update")
-        .env(update::LATEST_ENV, fake_release(update::CURRENT))
+        .env(update::LATEST_ENV, fake_release(update::CURRENT, "#!/bin/sh\n"))
         .output()
         .expect("run update");
 
