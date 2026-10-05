@@ -88,6 +88,7 @@ function claudeIn(pane: Pane): Agent | null {
 
 function agentActivity(claude: Agent | null): Activity | null {
   if (!claude) return null;
+  if (claude.waiting) return 'waiting';
   return claude.working ? 'working' : 'idle';
 }
 
@@ -114,6 +115,8 @@ export class App {
   selection: { pane: number; from: Pos; to: Pos; rect: Rect } | null = null;
   dragging: Drag | null = null;
   detached = false;
+  scripted = false;
+  agentPace = 900;
   outerLines: Line[] = [];
   outerInput = '';
   config: Config = defaultConfig();
@@ -267,6 +270,7 @@ export class App {
       dirty: () => this.dirty(),
       exit: () => this.exitPane(paneId()),
       place: () => this.place(p, w),
+      pace: () => this.agentPace,
     };
   }
 
@@ -432,7 +436,7 @@ export class App {
     p.active = w;
     ws.active = ws.tabs.length - 1;
     this.nav = null;
-    this.emit('narrate', 'A new tab with a fresh shell. Type `help` to see what this demo shell can do.');
+    this.emit('narrate', 'A fresh tab. Type `help` to see what this little demo shell can do.');
     this.dirty();
   }
 
@@ -487,7 +491,7 @@ export class App {
           const [w] = p.workspaces.splice(i, 1);
           for (const t of w.tabs) for (const pane of t.panes) pane.shell.fg?.dispose?.();
           p.active = Math.max(0, Math.min(p.active, p.workspaces.length - 1));
-          this.emit('narrate', `git worktree remove ${w.root} — the branch ${w.branch} is still there.`);
+          this.emit('narrate', `Workspace removed. Don’t worry, the branch ${w.branch} is still there.`);
         }
       }
       this.overlay = null;
@@ -553,7 +557,7 @@ export class App {
   toggleChanges(): void {
     this.changesOpen = !this.changesOpen;
     this.nav = null;
-    if (this.changesOpen) this.emit('narrate', 'The changes of this workspace, next to its agent. Hover a hunk to open it, ask the agent about it or copy it.');
+    if (this.changesOpen) this.emit('narrate', 'Everything this workspace changed, right next to its agent. Hover a hunk to open it, copy it or send it back.');
     this.dirty();
   }
 
@@ -750,7 +754,7 @@ export class App {
       t.panes.push(fresh);
       t.layout = split(t.layout, pane.id, action === 'split right' ? 'right' : 'down', fresh.id);
       t.active = fresh.id;
-      this.emit('narrate', 'Split. Drag the divider to resize; inactive panes are dimmed (settings › TUI).');
+      this.emit('narrate', 'Split! Drag the divider to resize.');
     } else if (action === 'close pane') this.exitPane(pane.id);
     else pane.rightClicks = !pane.rightClicks;
   }
@@ -770,7 +774,7 @@ export class App {
     const p = this.project();
     if (!p) return;
     this.overlay = { kind: 'newWorkspace', project: p.id, input: '', worktree: p.repo ? true : null };
-    this.emit('narrate', 'Name the new line of work. In a repository it can get its own git worktree and branch.');
+    this.emit('narrate', 'Name it. In a repository it gets its own branch and folder, so nothing collides.');
     this.dirty();
   }
 
@@ -825,7 +829,7 @@ export class App {
       w.tabs.push(this.newTab([this.newPane(p, w)]));
       p.active = p.workspaces.length - 1;
       this.overlay = null;
-      this.emit('narrate', o.worktree ? `git worktree add ${w.root} -b ${name} — a fresh checkout, with your .env copied by .worktreeinclude.` : 'A workspace in the project folder.');
+      this.emit('narrate', o.worktree ? `A fresh copy of the repo on ${name}, .env included.` : 'A new workspace in the project folder.');
       this.dirty();
     };
     if (o.worktree) {
@@ -838,7 +842,7 @@ export class App {
   openPicker(): void {
     this.nav = null;
     this.overlay = { kind: 'picker', dir: ['code'], filter: '', selected: null, scroll: 0 };
-    this.emit('narrate', 'Pick a folder. Type to filter, Enter to go in; open adds it as a project.');
+    this.emit('narrate', 'Pick a folder. Type to filter, Enter to go in, open to add it.');
     this.dirty();
   }
 
@@ -926,7 +930,7 @@ export class App {
 
   openSearch(): void {
     this.overlay = { kind: 'search', query: '', selected: 0, scroll: 0 };
-    this.emit('narrate', 'Search across projects, workspaces, branches and tabs. Enter jumps there.');
+    this.emit('narrate', 'Type anything: projects, branches, tabs. Enter takes you there.');
     this.dirty();
   }
 
@@ -1010,7 +1014,7 @@ export class App {
   openUsage(): void {
     this.nav = null;
     this.overlay = { kind: 'usage' };
-    this.emit('narrate', 'Your Claude Code plan limits, asked from claude itself: no prompt, no tokens.');
+    this.emit('narrate', 'How much of your Claude plan is left, at a glance. No tokens spent.');
     if (!this.usage.loading) {
       this.usage.loading = true;
       this.after(1500, () => {
@@ -1024,7 +1028,7 @@ export class App {
   openSettings(): void {
     this.nav = null;
     this.overlay = { kind: 'settings', page: 0, cursor: 0 };
-    this.emit('narrate', 'Settings are saved to config.json at once. Try Agents → default agent, or TUI → inactive panes.');
+    this.emit('narrate', 'Change anything, it’s saved at once. Try Agents → default agent.');
     this.dirty();
   }
 
@@ -1287,7 +1291,7 @@ export class App {
       agentPick: null,
       chosen: null,
     };
-    this.emit('narrate', 'Issues from GitHub (through gh), Shortcut and Linear. Click one to read it, then press start.');
+    this.emit('narrate', 'Your issues from GitHub, Shortcut and Linear. Click one to read it, then press start.');
     this.after(450, () => {
       const o = this.overlay;
       if (o?.kind === 'issues') {
@@ -1502,7 +1506,7 @@ export class App {
     o.selected = i;
     o.detail = issue.key;
     o.detailScroll = 0;
-    this.emit('narrate', `${issue.key}, rendered from Markdown. start creates a worktree on ${this.branchFor(issue)} and launches your agent.`);
+    this.emit('narrate', `${issue.key}. Press start and an agent takes it, on its own branch.`);
     this.dirty();
   }
 
@@ -1630,7 +1634,7 @@ export class App {
       p.active = p.workspaces.indexOf(w);
       w.active = w.tabs.length - 1;
       this.workspacesScroll = 9999;
-      this.emit('narrate', p.repo ? `git worktree add ${w.root} -b ${branch}` : 'A new tab for the agent.');
+      this.emit('narrate', p.repo ? `A fresh branch for it: ${branch}.` : 'A new tab for the agent.');
       this.dirty();
       this.launch(pane, kind, issue.url);
     });
@@ -1639,7 +1643,7 @@ export class App {
   launch(pane: Pane, kind: string, prompt: string): void {
     const command = this.agentCommand(kind);
     this.after(300, () => {
-      this.emit('narrate', `Typing ${command} once the shell is quiet…`);
+      this.emit('narrate', `Starting ${command}…`);
       pane.shell.type(command);
     });
     let stage: 'agent' | 'trusted' | 'pasted' = 'agent';
@@ -1649,20 +1653,20 @@ export class App {
       const agent = pane.shell.fg instanceof Agent ? pane.shell.fg : null;
       if (stage === 'agent' && agent?.trusting) {
         if (!this.config.trust) {
-          this.emit('narrate', 'The agent asks whether you trust the folder. Trust prompts are left to you (settings › Agents).');
+          this.emit('narrate', 'The agent asks if you trust this folder. Your call (settings › Agents).');
           return;
         }
         stage = 'trusted';
-        this.emit('narrate', '“Do you trust the files in this folder?” — answered yes for you.');
+        this.emit('narrate', '“Do you trust this folder?” Yes, answered for you.');
         this.after(650, () => agent.key({ key: 'Enter' }));
       } else if ((stage === 'trusted' || stage === 'agent') && agent?.ready) {
         stage = 'pasted';
         this.after(450, () => {
           agent.paste(prompt);
           if (this.config.submit) {
-            this.emit('narrate', 'The issue is in the prompt and sent. The agent is working in its own worktree.');
+            this.emit('narrate', 'Issue sent. The agent’s on it, in its own corner.');
             this.after(350, () => agent.key({ key: 'Enter' }));
-          } else this.emit('narrate', 'The issue link is typed into the agent’s prompt. Click the pane and press Enter to send it.');
+          } else this.emit('narrate', 'The issue is in the prompt. Click the pane and press Enter to send it.');
         });
         return;
       }
@@ -1678,9 +1682,10 @@ export class App {
     this.outerLines = [];
     this.outerInput = '';
     const shells = this.shells();
-    this.emit('narrate', `Detached. The server keeps your ${shells} shells running — even your agent keeps working.`);
+    this.emit('narrate', `Gone, but not stopped: your ${shells} shells keep running, agents included.`);
     this.emit('detached');
     this.dirty();
+    if (this.scripted) return;
     let i = 0;
     const word = 'cornercase';
     const type = () => {
@@ -1697,7 +1702,7 @@ export class App {
   reattach(): void {
     if (!this.detached) return;
     this.detached = false;
-    this.emit('narrate', 'Reattached. Same projects, same tabs, same running programs.');
+    this.emit('narrate', 'And we’re back. Same projects, same tabs, everything still running.');
     this.emit('attached');
     this.dirty();
   }
@@ -1863,6 +1868,9 @@ export class App {
   key(k: Key): boolean {
     if (this.detached) {
       if (k.key === 'Enter') this.reattach();
+      else if (k.key === 'Backspace') this.outerInput = this.outerInput.slice(0, -1);
+      else if (this.typed(k)) this.outerInput += k.key;
+      this.dirty();
       return true;
     }
     const o = this.overlay;
