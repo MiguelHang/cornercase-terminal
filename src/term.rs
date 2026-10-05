@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::thread;
@@ -8,7 +8,9 @@ use parking_lot::Mutex;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::activity;
+use crate::agents;
 use crate::app::AppEvent;
+use crate::config::Config;
 use crate::context;
 use crate::emulator::Emulator;
 use crate::error::{Error, Result};
@@ -18,6 +20,9 @@ use crate::protocol;
 
 const SCROLLBACK: usize = 5_000;
 const READ_BUFFER: usize = 16 * 1024;
+const INTERPRETERS: [&str; 6] = ["node", "bun", "deno", "python", "python3", "ruby"];
+const NODE_MAIN_THREAD: &str = "node-MainThread";
+const SCRIPT_EXTENSIONS: [&str; 9] = ["js", "mjs", "cjs", "ts", "mts", "cts", "py", "rb", "sh"];
 
 type Writer = Arc<Mutex<Box<dyn Write + Send>>>;
 
@@ -119,8 +124,10 @@ impl Term {
         process::cwd(self.foreground_pid()?)
     }
 
-    pub fn process_name(&self) -> Option<String> {
-        process::name(self.foreground_pid()?)
+    pub fn program(&self, config: &Config) -> Option<String> {
+        let pid = self.foreground_pid()?;
+        let name = process::name(pid)?;
+        Some(program(config, &name, &process::args(pid)))
     }
 
     pub fn shell_in_foreground(&self) -> bool {
@@ -149,6 +156,26 @@ impl Drop for Term {
     }
 }
 
+pub fn program(config: &Config, name: &str, argv: &[String]) -> String {
+    let name = if name == NODE_MAIN_THREAD { "node" } else { name };
+    let interpreter = INTERPRETERS.contains(&name);
+    let considered = if interpreter { argv } else { argv.get(..1).unwrap_or_default() };
+    agents::detect(config, considered)
+        .or_else(|| interpreter.then(|| script(argv)).flatten())
+        .unwrap_or_else(|| name.to_string())
+}
+
+fn script(argv: &[String]) -> Option<String> {
+    let arg = argv.iter().skip(1).find(|a| !a.starts_with('-'))?;
+    let path = Path::new(arg);
+    let named =
+        arg.contains('/') || path.extension().and_then(|e| e.to_str()).is_some_and(|e| SCRIPT_EXTENSIONS.contains(&e));
+    if !named || arg.chars().any(char::is_whitespace) {
+        return None;
+    }
+    path.file_stem().and_then(|s| s.to_str()).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
 fn write_to(writer: &Writer, bytes: &[u8]) {
     let mut writer = writer.lock();
     if writer.write_all(bytes).is_ok() {
@@ -174,8 +201,10 @@ mod tests {
     use std::sync::mpsc::{self, Receiver};
     use std::time::Duration;
 
+    use rstest::rstest;
+
     use super::*;
-    use crate::test_util::{is_sh, wait_until};
+    use crate::test_util::{TempDir, is_sh, wait_until};
 
     const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -286,14 +315,37 @@ mod tests {
         }
     }
 
-    mod process_name {
+    mod program {
         use super::*;
+
+        fn label(name: &str, argv: &[&str]) -> String {
+            let argv: Vec<String> = argv.iter().map(|a| (*a).to_string()).collect();
+            program(&Config::default(), name, &argv)
+        }
+
+        #[rstest]
+        #[case::codex_through_npm("node-MainThread", &["node", "/usr/local/bin/codex"], "codex")]
+        #[case::codex_by_its_script("node", &["node", "/usr/lib/node_modules/@openai/codex/bin/codex.js"], "codex")]
+        #[case::a_native_agent("claude", &["/home/a/.local/bin/claude", "--resume"], "claude")]
+        #[case::a_renamed_agent("cursor-agent", &["cursor-agent"], "cursor")]
+        #[case::a_script_without_extension("node", &["node", "/usr/bin/vite", "--port", "3000"], "vite")]
+        #[case::a_flag_before_the_script("node", &["node", "--inspect", "server.mjs"], "server")]
+        #[case::a_python_script("python3", &["python3", "-u", "./tools/sync.py"], "sync")]
+        #[case::a_python_module("python3", &["python3", "-m", "http.server"], "python3")]
+        #[case::inline_code("ruby", &["ruby", "-e", "puts 'a/b'"], "ruby")]
+        #[case::a_bare_interpreter("node", &["node"], "node")]
+        #[case::the_node_thread_name("node-MainThread", &["node"], "node")]
+        #[case::another_program("nvim", &["nvim", "src/main.rs"], "nvim")]
+        #[case::a_program_with_an_agent_argument("less", &["less", "claude"], "less")]
+        fn names_the_program(#[case] name: &str, #[case] argv: &[&str], #[case] expected: &str) {
+            assert_eq!(label(name, argv), expected);
+        }
 
         #[test]
         fn is_the_shell_when_idle() {
             let (term, _rx) = spawn_sh();
 
-            wait_until("shows the shell", || term.process_name().as_deref().is_some_and(is_sh));
+            wait_until("shows the shell", || term.program(&Config::default()).as_deref().is_some_and(is_sh));
         }
 
         #[test]
@@ -302,18 +354,39 @@ mod tests {
 
             term.write(b"sleep 30\r");
 
-            wait_until("shows the foreground program", || term.process_name().as_deref() == Some("sleep"));
+            wait_until("shows the foreground program", || term.program(&Config::default()).as_deref() == Some("sleep"));
         }
 
         #[test]
         fn falls_back_to_shell_when_program_ends() {
             let (mut term, _rx) = spawn_sh();
             term.write(b"sleep 30\r");
-            wait_until("sleep starts", || term.process_name().as_deref() == Some("sleep"));
+            wait_until("sleep starts", || term.program(&Config::default()).as_deref() == Some("sleep"));
 
             term.write(&[0x03]);
 
-            wait_until("back to the shell", || term.process_name().as_deref().is_some_and(is_sh));
+            wait_until("back to the shell", || term.program(&Config::default()).as_deref().is_some_and(is_sh));
+        }
+
+        #[test]
+        fn is_the_script_an_interpreter_runs() {
+            let dir = TempDir::new();
+            let node = dir.path().join("node");
+            let status = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg("cp /bin/bash \"$1\"")
+                .arg("sh")
+                .arg(&node)
+                .status()
+                .expect("run cp");
+            assert!(status.success(), "copy bash");
+            std::fs::create_dir(dir.path().join("bin")).expect("create bin");
+            std::fs::write(dir.path().join("bin/tool.js"), "read line\n").expect("write script");
+            let (mut term, _rx) = spawn_sh_in(Some(dir.path().to_path_buf()));
+
+            term.write(b"./node bin/tool.js\r");
+
+            wait_until("shows the script", || term.program(&Config::default()).as_deref() == Some("tool"));
         }
     }
 

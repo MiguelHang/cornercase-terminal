@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::activity::Status;
+use crate::config::Config;
 use crate::context::Context;
 use crate::split::{self, Dir, Node};
 use crate::term::Term;
@@ -39,8 +40,8 @@ impl Tab {
         self.panes.get_mut(self.active)
     }
 
-    pub fn label(&self) -> String {
-        self.name.clone().or_else(|| self.pane().and_then(Term::process_name)).unwrap_or_else(|| "?".into())
+    pub fn label(&self, config: &Config) -> String {
+        self.name.clone().or_else(|| self.pane().and_then(|t| t.program(config))).unwrap_or_else(|| "?".into())
     }
 
     pub fn status(&self) -> Option<Status> {

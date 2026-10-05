@@ -2125,7 +2125,7 @@ impl App {
                     keys: keys.clone(),
                 });
                 for t in &w.tabs {
-                    let name = t.label();
+                    let name = t.label(&self.config);
                     candidates.push(Candidate {
                         kind: Kind::Tab,
                         goto: place(Some(w.id), Some(t.id)),
@@ -2258,7 +2258,7 @@ impl App {
             }
             Target::Tab(project, workspace, tab) => {
                 let (p, w) = self.workspace_index(project, workspace)?;
-                self.projects[p].workspaces[w].tabs.iter().find(|t| t.id == tab).map(Tab::label)
+                self.projects[p].workspaces[w].tabs.iter().find(|t| t.id == tab).map(|t| t.label(&self.config))
             }
         }
     }
@@ -2973,7 +2973,7 @@ impl App {
                             .tabs
                             .iter()
                             .map(|t| ui::TabEntry {
-                                name: t.label(),
+                                name: t.label(&self.config),
                                 status: t.status(),
                                 context: t.context().cloned(),
                             })
@@ -4586,7 +4586,7 @@ mod tests {
         #[test]
         fn are_named_after_their_program() {
             let (app, _rx, _dirs) = app_with(1);
-            wait_until("the shell runs", || is_sh(&app.projects[0].workspaces[0].tabs[0].label()));
+            wait_until("the shell runs", || is_sh(&app.projects[0].workspaces[0].tabs[0].label(&app.config)));
         }
     }
 
@@ -5009,14 +5009,14 @@ mod tests {
             open_rename(&mut app, at);
             clear_input(&mut app);
             submit_text(&mut app, "server");
-            assert_eq!(app.projects[0].workspaces[0].tabs[0].label(), "server");
+            assert_eq!(app.projects[0].workspaces[0].tabs[0].label(&app.config), "server");
 
             let at = row_pos(&app, WorkspaceRow::Tab(0, 0));
             open_rename(&mut app, at);
             clear_input(&mut app);
             send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
-            wait_until("back to the program name", || is_sh(&app.projects[0].workspaces[0].tabs[0].label()));
+            wait_until("back to the program name", || is_sh(&app.projects[0].workspaces[0].tabs[0].label(&app.config)));
         }
     }
 
@@ -5126,7 +5126,7 @@ mod tests {
             let labels = (
                 app.project_label(&app.projects[0]),
                 workspace_labels(&app),
-                app.projects[0].workspaces[0].tabs[0].label(),
+                app.projects[0].workspaces[0].tabs[0].label(&app.config),
             );
             assert_eq!(labels, ("api".into(), vec!["main line".to_string()], "server".into()));
         }
@@ -7303,7 +7303,7 @@ rm -f "$1/sessions/$$.json"
 
                 let project = &s.app.projects[1];
                 assert_eq!((s.app.overlay.is_none(), s.app.active, project.workspaces[0].tabs.len()), (true, 1, 2));
-                assert_eq!(project.workspaces[0].tabs[1].label(), "sc-482 Returns page crashes");
+                assert_eq!(project.workspaces[0].tabs[1].label(&s.app.config), "sc-482 Returns page crashes");
             }
         }
 
@@ -7522,7 +7522,12 @@ rm -f "$1/sessions/$$.json"
 
                 let workspace = &s.app.projects[0].workspaces[0];
                 assert_eq!(
-                    (s.app.overlay.is_none(), workspace.tabs.len(), workspace.active, workspace.tabs[1].label()),
+                    (
+                        s.app.overlay.is_none(),
+                        workspace.tabs.len(),
+                        workspace.active,
+                        workspace.tabs[1].label(&s.app.config)
+                    ),
                     (true, 2, 1, "sc-482 Returns page crashes".into())
                 );
                 wait_typed(&mut s, "agent ready> https://app.shortcut.com/acme/story/482");
