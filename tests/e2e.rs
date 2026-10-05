@@ -871,9 +871,9 @@ fn update_installs_the_latest_release_and_restarts_the_server() {
     app.wait_for("project 2 appears", |s| s.contains(&entry(&name)));
     app.send(b"echo old-\"\"shell\r");
     app.wait_for("the old shell answers", |s| s.contains("old-shell"));
-    let marker = bin.with_file_name("new-binary-ran");
+    let marker = bin.with_file_name("new-client-ran");
     let new = format!(
-        "#!/bin/sh\n[ \"$1\" = --version ] && exec echo 'cornercase 99.0.0'\ntouch '{}'\nexec '{}' \"$@\"\n",
+        "#!/bin/sh\n[ \"$1\" = --version ] && exec echo 'cornercase 99.0.0'\n[ $# -eq 0 ] && touch '{}'\nexec '{}' \"$@\"\n",
         marker.display(),
         env!("CARGO_BIN_EXE_cornercase")
     );
