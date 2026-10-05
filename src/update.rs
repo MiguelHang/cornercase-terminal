@@ -46,6 +46,13 @@ pub enum Install {
     Command(&'static str),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    UpToDate,
+    Updated(String),
+    Manual(String, &'static str),
+}
+
 #[derive(Debug)]
 pub struct Updates {
     pub enabled: bool,
@@ -135,6 +142,18 @@ pub fn install(exe: &Path, target: Option<&str>) -> Install {
         return Install::Command(INSTALLER);
     }
     Install::Replace(exe.to_path_buf())
+}
+
+pub fn install_latest(url: &str, current: &str, install: &Install, target: Option<&str>) -> Result<Outcome> {
+    let Some(release) = check(url, current)? else { return Ok(Outcome::UpToDate) };
+    match (install, target) {
+        (Install::Replace(exe), Some(target)) => {
+            update(&release, target, exe)?;
+            Ok(Outcome::Updated(release.version))
+        }
+        (Install::Command(command), _) => Ok(Outcome::Manual(release.version, command)),
+        (Install::Replace(_), None) => Ok(Outcome::Manual(release.version, INSTALLER)),
+    }
 }
 
 pub fn update(release: &Release, target: &str, exe: &Path) -> Result<()> {
@@ -373,10 +392,84 @@ mod tests {
             let exe = installed(&tmp);
             let bytes = archive(&tmp, NEW);
 
-            let err = replace(&bytes, &sums(b"other"), "9.0.0", &exe).err().map(|e| e.to_string());
+            let result = replace(&bytes, &sums(b"other"), "9.0.0", &exe);
 
+            assert_refused_checksum(result, &exe);
+        }
+
+        fn assert_refused_checksum<T: std::fmt::Debug>(result: Result<T>, exe: &Path) {
+            let err = result.err().map(|e| e.to_string());
             assert_eq!(err.as_deref(), Some("the download does not match its checksum"));
+            assert_eq!(fs::read_to_string(exe).expect("old binary"), "old");
+        }
+
+        fn publish(tmp: &TempDir, sums: impl FnOnce(&[u8]) -> String) -> (FakeHttp, FakeHttp) {
+            let bytes = archive(tmp, NEW);
+            let checksums = sums(&bytes);
+            let files = FakeHttp::start(vec![("GET /a.tar.gz", 200, bytes), ("GET /a.sha256", 200, checksums.into())]);
+            let name = "cornercase-x86_64-unknown-linux-gnu.tar.gz";
+            let json = serde_json::json!({"tag_name": "v9.0.0", "assets": [
+                {"name": name, "browser_download_url": format!("{}/a.tar.gz", files.url())},
+                {"name": format!("{name}.sha256"), "browser_download_url": format!("{}/a.sha256", files.url())},
+            ]});
+            let releases = FakeHttp::start(vec![("GET /releases/latest", 200, json.to_string())]);
+            (releases, files)
+        }
+
+        fn install_from(releases: &FakeHttp, current: &str, install: &Install) -> Result<Outcome> {
+            let url = format!("{}/releases/latest", releases.url());
+            install_latest(&url, current, install, Some("x86_64-unknown-linux-gnu"))
+        }
+
+        #[test]
+        fn installs_the_latest_release_over_the_binary() {
+            let tmp = TempDir::new();
+            let exe = installed(&tmp);
+            let (releases, _files) = publish(&tmp, sums);
+
+            let outcome = install_from(&releases, "0.1.0", &Install::Replace(exe.clone())).expect("install");
+
+            assert_eq!(outcome, Outcome::Updated("9.0.0".into()));
+            assert_eq!(fs::read_to_string(&exe).expect("new binary"), NEW);
+        }
+
+        #[test]
+        fn leaves_an_up_to_date_binary_alone() {
+            let tmp = TempDir::new();
+            let exe = installed(&tmp);
+            let (releases, files) = publish(&tmp, sums);
+
+            let outcome = install_from(&releases, "9.0.0", &Install::Replace(exe.clone())).expect("install");
+
+            assert_eq!(outcome, Outcome::UpToDate);
             assert_eq!(fs::read_to_string(&exe).expect("old binary"), "old");
+            assert!(files.requests().is_empty(), "{:?}", files.requests());
+        }
+
+        #[test]
+        fn a_bad_checksum_keeps_the_old_binary() {
+            let tmp = TempDir::new();
+            let exe = installed(&tmp);
+            let (releases, _files) = publish(&tmp, |_| sums(b"other"));
+
+            let result = install_from(&releases, "0.1.0", &Install::Replace(exe.clone()));
+
+            assert_refused_checksum(result, &exe);
+        }
+
+        #[rstest]
+        #[case::homebrew(BREW)]
+        #[case::read_only_folder(INSTALLER)]
+        fn an_install_we_cannot_replace_gets_its_command(#[case] command: &'static str) {
+            let tmp = TempDir::new();
+            let exe = installed(&tmp);
+            let (releases, files) = publish(&tmp, sums);
+
+            let outcome = install_from(&releases, "0.1.0", &Install::Command(command)).expect("install");
+
+            assert_eq!(outcome, Outcome::Manual("9.0.0".into(), command));
+            assert_eq!(fs::read_to_string(&exe).expect("old binary"), "old");
+            assert!(files.requests().is_empty(), "{:?}", files.requests());
         }
 
         #[test]

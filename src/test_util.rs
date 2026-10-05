@@ -247,8 +247,8 @@ pub struct FakeHttp {
 }
 
 impl FakeHttp {
-    pub fn start<B: Into<String>>(routes: Vec<(&'static str, u16, B)>) -> Self {
-        let routes: Vec<(&'static str, u16, String)> = routes.into_iter().map(|(k, s, b)| (k, s, b.into())).collect();
+    pub fn start<B: Into<Vec<u8>>>(routes: Vec<(&'static str, u16, B)>) -> Self {
+        let routes: Vec<(&'static str, u16, Vec<u8>)> = routes.into_iter().map(|(k, s, b)| (k, s, b.into())).collect();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake http");
         let addr = listener.local_addr().expect("fake http address");
         let requests = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -269,16 +269,16 @@ impl FakeHttp {
                 let key = format!("{method} {path}");
                 let matching: Vec<usize> = (0..routes.len()).filter(|&i| routes[i].0 == key).collect();
                 let pick = matching.iter().copied().find(|&i| !used[i]).or_else(|| matching.last().copied());
-                let (status, body) = pick.map_or((404, "{}"), |i| {
+                let (status, body) = pick.map_or((404, b"{}".as_slice()), |i| {
                     used[i] = true;
-                    (routes[i].1, routes[i].2.as_str())
+                    (routes[i].1, routes[i].2.as_slice())
                 });
                 log.lock().push(request);
-                let response = format!(
-                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                let head = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
-                let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+                let _ = std::io::Write::write_all(&mut stream, &[head.as_bytes(), body].concat());
             }
         });
         Self { addr, requests, stop }

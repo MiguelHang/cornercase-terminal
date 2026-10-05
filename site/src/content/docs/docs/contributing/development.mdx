@@ -22,7 +22,7 @@ cargo run                  # build and attach, starting a server if needed
 cargo run -- kill-server   # stop that server
 ```
 
-A client never attaches to a server from another build, so after every rebuild `cargo run` asks to restart the old one: answer `y`, or **run `cargo run -- kill-server` first**. Debug builds never check for updates.
+A client never attaches to a server from another build, so after every rebuild `cargo run` asks to restart the old one: answer `y`, or **run `cargo run -- kill-server` first**. Debug builds never check for updates, and `cargo run -- update` refuses unless `CORNERCASE_RELEASES_URL` is set, as the end-to-end tests do.
 
 To leave your everyday session alone, give your development build its own socket. Its settings, session and issue cache then live next to that socket too:
 

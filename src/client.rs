@@ -1,4 +1,4 @@
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, IsTerminal, Write, stdin, stdout};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
@@ -22,6 +22,7 @@ use crate::error::{Error, Result};
 use crate::host_theme::{HostTheme, ThemeProbe};
 use crate::notify;
 use crate::protocol::{self, ClientMessage, Hello, ServerMessage};
+use crate::update::{self, CURRENT, Install, Outcome};
 
 const THEME_QUERY_TIMEOUT: Duration = Duration::from_secs(1);
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(5);
@@ -29,15 +30,17 @@ const SERVER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(20);
 const INCOMPATIBLE: &str = "the running cornercase server is incompatible with this build. \
     Run `cornercase kill-server` (it closes all its terminals) and start cornercase again";
-const RESTART_QUESTION: &str = "The running cornercase server comes from another build; cornercase was probably updated.\n\
-    Restart it now? Its terminals close, and your session comes back with new shells in the same folders. [y/N] ";
+const OTHER_BUILD: &str = "The running cornercase server comes from another build; cornercase was probably updated.";
+const RESTART: &str =
+    "Restart it now? Its terminals close, and your session comes back with new shells in the same folders. [y/N] ";
+const INSIDE: &str = "This terminal is one of them, so it closes too.";
 
 pub fn run() -> Result<()> {
     if std::env::var_os(protocol::NESTED_ENV).is_some() {
         return Err(Error::Nested);
     }
     match open() {
-        Err(Error::Rejected(_)) if stdin().is_terminal() && confirm(RESTART_QUESTION) => {
+        Err(Error::Rejected(_)) if stdin().is_terminal() && confirm(&format!("{OTHER_BUILD}\n{RESTART}")) => {
             kill_server()?;
             open()
         }
@@ -85,14 +88,93 @@ fn open() -> Result<()> {
 }
 
 pub fn kill_server() -> Result<bool> {
+    Ok(stop_server(&ClientMessage::KillServer)?.is_some())
+}
+
+pub fn restart_server() -> Result<bool> {
+    match stop_server(&ClientMessage::Restart)? {
+        Some(true) => kill_server(),
+        answer => Ok(answer.is_some()),
+    }
+}
+
+fn stop_server(msg: &ClientMessage) -> Result<Option<bool>> {
     let path = protocol::socket_path();
     protocol::check_socket_dir(&path)?;
-    let Ok(mut stream) = UnixStream::connect(&path) else { return Ok(false) };
+    let Ok(mut stream) = UnixStream::connect(&path) else { return Ok(None) };
     protocol::check_peer(&stream, protocol::own_uid())?;
-    protocol::send(&mut stream, &ClientMessage::KillServer)?;
-    while let Ok(Some(_)) = protocol::recv::<ServerMessage>(&mut stream) {}
-    wait_for_exit(&path);
+    protocol::send(&mut stream, msg)?;
+    let mut rejected = false;
+    while let Ok(Some(answer)) = protocol::recv::<ServerMessage>(&mut stream) {
+        rejected |= matches!(answer, ServerMessage::Rejected(_));
+    }
+    if !rejected {
+        wait_for_exit(&path);
+    }
+    Ok(Some(rejected))
+}
+
+pub fn update(check_only: bool, yes: bool) -> Result<bool> {
+    let url = std::env::var(update::LATEST_ENV).ok();
+    if cfg!(debug_assertions) && url.is_none() {
+        return Err(Error::DevelopmentBuild);
+    }
+    let url = url.unwrap_or_else(|| update::DEFAULT_LATEST.into());
+    let target = update::target();
+    let install = update::install(&fs::canonicalize(std::env::current_exe()?)?, target);
+    if check_only {
+        match update::check(&url, CURRENT)? {
+            Some(release) => {
+                let command = match install {
+                    Install::Replace(_) => "cornercase update",
+                    Install::Command(command) => command,
+                };
+                announce(&release.version, command);
+            }
+            None => println!("cornercase {CURRENT} is up to date"),
+        }
+        return Ok(true);
+    }
+    match update::install_latest(&url, CURRENT, &install, target)? {
+        Outcome::UpToDate => println!("cornercase {CURRENT} is up to date"),
+        Outcome::Manual(version, command) => {
+            announce(&version, command);
+            return Ok(false);
+        }
+        Outcome::Updated(version) => {
+            println!("updated cornercase {CURRENT} → {version}");
+            offer_restart(yes)?;
+        }
+    }
     Ok(true)
+}
+
+fn announce(version: &str, command: &str) {
+    println!("cornercase {version} is out (you have {CURRENT}). Update it with:\n{command}");
+}
+
+fn offer_restart(yes: bool) -> Result<()> {
+    let path = protocol::socket_path();
+    protocol::check_socket_dir(&path)?;
+    if UnixStream::connect(&path).is_err() {
+        return Ok(());
+    }
+    let inside = std::env::var_os(protocol::NESTED_ENV).is_some();
+    let note = if inside { format!(" {INSIDE}") } else { String::new() };
+    let question = format!("The running cornercase server still runs {CURRENT}.{note}\n{RESTART}");
+    if yes || (stdin().is_terminal() && confirm(&question)) {
+        if inside {
+            println!("restarting the cornercase server");
+        }
+        if restart_server()? {
+            println!("restarted the cornercase server; your session comes back the next time cornercase starts");
+        }
+    } else {
+        println!(
+            "the server keeps running {CURRENT}; run `cornercase kill-server` and start cornercase to use the new one"
+        );
+    }
+    Ok(())
 }
 
 fn wait_for_exit(path: &Path) {
