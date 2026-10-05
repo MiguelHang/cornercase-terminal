@@ -1,4 +1,6 @@
+use std::fmt::Write as _;
 use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,9 +12,11 @@ use cornercase::activity::{CLAUDE_DIR_ENV, CLAUDE_SESSION_ENV};
 use cornercase::protocol::{NESTED_ENV, SOCKET_ENV};
 use cornercase::split::{self, Dir};
 use cornercase::ui::{self, SidebarRow, WorkspaceRow};
+use cornercase::update;
 use parking_lot::Mutex;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::layout::{Position, Rect};
+use sha2::{Digest, Sha256};
 
 const ROWS: u16 = 24;
 const COLS: u16 = 100;
@@ -87,8 +91,12 @@ impl Session {
     }
 
     fn command(&self) -> std::process::Command {
-        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_cornercase"));
-        cmd.env(SOCKET_ENV, self.socket()).env_remove(NESTED_ENV);
+        self.command_of(std::path::Path::new(env!("CARGO_BIN_EXE_cornercase")))
+    }
+
+    fn command_of(&self, bin: &std::path::Path) -> std::process::Command {
+        let mut cmd = std::process::Command::new(bin);
+        cmd.env(SOCKET_ENV, self.socket()).env_remove(NESTED_ENV).env_remove(update::LATEST_ENV);
         cmd
     }
 }
@@ -128,9 +136,13 @@ impl Harness {
     }
 
     fn open_with(session: Arc<Session>, rows: u16, cols: u16, env: &[(&str, &str)]) -> Self {
+        Self::open_from(std::path::Path::new(env!("CARGO_BIN_EXE_cornercase")), session, rows, cols, env)
+    }
+
+    fn open_from(bin: &std::path::Path, session: Arc<Session>, rows: u16, cols: u16, env: &[(&str, &str)]) -> Self {
         let pair =
             native_pty_system().openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).expect("open pty");
-        let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_cornercase"));
+        let mut cmd = CommandBuilder::new(bin);
         cmd.env("SHELL", "/bin/sh");
         cmd.env("PS1", "$ ");
         cmd.env(SOCKET_ENV, session.socket());
@@ -324,6 +336,67 @@ fn write_executable(path: &std::path::Path, contents: &str) {
         .expect("run sh");
     child.stdin.take().expect("stdin").write_all(contents.as_bytes()).expect("write script");
     assert!(child.wait().expect("wait for sh").success(), "failed to write {}", path.display());
+}
+
+fn serve(files: impl FnOnce(&str) -> Vec<(String, Vec<u8>)>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind a port");
+    let url = format!("http://{}", listener.local_addr().expect("its address"));
+    let files = files(&url);
+    thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !request.ends_with(b"\r\n\r\n") {
+                let Ok(n @ 1..) = stream.read(&mut buf) else { break };
+                request.extend_from_slice(&buf[..n]);
+            }
+            let line = String::from_utf8_lossy(&request).into_owned();
+            let path = line.split_whitespace().nth(1).unwrap_or_default();
+            let found = files.iter().find(|(p, _)| p == path).map(|(_, body)| body.as_slice());
+            let (status, body) = found.map_or(("404 Not Found", [].as_slice()), |body| ("200 OK", body));
+            let head = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = stream.write_all(head.as_bytes()).and_then(|()| stream.write_all(body));
+        }
+    });
+    url
+}
+
+fn fake_release(version: &str, script: &str) -> String {
+    let target = update::target().expect("a released platform");
+    let name = format!("cornercase-{target}");
+    let build = temp_dir(&format!("release-{version}"));
+    std::fs::create_dir_all(build.join(&name)).expect("archive folder");
+    write_executable(&build.join(&name).join("cornercase"), script);
+    let tar = std::process::Command::new("tar")
+        .current_dir(&build)
+        .args(["-czf", "release.tar.gz", &name])
+        .status()
+        .expect("run tar");
+    assert!(tar.success(), "tar failed");
+    let archive = std::fs::read(build.join("release.tar.gz")).expect("read the archive");
+    let _ = std::fs::remove_dir_all(&build);
+    let digest = Sha256::digest(&archive).iter().fold(String::new(), |mut hex, b| {
+        let _ = write!(hex, "{b:02x}");
+        hex
+    });
+    let url = serve(|url| {
+        let latest = serde_json::json!({"tag_name": format!("v{version}"), "assets": [
+            {"name": format!("{name}.tar.gz"), "browser_download_url": format!("{url}/download")},
+            {"name": format!("{name}.tar.gz.sha256"), "browser_download_url": format!("{url}/download.sha256")},
+        ]});
+        vec![
+            ("/latest".to_string(), latest.to_string().into_bytes()),
+            ("/download".to_string(), archive),
+            ("/download.sha256".to_string(), format!("{digest} *{name}.tar.gz\n").into_bytes()),
+        ]
+    });
+    format!("{url}/latest")
+}
+
+fn installed_copy(name: &str) -> PathBuf {
+    let bin = temp_dir(name).join("cornercase");
+    std::fs::copy(env!("CARGO_BIN_EXE_cornercase"), &bin).expect("copy cornercase");
+    bin
 }
 
 fn temp_dir_named(name: &str) -> PathBuf {
@@ -785,6 +858,74 @@ fn kill_server_says_when_none_is_running() {
 
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success() && stderr.contains("no cornercase server is running"), "{out:?}");
+}
+
+#[test]
+fn update_installs_the_latest_release_and_restarts_the_server() {
+    let bin = installed_copy("update");
+    let mut app = Harness::open_from(&bin, Session::new(), ROWS, COLS, &[]);
+    app.wait_for("app starts with one terminal", |s| s.contains(&first_entry()));
+    let name = format!("ccup-{}", std::process::id());
+    let dir = temp_dir_named(&name);
+    app.open_project(1, &dir);
+    app.wait_for("project 2 appears", |s| s.contains(&entry(&name)));
+    app.send(b"echo old-\"\"shell\r");
+    app.wait_for("the old shell answers", |s| s.contains("old-shell"));
+    let marker = bin.with_file_name("new-client-ran");
+    let new = format!(
+        "#!/bin/sh\n[ \"$1\" = --version ] && exec echo 'cornercase 99.0.0'\n[ $# -eq 0 ] && touch '{}'\nexec '{}' \"$@\"\n",
+        marker.display(),
+        env!("CARGO_BIN_EXE_cornercase")
+    );
+
+    let out = app
+        .session
+        .command_of(&bin)
+        .args(["update", "--yes"])
+        .env(update::LATEST_ENV, fake_release("99.0.0", &new))
+        .output()
+        .expect("run update");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{out:?}");
+    assert!(stdout.contains(&format!("updated cornercase {} → 99.0.0", update::CURRENT)), "{stdout}");
+    assert!(stdout.contains("restarted the cornercase server"), "{stdout}");
+    assert_eq!(std::fs::read_to_string(&bin).expect("the new binary"), new);
+    app.wait_for("the client comes back with both projects and new shells", |s| {
+        !s.contains("old-shell") && s.contains(&first_entry()) && s.contains(&entry(&name))
+    });
+    assert!(marker.exists(), "the client came back without running the new binary");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(bin.parent().expect("its folder"));
+}
+
+#[test]
+fn update_leaves_an_up_to_date_install_and_its_server_alone() {
+    let app = Harness::start();
+    let bin = installed_copy("up-to-date");
+
+    let out = app
+        .session
+        .command_of(&bin)
+        .arg("update")
+        .env(update::LATEST_ENV, fake_release(update::CURRENT, "#!/bin/sh\n"))
+        .output()
+        .expect("run update");
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), format!("cornercase {} is up to date\n", update::CURRENT));
+    assert_eq!(app.session.servers(), 1);
+    let _ = std::fs::remove_dir_all(bin.parent().expect("its folder"));
+}
+
+#[test]
+fn a_development_build_refuses_to_update() {
+    let session = Session::new();
+
+    let out = session.run("update");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && stderr.contains("this is a development build"), "{out:?}");
 }
 
 #[test]

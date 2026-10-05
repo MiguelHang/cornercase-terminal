@@ -19,7 +19,7 @@ cornercase is a single Rust binary that plays two roles: a **server** that owns 
                                     your shells, editors and agents
 ```
 
-- `src/main.rs` picks the role from the first argument: none for the client, `server`, or `kill-server`; `--version` only prints the version.
+- `src/main.rs` picks the role from the first argument: none for the client, `server`, or `kill-server`; `update` installs the latest release and restarts the server; `--version` only prints the version.
 - The **client** (`client.rs`) starts the server if needed, queries the outer terminal's colours and name, sets up raw mode, mouse capture, bracketed paste and the kitty keyboard flags, sends a `Hello`, then has two jobs: write every frame it receives to stdout, and send every crossterm event it reads to the server.
 - The **server** (`server.rs`) owns the `App`, every PTY and every emulator. It renders a ratatui frame for each client and sends the bytes.
 
@@ -39,7 +39,7 @@ Each client has its own writer thread, so a slow client never blocks the loop. A
 `protocol.rs` frames messages with a little-endian length prefix and encodes them with `postcard`; messages over 64 MiB are refused.
 
 - `Hello` carries a protocol version and a build id (the executable's modification time). A server rejects a client from another build with `ServerMessage::Rejected`.
-- After an in-app update, the server saves the session and sends every client `ServerMessage::Restart` with the new binary's path; each client waits for the old server to exit and runs that binary, which starts a new server.
+- After an in-app update, or when `cornercase update` sends `ClientMessage::Restart`, the server saves the session and sends every client `ServerMessage::Restart`; each client waits for the old server to exit and runs its own executable (which the update replaced), and that starts a new server. A server from before `Restart` cannot decode it and answers `Rejected`, so `cornercase update` falls back to `KillServer`.
 - `ClientMessage::KillServer` and `ServerMessage::Rejected` must stay the first variants of their enums, so that any two builds can still tell each other to stop. `protocol::tests::compatibility` guards this.
 - One server per socket is enforced with `flock` on `server.lock`. The server calls `setsid` and ignores `SIGHUP`.
 
@@ -75,8 +75,8 @@ Keys are encoded in `keys.rs`: Ghostty's encoder for special keys, and for every
 
 | Module | Responsibility |
 | --- | --- |
-| `main.rs` | Client, `server`, `kill-server` or `--version`, from the arguments (the only place using `anyhow`). |
-| `client.rs` | Terminal setup and teardown, colour query, starting the server, forwarding events, writing frames. |
+| `main.rs` | Client, `server`, `kill-server`, `update` or `--version`, from the arguments (the only place using `anyhow`). |
+| `client.rs` | Terminal setup and teardown, colour query, starting the server, forwarding events, writing frames; `kill-server` and `update`. |
 | `server.rs` | The daemon: owns `App` and every terminal, accepts clients, draws a frame per client. |
 | `protocol.rs` | Messages, framing, socket and lock paths, build id. |
 | `app.rs` | Application state; turns events into actions; builds the `View`. |

@@ -42,8 +42,8 @@ npx -y jscpd@4.3.0                          # copy-paste detector, reads .jscpd.
 ## Architecture
 
 ```
-src/main.rs       client, `server` or `kill-server` from argv (uses anyhow)
-src/client.rs     the UI process: terminal setup/teardown, colour query, starts the server, forwards events, writes frames
+src/main.rs       client, `server`, `kill-server` or `update` from argv (uses anyhow)
+src/client.rs     the UI process: terminal setup/teardown, colour query, starts the server, forwards events, writes frames; `kill-server` and `update`
 src/server.rs     the daemon: owns App and every Term, accepts clients on a Unix socket, draws a ratatui frame per client
 src/protocol.rs   messages, length-prefixed postcard framing, socket and lock paths, build id
 src/state.rs      the saved session as JSON, migrations, and the Saver that writes it once it settles
@@ -207,6 +207,8 @@ src/error.rs      library error type
 **Updates (`update.rs`)**
 - Release builds only (`debug_assertions` off), so `cargo run` and tests never call GitHub. The server asks `releases/latest` once a day (`check_updates` in config); a newer one shows ` ↑ x.y.z ` at the end of the settings row and a toast. The dialog shows the `## Release Notes` part of the release body (from `CHANGELOG.md`), scrolled by wheel or ↑/↓.
 - Updating downloads `cornercase-<target>.tar.gz` and its `.sha256`, unpacks with `tar` next to the binary, runs `--version` on it (a binary that cannot run here never replaces a working one), then renames it over the old one. Homebrew installs (`/Cellar/`…), a folder we cannot write and unknown platforms get a command to copy instead.
+- **`cornercase update [--check] [-y|--yes]`** (`client::update`) does the same from a shell: `update::install_latest` (check, then `update` or the command for `Install::Command`, which it prints and exits 1 without running), then, if a server is running, asks `RESTART` (`--yes` skips; no terminal and no `--yes` means no restart) and sends `ClientMessage::Restart`. It never attaches. Debug builds refuse unless `CORNERCASE_RELEASES_URL` is set (the e2e tests serve a fake release and update a copy of the binary). `--check` exits 0 either way, so 1 stays for errors. A same-version server from another build (after `brew upgrade`) is left to the client's `[y/N]`.
+- `ClientMessage::Restart` (last variant) makes the server save and send `ServerMessage::Restart`, like ` restart now `, so attached clients come back, even when `update` ran inside one of its panes (it prints everything first). A server from before it cannot decode it and answers `Rejected` (`protocol::tests::compatibility`), so `client::restart_server` falls back to `KillServer`, whose clients just exit.
 - The running server keeps the old code. ` restart now ` saves the session, sends `ServerMessage::Restart(path)`, and each client `exec`s its own executable (`current_exe`, read at start; the update replaced that file), never the path in the message, which starts a new server that restores the session. A new client rejected by an older server asks `[y/N]` on the plain terminal before running `kill-server`.
 
 **Saved session (`state.rs`)**

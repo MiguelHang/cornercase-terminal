@@ -60,7 +60,7 @@ This ends every shell and program in every pane, and closes all attached clients
 
 ## Updating cornercase
 
-When you [update](../../installation/#update) from the app, its last step, **restart now**, saves your session, restarts the server on the new binary and reopens every attached terminal on it. Your layout comes back from the saved session; programs that were running, agents included, are stopped, and each pane starts a new shell in its folder.
+When you [update](../../installation/#update) from the app, its last step, **restart now**, saves your session, restarts the server on the new binary and reopens every attached terminal on it. [`cornercase update`](../../reference/command-line/#cornercase-update) does the same from a shell when you answer `y`. Your layout comes back from the saved session; programs that were running, agents included, are stopped, and each pane starts a new shell in its folder.
 
 A client only attaches to a server built from the same binary. If you skip the restart, or update with Homebrew or by rebuilding, the old server keeps running and the next `cornercase` asks:
 

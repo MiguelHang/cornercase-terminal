@@ -26,6 +26,7 @@ pub enum ClientMessage {
     KillServer,
     Hello(Box<Hello>),
     Event(Event),
+    Restart,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -215,6 +216,23 @@ mod tests {
         #[test]
         fn rejected_is_the_first_server_variant() {
             assert_eq!(postcard::to_stdvec(&ServerMessage::Rejected(String::new())).expect("encode"), [0, 0]);
+        }
+
+        #[test]
+        fn a_server_without_restart_reads_it_as_invalid_data() {
+            #[derive(Debug, Deserialize)]
+            #[expect(dead_code, reason = "decoded only, the way a server from before Restart reads it")]
+            enum Before {
+                KillServer,
+                Hello(Box<Hello>),
+                Event(Event),
+            }
+            let mut frame = Vec::new();
+            send(&mut frame, &ClientMessage::Restart).expect("encode");
+
+            let err = recv::<Before>(&mut frame.as_slice()).expect_err("an unknown variant");
+
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         }
     }
 

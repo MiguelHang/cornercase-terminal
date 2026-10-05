@@ -2,9 +2,10 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
-## 0.4.3
+## 0.5.0
 
-- Filter the changes panel by path: click **`⌕`** next to its `×` and type. A piece of a path (`order`) or a pattern like in `.gitignore` (`*.test.js`, `src/api/**`) keeps only the files that match, `!` leaves files out (`!*.snap !*.lock`), and the summary says how many are left (`3 of 31 files`). `Enter` keeps the filter and gives your keys back to the pane; `Esc` clears it. While the field has the keys, click in a pane to type there again, and on the field to come back.
+- New `cornercase update` command: installs the latest release from any shell, without waiting for the daily check, then asks whether to restart the server. Your projects, workspaces, tabs and splits come back, each pane with a new shell. `--yes` skips the question and `--check` only says whether a newer version is out. Homebrew installs, and folders cornercase can't write to, get the command to run instead.
+- Restarting from `cornercase update` reopens every attached window on the new version, even when you run it inside cornercase. A server from 0.4.2 or older can't do that yet, so this first time its windows close: run `cornercase` again to get your session back.
 
 ## 0.4.2
 
