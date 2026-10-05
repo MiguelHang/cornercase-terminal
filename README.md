@@ -8,7 +8,7 @@ A terminal multiplexer for working on several projects at once, each with its ow
 
 ## What it does
 
-- **Projects, workspaces, tabs.** A sidebar of projects (folders), and for the active project its workspaces (lines of work) and their tabs. Click to switch, `+` to create, `×` to close, right-click to rename.
+- **Projects, workspaces, tabs.** A sidebar of projects (folders), and for the active project its workspaces (lines of work) and their tabs. Click to switch, `+` to create, `×` to close, right-click to rename, drag to reorder.
 - **Git worktrees.** A new workspace in a git repository can get its own worktree and branch. Worktrees created outside cornercase show up too. Files listed in `.worktreeinclude` (such as `.env`) are copied into new checkouts.
 - **Splits.** Right-click a pane to split it right or down; drag the dividers to resize.
 - **Issues to agents.** Browse GitHub issues, Shortcut stories and Linear issues, read them as Markdown, and start one: cornercase creates a worktree on a matching branch, launches your coding agent (Claude Code, Codex, Gemini, …) in a new tab and hands it the issue.

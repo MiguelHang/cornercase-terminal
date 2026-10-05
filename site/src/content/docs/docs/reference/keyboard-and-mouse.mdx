@@ -5,7 +5,7 @@ description: Every mouse gesture cornercase understands, and the few keys it use
 
 import { Aside } from '@astrojs/starlight/components';
 
-cornercase is driven with the mouse. It has **no keyboard shortcuts** of its own: outside of its dialogs, every key you press goes to the program in the active pane. That's a deliberate choice, so that nothing you type is ever taken away from your shell, your editor or your agent: `Ctrl+B`, `Ctrl+A`, `Alt` and `Option` combinations all reach them untouched.
+cornercase is driven with the mouse. It has **no keyboard shortcuts** of its own: outside of its dialogs (and `Esc` while you drag a row), every key you press goes to the program in the active pane. That's a deliberate choice, so that nothing you type is ever taken away from your shell, your editor or your agent: `Ctrl+B`, `Ctrl+A`, `Alt` and `Option` combinations all reach them untouched.
 
 ## The mouse
 
@@ -17,6 +17,7 @@ cornercase is driven with the mouse. It has **no keyboard shortcuts** of its own
 | Click | `+ new project` | Opens a menu: **open project** (a folder) or **new group**. |
 | Click | `+ new workspace`, `+ tab` | Opens a workspace or a shell. |
 | Click | A group header | Collapses or expands the group. |
+| Drag | A project, group, workspace or tab | Moves it within its list; a project also into or out of a group. `Esc` cancels. See [Reorder](../../guides/projects-workspaces-tabs/#reorder). |
 | Hover, then click `×` | Any project, workspace or tab row | Closes it. |
 | Right-click | A project, workspace or tab | Opens its menu, to **rename** it; a project's menu can also **move to group**. |
 | Right-click | A group header | Opens its menu: **rename group**, **icon and colour**, **delete group**. |
@@ -72,6 +73,7 @@ While a dialog, the search, the settings or the issue browser is open, the keys 
 | Any dialog with a text field | Type, `Backspace`, paste. `Enter` confirms, `Esc` cancels. |
 | New workspace | `Tab` toggles **with its own worktree**. |
 | Right-click menus | `Esc` closes the menu. Other keys still go to the active pane. |
+| While dragging a row | `Esc` cancels the drag. Other keys still go to the active pane. |
 | Folder picker | Type to filter. `↑` `↓` select. `→` or `Tab` go into the selected folder, `←` goes up. `Enter` goes into the selected folder, or opens the folder you are in. `~` goes home and `/` to the root when the filter is empty. `Backspace` on an empty filter goes up. |
 | Search | Type to search. `↑` `↓` select. `Enter` goes to the result. `Esc` closes. |
 | Issue list | Type to filter. `↑` `↓` `PgUp` `PgDn` select. `Enter` reads the issue. `Tab` / `Shift+Tab` switch sources. `Esc` closes. |

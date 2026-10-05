@@ -28,7 +28,7 @@ use crate::mouse;
 use crate::notify::{self, Notification};
 use crate::picker::Picker;
 use crate::process;
-use crate::project::{Group, Project, Tab, Workspace, shift_active};
+use crate::project::{Group, Project, Tab, Workspace, move_before, shift_active};
 use crate::search::{self, Candidate, Goto, Kind, Search};
 use crate::secrets;
 use crate::settings::{self, Page, Settings, Status};
@@ -182,6 +182,7 @@ const SYNC_EVERY: Duration = Duration::from_secs(1);
 const COUNT_BEHIND_EVERY: Duration = Duration::from_secs(3);
 const WATCH_AGENTS_EVERY: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+const AUTO_SCROLL_EVERY: Duration = Duration::from_millis(150);
 const TOAST_FOR: Duration = Duration::from_secs(2);
 const COPIED: &str = "copied to clipboard";
 const UPDATE_AVAILABLE: &str = "a new cornercase is out";
@@ -255,6 +256,15 @@ impl Overlay {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RowDrag {
+    target: Target,
+    row: Rect,
+    moved: bool,
+    area: Rect,
+    scrolled: Option<Instant>,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Focus {
     project: Option<u64>,
@@ -306,6 +316,7 @@ pub struct App {
     divider_drag: Option<(u64, Vec<bool>)>,
     divider_click: Option<(u64, Vec<bool>, Instant)>,
     selecting: Option<u64>,
+    row_drag: Option<RowDrag>,
     toast: Option<Toast>,
     overlay: Option<Overlay>,
     config: Config,
@@ -390,6 +401,7 @@ impl App {
             divider_drag: None,
             divider_click: None,
             selecting: None,
+            row_drag: None,
             toast: None,
             overlay: None,
             config: config::load(&config_path),
@@ -486,11 +498,16 @@ impl App {
         self.open_project(here, area)
     }
 
+    pub fn tick(&self) -> Option<Duration> {
+        self.row_drag.filter(|d| d.moved).map(|_| AUTO_SCROLL_EVERY)
+    }
+
     pub fn refresh(&mut self, now: Instant) {
         self.drive_launches(now);
         self.watch_agents(now);
         self.check_updates(now);
         self.refresh_changes(now);
+        self.auto_scroll(now);
         if self.synced.is_some_and(|at| now.duration_since(at) < SYNC_EVERY) {
             return;
         }
@@ -1018,6 +1035,9 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent, area: Rect) -> Result<()> {
+        if key.code == KeyCode::Esc && self.row_drag.take().is_some() {
+            return Ok(());
+        }
         match &self.overlay {
             Some(Overlay::Menu { .. }) if key.code == KeyCode::Esc => self.overlay = None,
             None if self.nav.is_some() && key.code == KeyCode::Esc => self.nav = None,
@@ -1045,17 +1065,7 @@ impl App {
         let pos = Position::new(ev.column, ev.row);
         self.hover = Some(pos);
 
-        if let Some(border) = self.resizing {
-            self.drag_border(border, ev, area);
-            return Ok(());
-        }
-        if self.divider_drag.is_some() {
-            self.drag_divider(ev, areas.pane);
-            return Ok(());
-        }
-        if let Some(term) = self.selecting {
-            let pane = self.tab().and_then(|t| t.layout.pane(areas.pane, term)).unwrap_or(areas.pane);
-            self.drag_selection(term, ev, pane);
+        if self.continue_drag(ev, &areas, area) {
             return Ok(());
         }
         if self.overlay.is_some() {
@@ -1107,7 +1117,7 @@ impl App {
         }
         if areas.list.contains(pos) {
             if left {
-                self.click_projects(areas.list, areas.pitch, pos);
+                self.click_projects(areas.list, areas.pitch, pos, area);
             } else if right {
                 self.open_project_menu(areas.list, areas.pitch, pos);
             }
@@ -1142,6 +1152,22 @@ impl App {
         }
         self.pane_mouse(ev, pos, areas.pane);
         Ok(())
+    }
+
+    fn continue_drag(&mut self, ev: MouseEvent, areas: &ui::Areas, area: Rect) -> bool {
+        if let Some(border) = self.resizing {
+            self.drag_border(border, ev, area);
+        } else if self.divider_drag.is_some() {
+            self.drag_divider(ev, areas.pane);
+        } else if let Some(term) = self.selecting {
+            let pane = self.tab().and_then(|t| t.layout.pane(areas.pane, term)).unwrap_or(areas.pane);
+            self.drag_selection(term, ev, pane);
+        } else if let Some(drag) = self.row_drag {
+            self.drag_row(drag, ev, areas, area);
+        } else {
+            return false;
+        }
+        true
     }
 
     fn scroll_column(&mut self, areas: &ui::Areas, pos: Position, delta: isize) -> bool {
@@ -1341,17 +1367,15 @@ impl App {
         }
     }
 
-    fn click_projects(&mut self, list: Rect, pitch: u16, pos: Position) {
-        match ui::sidebar_hit(list, pitch, &self.sidebar_rows(), self.projects_scroll, pos) {
+    fn click_projects(&mut self, list: Rect, pitch: u16, pos: Position, area: Rect) {
+        let rows = self.sidebar_rows();
+        let rect = |row: SidebarRow| ui::entry_row(list, pitch, &rows, self.projects_scroll, row);
+        match ui::sidebar_hit(list, pitch, &rows, self.projects_scroll, pos) {
             Some(SidebarHit::Select(i)) => {
-                self.active = i;
-                self.nav = self.nav.map(|_| ui::Nav::Workspaces);
+                self.grab(Target::Project(self.projects[i].id), rect(SidebarRow::Project(i)), area);
             }
             Some(SidebarHit::Close(i)) => self.close_project(i),
-            Some(SidebarHit::Group(g)) => {
-                let entry = &mut self.groups[g].entry;
-                entry.collapsed = !entry.collapsed;
-            }
+            Some(SidebarHit::Group(g)) => self.grab(Target::Group(self.groups[g].id), rect(SidebarRow::Group(g)), area),
             Some(SidebarHit::New) => {
                 self.overlay =
                     Some(Overlay::Menu { at: pos, actions: vec![MenuAction::OpenProject, MenuAction::NewGroup] });
@@ -1369,6 +1393,146 @@ impl App {
         }
     }
 
+    fn grab(&mut self, target: Target, row: Rect, area: Rect) {
+        self.row_drag = Some(RowDrag { target, row, moved: false, area, scrolled: None });
+    }
+
+    fn drag_row(&mut self, drag: RowDrag, ev: MouseEvent, areas: &ui::Areas, area: Rect) {
+        let pos = Position::new(ev.column, ev.row);
+        match ev.kind {
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.row_drag = Some(RowDrag { moved: drag.moved || !drag.row.contains(pos), area, ..drag });
+                self.auto_scroll(Instant::now());
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.row_drag = None;
+                if drag.moved || !drag.row.contains(pos) {
+                    self.drop_row(drag.target, pos, area);
+                } else {
+                    self.click_row(drag.target);
+                }
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                if let Some(delta) = wheel(ev.kind) {
+                    self.scroll_column(areas, pos, delta);
+                }
+                self.row_drag = Some(RowDrag { moved: true, area, ..drag });
+            }
+            _ => self.row_drag = None,
+        }
+    }
+
+    fn click_row(&mut self, target: Target) {
+        match target {
+            Target::Group(id) => {
+                if let Some(entry) = self.group_mut(id) {
+                    entry.collapsed = !entry.collapsed;
+                }
+            }
+            Target::Project(id) => {
+                if let Some(p) = self.project_index(id) {
+                    self.active = p;
+                    self.nav = self.nav.map(|_| ui::Nav::Workspaces);
+                }
+            }
+            Target::Workspace(project, workspace) => {
+                self.goto(Goto::Place { project, workspace: Some(workspace), tab: None });
+            }
+            Target::Tab(project, workspace, tab) => {
+                self.goto(Goto::Place { project, workspace: Some(workspace), tab: Some(tab) });
+            }
+        }
+    }
+
+    fn drag_view(&self, target: Target, pos: Position, area: Rect) -> Option<ui::Drag> {
+        let areas = self.layout(area).shown(self.nav);
+        let sidebar = |row: SidebarRow| {
+            let rows = self.sidebar_rows();
+            ui::Drag::Sidebar(row, ui::sidebar_drop(areas.list, areas.pitch, &rows, self.projects_scroll, row, pos))
+        };
+        let workspaces = |row: WorkspaceRow| {
+            let (list, tabs) = (areas.workspaces_list, self.tab_lines());
+            ui::Drag::Workspaces(row, ui::workspace_drop(list, areas.pitch, &tabs, self.workspaces_scroll, row, pos))
+        };
+        match target {
+            Target::Group(id) => Some(sidebar(SidebarRow::Group(self.group_index(id)?))),
+            Target::Project(id) => Some(sidebar(SidebarRow::Project(self.project_index(id)?))),
+            Target::Workspace(project, workspace) => {
+                let (_, w) = self.workspace_index(project, workspace).filter(|(p, _)| *p == self.active)?;
+                Some(workspaces(WorkspaceRow::Workspace(w)))
+            }
+            Target::Tab(project, workspace, tab) => {
+                let (p, w) = self.workspace_index(project, workspace).filter(|(p, _)| *p == self.active)?;
+                let t = self.projects[p].workspaces[w].tabs.iter().position(|t| t.id == tab)?;
+                Some(workspaces(WorkspaceRow::Tab(w, t)))
+            }
+        }
+    }
+
+    fn drop_row(&mut self, target: Target, pos: Position, area: Rect) {
+        let Some(ui::Drag::Sidebar(_, Some(landing)) | ui::Drag::Workspaces(_, Some(landing))) =
+            self.drag_view(target, pos, area)
+        else {
+            return;
+        };
+        match (target, landing.spot) {
+            (Target::Group(id), ui::Spot::Group(before)) => {
+                if let Some(g) = self.group_index(id) {
+                    move_before(&mut self.groups, g, before, None);
+                }
+            }
+            (Target::Project(id), ui::Spot::Project { group, before }) => self.move_project(id, group, before),
+            (Target::Workspace(project, workspace), ui::Spot::Workspace(before)) => {
+                if let Some((p, w)) = self.workspace_index(project, workspace) {
+                    let project = &mut self.projects[p];
+                    move_before(&mut project.workspaces, w, before, Some(&mut project.active));
+                }
+            }
+            (Target::Tab(project, workspace, tab), ui::Spot::Tab(before)) => {
+                if let Some((p, w)) = self.workspace_index(project, workspace) {
+                    let workspace = &mut self.projects[p].workspaces[w];
+                    if let Some(t) = workspace.tabs.iter().position(|t| t.id == tab) {
+                        move_before(&mut workspace.tabs, t, before, Some(&mut workspace.active));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn move_project(&mut self, id: u64, group: Option<usize>, before: Option<usize>) {
+        let group = group.and_then(|g| self.groups.get(g)).map(|g| g.id);
+        let before = before.and_then(|q| self.projects.get(q)).map(|q| q.id);
+        let active = self.project().map(|p| p.id);
+        let Some(p) = self.project_index(id) else { return };
+        let mut project = self.projects.remove(p);
+        project.group = group;
+        let at = before.and_then(|q| self.project_index(q)).unwrap_or_else(|| {
+            self.projects.iter().rposition(|p| p.group == group).map_or(self.projects.len(), |i| i + 1)
+        });
+        self.projects.insert(at, project);
+        self.active = active.and_then(|id| self.project_index(id)).unwrap_or(0);
+    }
+
+    fn auto_scroll(&mut self, now: Instant) {
+        let Some(drag) = self.row_drag.filter(|d| d.moved) else { return };
+        let Some(pos) = self.hover else { return };
+        if drag.scrolled.is_some_and(|at| now.duration_since(at) < AUTO_SCROLL_EVERY) {
+            return;
+        }
+        let areas = self.layout(drag.area).shown(self.nav);
+        let sidebar = matches!(drag.target, Target::Group(_) | Target::Project(_));
+        let rows = if sidebar {
+            ui::project_rows(areas.list, areas.pitch, &self.sidebar_rows(), self.projects_scroll)
+        } else {
+            ui::workspace_layout(areas.workspaces_list, areas.pitch, &self.tab_lines(), self.workspaces_scroll)
+        };
+        let Some(delta) = rows.edge(pos) else { return };
+        let scroll = if sidebar { &mut self.projects_scroll } else { &mut self.workspaces_scroll };
+        *scroll = rows.scrolled(delta);
+        self.row_drag = Some(RowDrag { scrolled: Some(now), ..drag });
+    }
+
     fn tab_lines(&self) -> Vec<Vec<u16>> {
         let lines =
             |w: &Workspace| -> Vec<u16> { w.tabs.iter().map(|t| ui::tab_lines(t.context().is_some())).collect() };
@@ -1379,17 +1543,24 @@ impl App {
         if self.project().is_none() {
             return Ok(());
         }
-        let hit = ui::workspace_hit(list, pitch, &self.tab_lines(), self.workspaces_scroll, pos);
-        if !matches!(hit, None | Some(WorkspaceHit::CloseWorkspace(_) | WorkspaceHit::CloseTab(..))) {
+        let tabs = self.tab_lines();
+        let hit = ui::workspace_hit(list, pitch, &tabs, self.workspaces_scroll, pos);
+        if matches!(hit, Some(WorkspaceHit::NewTab(_) | WorkspaceHit::NewWorkspace)) {
             self.nav = None;
         }
         let p = self.active;
+        let rect = |row: WorkspaceRow| ui::workspace_row(list, pitch, &tabs, self.workspaces_scroll, row);
+        let project = &self.projects[p];
         match hit {
-            Some(WorkspaceHit::Workspace(w)) => self.projects[p].active = w,
+            Some(WorkspaceHit::Workspace(w)) => {
+                let target = Target::Workspace(project.id, project.workspaces[w].id);
+                self.grab(target, rect(WorkspaceRow::Workspace(w)), area);
+            }
             Some(WorkspaceHit::CloseWorkspace(w)) => self.close_workspace(p, w),
             Some(WorkspaceHit::Tab(w, t)) => {
-                self.projects[p].active = w;
-                self.projects[p].workspaces[w].active = t;
+                let workspace = &project.workspaces[w];
+                let target = Target::Tab(project.id, workspace.id, workspace.tabs[t].id);
+                self.grab(target, rect(WorkspaceRow::Tab(w, t)), area);
             }
             Some(WorkspaceHit::CloseTab(w, t)) => {
                 for term in &mut self.projects[p].workspaces[w].tabs[t].panes {
@@ -2805,6 +2976,8 @@ impl App {
         let visible = self.visible_tab();
         let tabs = self.projects.iter().flat_map(|p| &p.workspaces).flat_map(|w| &w.tabs);
         let attention = activity::attention(tabs.filter(|t| Some(t.id) != visible).map(Tab::status));
+        let drag =
+            self.row_drag.filter(|d| d.moved).zip(self.hover).and_then(|(d, pos)| self.drag_view(d.target, pos, area));
         let view = ui::View {
             groups,
             projects,
@@ -2829,6 +3002,7 @@ impl App {
             changes: if self.changes_shown() { self.panel_view() } else { None },
             changes_button: self.changes_label().map(|label| ui::ChangesButton { label, open: self.changes.open }),
             attention,
+            drag,
         };
         ui::draw(f, &view);
     }
@@ -3327,7 +3501,16 @@ mod tests {
         mouse(app, MouseEventKind::Down(button), pos);
     }
 
+    fn click_in(app: &mut App, pos: Position, area: Rect) {
+        mouse_in(app, MouseEventKind::Down(MouseButton::Left), pos, area);
+        mouse_in(app, MouseEventKind::Up(MouseButton::Left), pos, area);
+    }
+
     fn click(app: &mut App, pos: Position) {
+        click_in(app, pos, AREA);
+    }
+
+    fn press(app: &mut App, pos: Position) {
         mouse_down(app, MouseButton::Left, pos);
     }
 
@@ -3356,6 +3539,11 @@ mod tests {
 
     fn entry_pos() -> Position {
         Position::new(list().x + 3, list().y)
+    }
+
+    fn sidebar_pos(app: &App, row: SidebarRow) -> Position {
+        let r = ui::entry_row(list(), 1, &app.sidebar_rows(), app.projects_scroll, row);
+        Position::new(r.x + 3, r.y)
     }
 
     fn row_rect(app: &App, row: WorkspaceRow) -> Rect {
@@ -3520,11 +3708,6 @@ mod tests {
         use rstest::rstest;
 
         use super::*;
-
-        fn sidebar_pos(app: &App, row: SidebarRow) -> Position {
-            let r = ui::entry_row(list(), 1, &app.sidebar_rows(), app.projects_scroll, row);
-            Position::new(r.x + 3, r.y)
-        }
 
         fn click_sidebar(app: &mut App, row: SidebarRow) {
             let pos = sidebar_pos(app, row);
@@ -3854,6 +4037,303 @@ mod tests {
             send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
             assert_eq!((app.projects.len(), app.active, app.projects[0].path.clone()), (1, 0, canonical(&home)));
+        }
+    }
+
+    mod reorder {
+        use rstest::rstest;
+
+        use super::*;
+
+        fn drag(app: &mut App, from: Position, to: Position) {
+            press(app, from);
+            mouse(app, MouseEventKind::Drag(MouseButton::Left), to);
+            mouse(app, MouseEventKind::Up(MouseButton::Left), to);
+        }
+
+        fn drag_entry(app: &mut App, from: SidebarRow, to: SidebarRow) {
+            let (from, to) = (sidebar_pos(app, from), sidebar_pos(app, to));
+            drag(app, from, to);
+        }
+
+        fn drag_row(app: &mut App, from: WorkspaceRow, to: WorkspaceRow) {
+            let (from, to) = (row_pos(app, from), row_pos(app, to));
+            drag(app, from, to);
+        }
+
+        fn saved_projects(app: &App) -> Vec<(PathBuf, Option<usize>)> {
+            app.state().projects.into_iter().map(|p| (p.path, p.group)).collect()
+        }
+
+        fn grouped(n: usize, in_work: &[usize]) -> (App, Receiver<AppEvent>, Vec<PathBuf>, Vec<TempDir>) {
+            let (mut app, rx, dirs) = app_with(n);
+            let work = app.add_group("work".into());
+            for &p in in_work {
+                app.projects[p].group = Some(work);
+            }
+            let paths = dirs.iter().map(canonical).collect();
+            (app, rx, paths, dirs)
+        }
+
+        fn with_workspaces(names: &[&str]) -> (App, Receiver<AppEvent>, Vec<TempDir>) {
+            let (mut app, rx, dirs) = app_with(1);
+            for name in names {
+                let path = app.projects[0].path.clone();
+                let workspace = app.new_workspace(AREA, path, Some((*name).into()), false).expect("workspace");
+                app.projects[0].workspaces.push(workspace);
+            }
+            (app, rx, dirs)
+        }
+
+        fn with_tabs(names: &[&str]) -> (App, Receiver<AppEvent>, Vec<TempDir>) {
+            let (mut app, rx, dirs) = app_with(1);
+            for _ in 1..names.len() {
+                app.add_tab(0, 0, AREA).expect("add a tab");
+            }
+            for (tab, name) in app.projects[0].workspaces[0].tabs.iter_mut().zip(names) {
+                tab.name = Some((*name).into());
+            }
+            (app, rx, dirs)
+        }
+
+        fn saved_tabs(app: &App) -> String {
+            let state = app.state();
+            let names: Vec<String> =
+                state.projects[0].workspaces[0].tabs.iter().filter_map(|t| t.name.clone()).collect();
+            names.join(" ")
+        }
+
+        #[rstest]
+        #[case::loose(&[])]
+        #[case::out_of_a_group(&[2])]
+        fn dragging_a_project_among_the_loose_ones_moves_it_there_and_saves_the_order(#[case] in_work: &[usize]) {
+            let (mut app, _rx, paths, _dirs) = grouped(3, in_work);
+
+            drag_entry(&mut app, SidebarRow::Project(2), SidebarRow::Project(0));
+
+            let expected = vec![(paths[2].clone(), None), (paths[0].clone(), None), (paths[1].clone(), None)];
+            assert_eq!((saved_projects(&app), app.active), (expected, 0));
+        }
+
+        #[test]
+        fn dragging_a_group_moves_it_with_its_projects() {
+            let (mut app, _rx, _paths, _dirs) = grouped(2, &[0]);
+            let oss = app.add_group("oss".into());
+            app.projects[1].group = Some(oss);
+
+            drag_entry(&mut app, SidebarRow::Group(1), SidebarRow::Group(0));
+
+            let state = app.state();
+            let groups: Vec<&str> = state.groups.iter().map(|g| g.name.as_str()).collect();
+            let projects: Vec<Option<usize>> = state.projects.iter().map(|p| p.group).collect();
+            assert_eq!((groups, projects), (vec!["oss", "work"], vec![Some(1), Some(0)]));
+        }
+
+        #[test]
+        fn dragging_a_workspace_moves_it_and_keeps_the_active_one() {
+            let (mut app, _rx, _dirs) = with_workspaces(&["b", "c"]);
+
+            drag_row(&mut app, WorkspaceRow::Workspace(2), WorkspaceRow::Workspace(0));
+
+            let state = app.state();
+            let saved: Vec<Option<String>> = state.projects[0].workspaces.iter().map(|w| w.name.clone()).collect();
+            assert_eq!((saved, app.projects[0].active), (vec![Some("c".into()), None, Some("b".into())], 1));
+        }
+
+        #[test]
+        fn dragging_a_tab_moves_it_and_keeps_the_active_one() {
+            let (mut app, _rx, _dirs) = with_tabs(&["one", "two", "three"]);
+
+            drag_row(&mut app, WorkspaceRow::Tab(0, 2), WorkspaceRow::Tab(0, 0));
+
+            assert_eq!((saved_tabs(&app), app.projects[0].workspaces[0].active), ("three one two".into(), 0));
+        }
+
+        #[test]
+        fn a_tab_dragged_onto_another_workspace_stays_in_its_own() {
+            let (mut app, _rx, _dirs) = with_tabs(&["one", "two"]);
+            let path = app.projects[0].path.clone();
+            let other = app.new_workspace(AREA, path, Some("other".into()), false).expect("workspace");
+            app.projects[0].workspaces.push(other);
+
+            drag_row(&mut app, WorkspaceRow::Tab(0, 0), WorkspaceRow::Tab(1, 0));
+
+            assert_eq!((saved_tabs(&app), app.projects[0].workspaces[1].tabs.len()), ("two one".into(), 1));
+        }
+
+        #[test]
+        fn a_row_is_activated_on_release() {
+            let (mut app, _rx, _dirs) = app_with(2);
+            let first = sidebar_pos(&app, SidebarRow::Project(0));
+
+            press(&mut app, first);
+            let pressed = app.active;
+            mouse(&mut app, MouseEventKind::Up(MouseButton::Left), first);
+
+            assert_eq!((pressed, app.active), (1, 0));
+        }
+
+        #[test]
+        fn a_release_on_another_row_moves_it_even_without_motion() {
+            let (mut app, _rx, paths, _dirs) = grouped(2, &[]);
+            let (from, to) = (sidebar_pos(&app, SidebarRow::Project(1)), sidebar_pos(&app, SidebarRow::Project(0)));
+
+            press(&mut app, from);
+            mouse(&mut app, MouseEventKind::Up(MouseButton::Left), to);
+
+            assert_eq!(saved_projects(&app), vec![(paths[1].clone(), None), (paths[0].clone(), None)]);
+        }
+
+        #[test]
+        fn moving_within_the_row_is_still_a_click() {
+            let (mut app, _rx, _dirs) = app_with(2);
+            let before = app.state();
+            let first = sidebar_pos(&app, SidebarRow::Project(0));
+
+            drag(&mut app, first, Position::new(first.x + 6, first.y));
+
+            assert_eq!((app.active, app.state().projects), (0, before.projects));
+        }
+
+        #[derive(Debug, Clone, Copy)]
+        enum Cancel {
+            Esc,
+            ReleaseOutside,
+            ReleaseOnItself,
+            RightClick,
+        }
+
+        #[rstest]
+        #[case::esc(Cancel::Esc)]
+        #[case::release_outside_the_list(Cancel::ReleaseOutside)]
+        #[case::release_on_itself(Cancel::ReleaseOnItself)]
+        #[case::another_button(Cancel::RightClick)]
+        fn a_cancelled_drag_changes_nothing(#[case] cancel: Cancel) {
+            let (mut app, _rx, _dirs) = app_with(3);
+            let before = app.state();
+            let (from, to) = (sidebar_pos(&app, SidebarRow::Project(2)), sidebar_pos(&app, SidebarRow::Project(0)));
+            press(&mut app, from);
+            mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), to);
+
+            let end = match cancel {
+                Cancel::Esc => {
+                    send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+                    to
+                }
+                Cancel::ReleaseOutside => Position::new(areas().pane.x + 5, to.y),
+                Cancel::ReleaseOnItself => from,
+                Cancel::RightClick => {
+                    right_click(&mut app, to);
+                    to
+                }
+            };
+            mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), end);
+            mouse(&mut app, MouseEventKind::Up(MouseButton::Left), end);
+
+            assert_eq!((app.state(), app.active, app.overlay.is_none()), (before, 2, true));
+        }
+
+        #[test]
+        fn dropping_a_project_on_a_group_header_puts_it_first_in_the_group() {
+            let (mut app, _rx, paths, _dirs) = grouped(3, &[2]);
+
+            drag_entry(&mut app, SidebarRow::Project(0), SidebarRow::Group(0));
+
+            let expected = vec![(paths[1].clone(), None), (paths[0].clone(), Some(0)), (paths[2].clone(), Some(0))];
+            assert_eq!(saved_projects(&app), expected);
+        }
+
+        #[test]
+        fn dropping_a_project_on_a_collapsed_group_puts_it_last_in_the_group() {
+            let (mut app, _rx, paths, _dirs) = grouped(3, &[1, 2]);
+            app.groups[0].entry.collapsed = true;
+
+            drag_entry(&mut app, SidebarRow::Project(0), SidebarRow::Group(0));
+
+            let expected = vec![(paths[1].clone(), Some(0)), (paths[2].clone(), Some(0)), (paths[0].clone(), Some(0))];
+            assert_eq!(saved_projects(&app), expected);
+        }
+
+        #[test]
+        fn dropping_a_project_between_grouped_projects_puts_it_there() {
+            let (mut app, _rx, paths, _dirs) = grouped(3, &[1, 2]);
+
+            drag_entry(&mut app, SidebarRow::Project(0), SidebarRow::Project(1));
+
+            let expected = vec![(paths[1].clone(), Some(0)), (paths[0].clone(), Some(0)), (paths[2].clone(), Some(0))];
+            assert_eq!(saved_projects(&app), expected);
+        }
+
+        #[test]
+        fn holding_a_drag_on_the_more_line_scrolls_the_list() {
+            const SHORT: Rect = Rect { x: 0, y: 0, width: 100, height: 12 };
+            let (mut app, _rx, _dirs) = app_with(4);
+            app.active = 0;
+            app.follow(SHORT);
+            let short = ui::layout(SHORT, ui::Widths::default());
+            let rows = ui::project_rows(short.list, short.pitch, &app.sidebar_rows(), app.projects_scroll);
+
+            mouse_in(&mut app, MouseEventKind::Down(MouseButton::Left), short.list.as_position(), SHORT);
+            mouse_in(&mut app, MouseEventKind::Drag(MouseButton::Left), rows.more_below().as_position(), SHORT);
+            let dragged = app.projects_scroll;
+            app.refresh(Instant::now() + AUTO_SCROLL_EVERY);
+
+            assert_eq!((dragged, app.projects_scroll), (1, 2));
+        }
+
+        #[test]
+        fn a_drag_in_the_compact_menu_reorders_and_keeps_it_open() {
+            const SMALL: Rect = Rect { x: 0, y: 0, width: 80, height: 40 };
+            let (mut app, _rx, paths, _dirs) = grouped(2, &[]);
+            app.nav = Some(ui::Nav::Projects);
+            let small = ui::layout(SMALL, ui::Widths::default());
+            let entry = |p| ui::entry_row(small.list, small.pitch, &app.sidebar_rows(), 0, SidebarRow::Project(p));
+            let (from, to) = (entry(1).as_position(), entry(0).as_position());
+
+            mouse_in(&mut app, MouseEventKind::Down(MouseButton::Left), from, SMALL);
+            mouse_in(&mut app, MouseEventKind::Drag(MouseButton::Left), to, SMALL);
+            mouse_in(&mut app, MouseEventKind::Up(MouseButton::Left), to, SMALL);
+
+            let expected = vec![(paths[1].clone(), None), (paths[0].clone(), None)];
+            assert_eq!((saved_projects(&app), app.nav), (expected, Some(ui::Nav::Projects)));
+        }
+
+        #[test]
+        fn a_restored_session_keeps_the_order_of_every_level() {
+            let (mut app, _rx, _dirs) = with_tabs(&["one", "two"]);
+            let other = TempDir::new();
+            app.open_project(other.path().to_path_buf(), AREA).expect("open project");
+            app.add_group("work".into());
+            app.add_group("oss".into());
+            drag_entry(&mut app, SidebarRow::Group(1), SidebarRow::Group(0));
+            drag_entry(&mut app, SidebarRow::Project(1), SidebarRow::Project(0));
+            let path = app.projects[1].path.clone();
+            let second = app.new_workspace(AREA, path, Some("second".into()), false).expect("workspace");
+            app.projects[1].workspaces.push(second);
+            app.active = 1;
+            drag_row(&mut app, WorkspaceRow::Tab(0, 1), WorkspaceRow::Tab(0, 0));
+            drag_row(&mut app, WorkspaceRow::Workspace(1), WorkspaceRow::Workspace(0));
+            let saved = app.state();
+
+            let (mut restored, _rx2) = empty_app();
+            restored.restore(&saved, AREA).expect("restore");
+
+            let state = restored.state();
+            let groups: Vec<&str> = state.groups.iter().map(|g| g.name.as_str()).collect();
+            let workspaces: Vec<Option<&str>> =
+                state.projects[1].workspaces.iter().map(|w| w.name.as_deref()).collect();
+            let tabs: Vec<Option<&str>> =
+                state.projects[1].workspaces[1].tabs.iter().map(|t| t.name.as_deref()).collect();
+            assert_eq!(
+                (groups, state.projects[1].path.clone(), workspaces, tabs),
+                (
+                    vec!["oss", "work"],
+                    app.projects[1].path.clone(),
+                    vec![Some("second"), None],
+                    vec![Some("two"), Some("one")]
+                )
+            );
+            assert_eq!(state, saved);
         }
     }
 
@@ -4944,7 +5424,7 @@ rm -f "$1/sessions/$$.json"
         }
 
         fn press(app: &mut App, pos: Position) {
-            mouse_in(app, MouseEventKind::Down(MouseButton::Left), pos, SMALL);
+            click_in(app, pos, SMALL);
         }
 
         fn open_menu(app: &mut App) {
@@ -5128,7 +5608,7 @@ rm -f "$1/sessions/$$.json"
             app.follow(SHORT);
             app.active = 0;
             let pos = Position::new(short().list.x + 3, short().list.y);
-            mouse_in(&mut app, MouseEventKind::Down(MouseButton::Left), pos, SHORT);
+            click_in(&mut app, pos, SHORT);
             assert_eq!(app.active, 2);
         }
 
@@ -5608,7 +6088,7 @@ rm -f "$1/sessions/$$.json"
         }
 
         fn drag(app: &mut App, from: Position, to: Position) {
-            click(app, from);
+            press(app, from);
             mouse(app, MouseEventKind::Drag(MouseButton::Left), to);
             mouse(app, MouseEventKind::Up(MouseButton::Left), to);
         }
@@ -5636,7 +6116,6 @@ rm -f "$1/sessions/$$.json"
             let (mut app, _rx) = showing("hello world");
 
             click(&mut app, cell(2, 0));
-            mouse(&mut app, MouseEventKind::Up(MouseButton::Left), cell(2, 0));
 
             assert_eq!((app.take_host_writes(), toast(&app)), (Vec::<Vec<u8>>::new(), None));
         }
@@ -5653,7 +6132,7 @@ rm -f "$1/sessions/$$.json"
         #[test]
         fn the_text_is_highlighted_while_dragging() {
             let (mut app, _rx) = showing("hello world");
-            click(&mut app, cell(0, 0));
+            press(&mut app, cell(0, 0));
 
             mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), cell(4, 0));
 
@@ -5727,7 +6206,7 @@ rm -f "$1/sessions/$$.json"
         }
 
         fn drag(app: &mut App, from: Position, to: Position) {
-            click(app, from);
+            press(app, from);
             mouse(app, MouseEventKind::Drag(MouseButton::Left), to);
             mouse(app, MouseEventKind::Up(MouseButton::Left), to);
         }
@@ -5897,7 +6376,6 @@ rm -f "$1/sessions/$$.json"
             let moved = divider(&app).line.as_position();
 
             click(&mut app, moved);
-            mouse(&mut app, MouseEventKind::Up(MouseButton::Left), moved);
             click(&mut app, moved);
 
             assert_eq!(divider(&app).line.x, line.x);
@@ -5934,7 +6412,7 @@ rm -f "$1/sessions/$$.json"
         fn a_drag_from_the_sidebar_while_the_active_pane_has_no_room_is_dropped() {
             let (mut app, _rx, top) = with_an_empty_active_pane();
 
-            click(&mut app, entry_pos());
+            press(&mut app, entry_pos());
             mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), top);
 
             assert_eq!(tab(&app).active, 2);
@@ -5945,7 +6423,7 @@ rm -f "$1/sessions/$$.json"
             let (mut app, _rx) = split_down_twice();
             let id = tab(&app).panes[2].id;
             let bottom = inside(rects(&app)[2]);
-            click(&mut app, bottom);
+            press(&mut app, bottom);
             let small = Rect { height: 4, ..AREA };
             let shrunk = tab(&app).layout.pane(app.layout(small).pane, id).expect("the pane is still there");
             assert!(shrunk.is_empty());
@@ -6067,7 +6545,7 @@ rm -f "$1/sessions/$$.json"
         }
 
         fn drag(app: &mut App, from: Position, to_x: u16) {
-            click(app, from);
+            press(app, from);
             mouse(app, MouseEventKind::Drag(MouseButton::Left), Position::new(to_x, from.y));
             mouse(app, MouseEventKind::Up(MouseButton::Left), Position::new(to_x, from.y));
         }
@@ -6126,7 +6604,7 @@ rm -f "$1/sessions/$$.json"
         fn a_drag_away_from_the_border_keeps_resizing() {
             let (mut app, _rx) = app();
             let from = border(&app, ui::Border::Projects);
-            click(&mut app, from);
+            press(&mut app, from);
 
             mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), Position::new(39, from.y + 4));
 
@@ -6141,7 +6619,6 @@ rm -f "$1/sessions/$$.json"
             let moved = border(&app, ui::Border::Projects);
 
             click(&mut app, moved);
-            mouse(&mut app, MouseEventKind::Up(MouseButton::Left), moved);
             click(&mut app, moved);
 
             assert_eq!((app.widths, app.resizing), (ui::Widths::default(), None));
@@ -6154,7 +6631,6 @@ rm -f "$1/sessions/$$.json"
             drag(&mut app, from, 39);
             let moved = border(&app, ui::Border::Projects);
             click(&mut app, moved);
-            mouse(&mut app, MouseEventKind::Up(MouseButton::Left), moved);
             app.border_click =
                 app.border_click.map(|(b, at)| (b, at.checked_sub(DOUBLE_CLICK).expect("an earlier instant")));
 
@@ -6170,7 +6646,7 @@ rm -f "$1/sessions/$$.json"
             drag(&mut app, from, 39);
             let moved = border(&app, ui::Border::Projects);
 
-            click(&mut app, moved);
+            press(&mut app, moved);
 
             assert_eq!((app.widths.projects, app.resizing), (40, Some(ui::Border::Projects)));
         }
@@ -6239,7 +6715,7 @@ rm -f "$1/sessions/$$.json"
         fn a_click_on_a_project_selects_it() {
             let (mut app, _rx, _dirs) = stacked(2);
             let list = app.layout(TALL).list;
-            press_at(&mut app, MouseEventKind::Down(MouseButton::Left), Position::new(list.x + 3, list.y));
+            click_in(&mut app, Position::new(list.x + 3, list.y), TALL);
             assert_eq!(app.active, 0);
         }
 
@@ -6249,7 +6725,7 @@ rm -f "$1/sessions/$$.json"
             app.add_tab(0, 0, TALL).expect("add a tab");
             let list = app.layout(TALL).workspaces_list;
             let tab = ui::workspace_row(list, 1, &app.tab_lines(), app.workspaces_scroll, WorkspaceRow::Tab(0, 0));
-            press_at(&mut app, MouseEventKind::Down(MouseButton::Left), tab.as_position());
+            click_in(&mut app, tab.as_position(), TALL);
             assert_eq!(app.projects[0].workspaces[0].active, 0);
         }
 
@@ -6303,7 +6779,7 @@ rm -f "$1/sessions/$$.json"
             let border = app.layout(AREA).projects_border;
             let from = Position::new(border.x, border.y + 1);
 
-            click(&mut app, from);
+            press(&mut app, from);
             mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), Position::new(59, from.y));
             mouse(&mut app, MouseEventKind::Up(MouseButton::Left), Position::new(59, from.y));
 

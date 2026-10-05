@@ -65,7 +65,7 @@ src/changes/      changes panel: mod.rs (panel state, refresh pacing, folds, vie
 src/search.rs     global search: candidates, ranking, state
 src/picker.rs     folder picker state
 src/process.rs    a pid's cwd, name, arguments and environment: /proc on Linux, libproc and sysctl on macOS
-src/project.rs    Group, Project > Workspace > Tab > panes, labels, removal
+src/project.rs    Group, Project > Workspace > Tab > panes, labels, removal, moving
 src/split.rs      a tab's split tree: rects, dividers, splitting, removing, ratios
 src/app.rs        App state; turns AppEvents into actions; builds the View
 src/term.rs       a shell in a PTY, its Emulator, and the reader thread
@@ -86,7 +86,7 @@ src/error.rs      library error type
 ## Design decisions
 
 **Interaction**
-- **Mouse buttons only, no app shortcuts.** Every key goes to the program in the active pane, except while a modal or the search is open (then `Enter` submits, `Esc` cancels). Do not add keyboard shortcuts without asking. No `Alt` shortcuts (Option is a compose key on macOS), no `Ctrl+letter` (steals shell bindings). `e2e::ctrl_b_reaches_the_shell` guards this.
+- **Mouse buttons only, no app shortcuts.** Every key goes to the program in the active pane, except while a modal or the search is open (then `Enter` submits, `Esc` cancels) and `Esc` while a row is dragged. Do not add keyboard shortcuts without asking. No `Alt` shortcuts (Option is a compose key on macOS), no `Ctrl+letter` (steals shell bindings). `e2e::ctrl_b_reaches_the_shell` guards this.
 - Closing the last project leaves the app open and empty. ` quit ` only detaches.
 - `×` buttons only show while hovering their row. Names are cut at the end (`ui::truncate_right`), paths at the start (`truncate_left`).
 - At most one overlay is open (menu, form, confirmation, settings, usage, picker, issues, search). While it is open, no mouse event reaches the columns or the pane.
@@ -104,8 +104,11 @@ src/error.rs      library error type
 - Optional group > project (a canonicalized folder) > workspace (the project folder, or its own git worktree) > tab > panes. Every level has an id from one counter; menus, forms and background jobs refer to ids, never indices.
 - Labels: custom name, else folder name (project), branch or `default` (workspace), foreground program (tab).
 - Closing kills processes; removal waits for `Exited`, never synchronous. Closing the last tab keeps the workspace; closing the last workspace keeps the project.
-- **Groups**: one level, no nesting, in creation order. A project holds `group: Option<u64>`; the projects column is `ui::sidebar_rows` (loose projects first, then per group a gap, the header and, unless collapsed, its projects), which drawing, hit testing and `App::follow` share. A collapsed group holding the active project gets the `▌` on its header. Deleting a group only ungroups its projects. Icons are a fixed set of one-cell symbols (`ui::GROUP_ICONS`, no emoji or Nerd Font glyphs, whose width varies); colours are palette indices (`ui::GROUP_COLOURS`, no greys, black or white, which vanish on some themes). A new group gets the next icon and colour, then opens the icon and colour modal, whose clicks apply at once.
+- **Groups**: one level, no nesting; a new one goes last. A project holds `group: Option<u64>`; the projects column is `ui::sidebar_rows` (loose projects first, then per group a gap, the header and, unless collapsed, its projects), which drawing, hit testing and `App::follow` share. A collapsed group holding the active project gets the `▌` on its header. Deleting a group only ungroups its projects. Icons are a fixed set of one-cell symbols (`ui::GROUP_ICONS`, no emoji or Nerd Font glyphs, whose width varies); colours are palette indices (`ui::GROUP_COLOURS`, no greys, black or white, which vanish on some themes). A new group gets the next icon and colour, then opens the icon and colour modal, whose clicks apply at once.
 - Menus are one `Overlay::Menu { actions: Vec<MenuAction> }`, labels from `App::menu_label`; a submenu (move to group) replaces the menu at the same spot. `+ new project` opens a menu (open project / new group).
+- **Reordering** (drag): project, group, workspace and tab rows act on release. A press grabs the row (`App::row_drag`, a `Target`); leaving the row's rect, or releasing outside it, makes it a drag, otherwise the release is the click (activate, collapse), so a cancelled drag changes nothing and the compact menu stays open while dragging. `×` and `+` still act on press. Releasing outside the list, `Esc` or another button cancels; no hover while dragging.
+- Where it lands (`ui::sidebar_drop`, `ui::workspace_drop`) comes from the pointer and the layout without the line, so the line never feeds back: the row under the pointer gives its slot (before it when above the dragged row, after when below); a group with its projects and a workspace with its tabs are one block; a group header takes a project in first (last when collapsed); a gap is the end of the section above; tabs stay in their workspace, workspaces in their project (moving a shell or a worktree elsewhere was left out). The line goes on a neighbouring gap, on the line above or below the visible rows at an edge, else as an inserted one-line `Landing` row; it is indented where a grouped project or a tab would start.
+- Holding a drag on `↑ n more` / `↓ n more` scrolls one item every `AUTO_SCROLL_EVERY` (150 ms); `App::tick` shortens the server's wait meanwhile. Moving only changes `Vec` positions (`project::move_before` keeps the active index on its item), so ids, menus and jobs are unaffected and the session saves the order as is; worktrees found outside cornercase go last.
 
 **Splits (`split.rs`)**
 - A binary tree (`Leaf` / `Split { dir, ratio, first, second }`). Right-click in a pane opens split/close/right-click-passthrough; this works even when the program captured the mouse, since almost no program uses the right button.
@@ -206,6 +209,7 @@ src/error.rs      library error type
 
 - Unit tests sit next to the code in `mod <unit_of_work>` with sentence-like names; tabular cases use `rstest` with named `#[case::...]`.
 - UI: render a `View` into `TestBackend`; `insta` snapshots for layout, cell styles for hover.
+- App tests `click` with a press and a release (rows act on release); drags start with `press`.
 - `term.rs` / `app.rs` tests spawn real `/bin/sh` PTYs (never the user's shell) and wait with `test_util::wait_until`, never sleeps. `/bin/sh` is `bash` on macOS, so tests check its name with `test_util::is_sh`. `TempDir` paths are canonical, because macOS' temp dir is behind a symlink (`/var` → `/private/var`).
 - Helpers: `test_util::TempDir`, `git_repo`, `fake_gh`, `FakeHttp` (canned HTTP), `write_executable` (through a `/bin/sh` child to avoid `ETXTBSY`). Nothing calls real `gh`, Shortcut or Linear. App tests clear `App::env_tokens` and never use the real config.
 - Agents are faked with a script (`FAKE_AGENT`) that asks a trust question and echoes what it reads.

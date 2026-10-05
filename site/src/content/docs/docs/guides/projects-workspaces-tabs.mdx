@@ -6,7 +6,7 @@ description: How cornercase organises your work, and how to open, group, rename,
 import { Aside } from '@astrojs/starlight/components';
 import Screen from '../../../../components/Screen.astro';
 
-cornercase organises your shells in three levels, each in its own column: **projects** (folders) hold **workspaces** (lines of work), and workspaces hold **tabs** (shells, possibly split into [panes](../panes-and-splits/)). Everything is opened, switched, renamed and closed with the mouse.
+cornercase organises your shells in three levels, each in its own column: **projects** (folders) hold **workspaces** (lines of work), and workspaces hold **tabs** (shells, possibly split into [panes](../panes-and-splits/)). Everything is opened, switched, reordered, renamed and closed with the mouse.
 
 <Screen
   name="hover-close"
@@ -17,7 +17,7 @@ cornercase organises your shells in three levels, each in its own column: **proj
 
 ## Projects
 
-A project is a folder. The projects column lists them in the order you opened them, each with its number of workspaces in parentheses. Click one to make it active; the second column then shows its workspaces.
+A project is a folder. The projects column lists them, each with its number of workspaces in parentheses; a new one goes at the end, and you can [drag them](#reorder) into any order. Click one to make it active; the second column then shows its workspaces.
 
 A project is called after its folder (`~` for your home folder) unless you rename it.
 
@@ -57,13 +57,13 @@ When the projects column gets long, put projects in **groups**: work, personal, 
 | To | Do |
 | --- | --- |
 | Create a group | Click **`+ new project`**, then **new group**, and type its name. Its icon and colour open next. |
-| Put a project in a group | Right-click the project, choose **move to group**, then the group. **no group** takes it out again. |
+| Put a project in a group | Right-click the project, choose **move to group**, then the group. **no group** takes it out again. You can also [drag it](#reorder) onto the group's header or between its projects. |
 | Collapse or expand a group | Click its header. A collapsed group shows how many projects it holds, and gets the cyan `▌` when the active project is inside. |
 | Rename a group | Right-click its header, then **rename group**. |
 | Change its icon or colour | Right-click its header, then **icon and colour**. |
 | Delete a group | Right-click its header, then **delete group**. Its projects stay open and lose their group. |
 
-Groups are listed in the order you created them, and there is a single level: a group can't hold another group.
+A new group goes at the end of the list; drag its header to move it. There is a single level: a group can't hold another group.
 
 ### Icon and colour
 
@@ -94,13 +94,13 @@ Click **`+ new workspace`** to start another one. You give it a name and, when t
 
 A workspace is called after its custom name, otherwise its branch, otherwise `default`. When the checkout is on a detached `HEAD`, the short commit hash takes the place of the branch.
 
-Worktrees of the repository that you create outside cornercase, with `git worktree add`, appear as workspaces by themselves.
+Worktrees of the repository that you create outside cornercase, with `git worktree add`, appear as workspaces by themselves, at the end of the list.
 
 When a workspace's branch is behind its upstream, its row ends with the number of commits to pull, such as `↓3`. See [Commits to pull](../worktrees/#commits-to-pull).
 
 ## Tabs
 
-Each workspace lists its tabs under its name. Click **`+ tab`** under a workspace to open a new shell in the workspace's folder.
+Each workspace lists its tabs under its name. Click **`+ tab`** under a workspace to open a new shell in the workspace's folder; the new tab goes at the end.
 
 A tab is named after the program in the foreground of its active pane, so the name follows what you do: `bash` while you are at the prompt, `nvim` while you edit, `claude` while an agent works. Tabs started from an issue in a folder that isn't a repository are named after the issue instead.
 
@@ -167,6 +167,25 @@ Claude Code plans have a five-hour session limit and weekly limits. To see how c
 Each limit shows how much you have used and when it resets. The bar is green, orange when you get close and red at the limit. A weekly limit for one model, when your plan has one, gets its own bar, and extra usage shows below them when it is turned on. Accounts without plan limits, such as an API key, Bedrock or Vertex, say so.
 
 The numbers come from Claude Code itself: opening the dialog runs `claude` in the background, on the machine where cornercase's server runs, and asks it for its usage. That sends no prompt and costs no tokens, and cornercase never reads your login. It takes a few seconds; meanwhile the dialog shows `loading…`, or the last numbers with how old they are. Nothing is asked while the dialog is closed. `done` or `Esc` closes it. If it says `usage unavailable`, see [Usage is unavailable](../../help/troubleshooting/#usage-is-unavailable).
+
+## Reorder
+
+To move a project, group, workspace or tab, press on its row and drag it. A cyan line shows where it will land, and it moves there when you release the button.
+
+<Screen
+  name="reorder"
+  crop={[0, 2, 32, 13]}
+  alt="Dragging dotfiles into the work group: dotfiles keeps a highlighted background at the top of the projects column, and an indented cyan line between shop and api shows where it will land"
+  caption="dotfiles on its way into work, between shop and api."
+/>
+
+- **Groups** move among the groups, with their projects.
+- **Projects** move among the projects, also into and out of groups. Drop one on a group's header to put it first in that group (last, if the group is collapsed), between a group's projects to put it there, or among the projects at the top to take it out of its group. The line is indented when the project lands in a group.
+- **Workspaces** move within their project, and **tabs** within their workspace.
+
+A click still selects the row: the drag only starts once the mouse leaves it. Press `Esc`, or release the button outside the list, to cancel. When the list doesn't fit, holding the drag over `↑ n more` or `↓ n more` scrolls it.
+
+The order is kept in your [saved session](../sessions/#what-is-saved), so it survives a restart.
 
 ## Rename
 
