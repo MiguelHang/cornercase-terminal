@@ -23,6 +23,7 @@ const READ_BUFFER: usize = 16 * 1024;
 const INTERPRETERS: [&str; 6] = ["node", "bun", "deno", "python", "python3", "ruby"];
 const NODE_MAIN_THREAD: &str = "node-MainThread";
 const SCRIPT_EXTENSIONS: [&str; 9] = ["js", "mjs", "cjs", "ts", "mts", "cts", "py", "rb", "sh"];
+const NOT_A_SCRIPT: [&str; 6] = ["-e", "--eval", "-p", "--print", "-c", "-m"];
 
 type Writer = Arc<Mutex<Box<dyn Write + Send>>>;
 
@@ -166,7 +167,12 @@ pub fn program(config: &Config, name: &str, argv: &[String]) -> String {
 }
 
 fn script(argv: &[String]) -> Option<String> {
-    let arg = argv.iter().skip(1).find(|a| !a.starts_with('-'))?;
+    let rest = argv.get(1..)?;
+    let at = rest.iter().position(|a| !a.starts_with('-'))?;
+    if rest[..at].iter().any(|flag| NOT_A_SCRIPT.contains(&flag.as_str())) {
+        return None;
+    }
+    let arg = &rest[at];
     let path = Path::new(arg);
     let named =
         arg.contains('/') || path.extension().and_then(|e| e.to_str()).is_some_and(|e| SCRIPT_EXTENSIONS.contains(&e));
@@ -333,6 +339,8 @@ mod tests {
         #[case::a_python_script("python3", &["python3", "-u", "./tools/sync.py"], "sync")]
         #[case::a_python_module("python3", &["python3", "-m", "http.server"], "python3")]
         #[case::inline_code("ruby", &["ruby", "-e", "puts 'a/b'"], "ruby")]
+        #[case::inline_code_naming_a_file("node", &["node", "-e", "require('./lib/foo.js')"], "node")]
+        #[case::python_code_naming_a_file("python3", &["python3", "-c", "import./tools/sync.py"], "python3")]
         #[case::a_bare_interpreter("node", &["node"], "node")]
         #[case::the_node_thread_name("node-MainThread", &["node"], "node")]
         #[case::another_program("nvim", &["nvim", "src/main.rs"], "nvim")]
