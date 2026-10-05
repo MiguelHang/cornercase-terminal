@@ -2,6 +2,13 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.1.16
+
+- Put your projects, groups, workspaces and tabs in the order you want: press on a row and drag it. A cyan line shows where it will land, and it moves there when you let go. Groups move with their projects, workspaces stay in their project and tabs in their workspace.
+- Drag a project onto a group's header or between its projects to put it in that group, or among the projects at the top to take it out. The `move to group` menu is still there.
+- `Esc`, or letting go outside the list, cancels a drag. A plain click still selects the row, now when you release the button. Holding a drag over `↑ n more` or `↓ n more` scrolls the list.
+- The order is saved with your session, so it is still there after a restart.
+
 ## 0.1.15
 
 - Updated the diff library the changes panel uses to pick which words of a changed line to highlight. Its matching now follows git's more closely, so on some heavily edited lines the highlighted words may differ slightly from before.
