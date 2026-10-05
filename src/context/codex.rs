@@ -16,8 +16,9 @@ pub(super) fn rollout_path(pid: i32, since: SystemTime) -> Option<PathBuf> {
     while at < pids.len() && at < 16 {
         let pid = pids[at];
         at += 1;
-        let home = home(pid)?;
-        paths.extend(rollouts(pid, &home));
+        if let Some(home) = home(pid) {
+            paths.extend(rollouts(pid, &home));
+        }
         for child in process::children(pid) {
             let args = process::args(child);
             let codex = args.iter().take(2).any(|arg| is_codex(arg) || arg.ends_with("/codex/bin/codex.js"));
@@ -455,8 +456,10 @@ mod tests {
         assert_eq!(pane.context().cloned(), Some(shown("gpt-5.4", Some(20))));
         fake.signal("quit", "");
         child.wait().expect("agent exits");
-        pane.update_codex(pid);
-        assert_eq!(pane.context(), None);
+        wait_until("the line clears", || {
+            pane.update_codex(pid);
+            pane.context().is_none()
+        });
     }
 
     #[test]
@@ -477,24 +480,37 @@ mod tests {
             .expect("spawn fake codex");
         let pid = i32::try_from(child.id()).expect("pid");
         wait_until("both rollouts are open", || process::open_files(pid).contains(&other));
-        let mut pane = Pane::default();
-        pane.update_codex(pid);
-        assert_eq!(pane.context(), None);
+        assert_eq!(rollout_path(pid, SystemTime::UNIX_EPOCH), None);
 
         std::fs::write(&other, content.replace("\"cli\"", "{\"subagent\":{}}")).expect("subagent metadata");
-        pane.update_codex(pid);
-        assert_eq!(pane.context().cloned(), Some(shown("gpt-5.4", Some(20))));
+        assert_eq!(rollout_path(pid, SystemTime::UNIX_EPOCH), Some(fake.rollout.clone()));
         fake.signal("quit", "");
         child.wait().expect("fake agent exits");
     }
 
-    fn written_after_the_agent_started(fake: &FakeCodex, pane: &mut Pane, agent: &Sleeper) {
-        let usage = format!("{}\n", CONTEXT.lines().last().expect("usage"));
-        wait_until("the session is written after the agent started", || {
-            fake.append(&usage);
-            pane.update_codex(agent.pid());
-            pane.context().is_some()
+    #[test]
+    fn a_codex_child_whose_home_cannot_be_read_does_not_hide_the_session() {
+        let fake = FakeCodex::new(ID, "gpt-5.4", false);
+        let child = fake.dir.path().join("child/codex");
+        std::fs::create_dir_all(child.parent().expect("child folder")).expect("create child folder");
+        write_executable(&child, "#!/bin/sh\nwhile [ -d \"$1\" ] && [ ! -e \"$1/quit\" ]; do /bin/sleep 0.02; done\n");
+        write_executable(
+            &fake.script,
+            "#!/bin/sh\nexec 3>> \"$1\"\n/usr/bin/env -i \"$3\" \"$2\" &\nwhile [ -d \"$2\" ] && [ ! -e \"$2/quit\" ]; do sleep 0.02; done\n",
+        );
+        let mut agent = std::process::Command::new(&fake.script)
+            .args([&fake.rollout, &fake.home, &child])
+            .env("CODEX_HOME", &fake.home)
+            .spawn()
+            .expect("spawn fake codex");
+        let pid = i32::try_from(agent.id()).expect("pid");
+        wait_until("the child runs without an environment", || {
+            process::children(pid).into_iter().any(|c| process::args(c).iter().any(|a| Path::new(a) == child))
         });
+
+        assert_eq!(rollout_path(pid, SystemTime::UNIX_EPOCH), Some(fake.rollout.clone()));
+        fake.signal("quit", "");
+        agent.wait().expect("fake agent exits");
     }
 
     #[test]
@@ -503,15 +519,22 @@ mod tests {
         let project = TempDir::new();
         let daemon = fake.serve(project.path());
         let agent = fake.agent(project.path());
-        let mut pane = Pane::default();
-        pane.update_codex(agent.pid());
-        assert_eq!(pane.context(), None);
+        let since = SystemTime::now();
+        assert_eq!(rollout_path(agent.pid(), since), None);
 
-        written_after_the_agent_started(&fake, &mut pane, &agent);
+        let usage = format!("{}\n", CONTEXT.lines().last().expect("usage"));
+        let mut pane = Pane::default();
+        wait_until("the session is written after the agent started", || {
+            fake.append(&usage);
+            pane.update_codex(agent.pid());
+            pane.context().is_some()
+        });
         assert_eq!(pane.context().cloned(), Some(shown("gpt-5.4", Some(20))));
         drop(daemon);
-        pane.update_codex(agent.pid());
-        assert_eq!(pane.context(), None);
+        wait_until("the line clears", || {
+            pane.update_codex(agent.pid());
+            pane.context().is_none()
+        });
     }
 
     #[test]
@@ -521,18 +544,17 @@ mod tests {
         let _daemon = fake.serve(project.path());
         let elsewhere = fake.agent(fake.dir.path());
         let agent = fake.agent(project.path());
-        let (mut other, mut pane) = (Pane::default(), Pane::default());
-        other.update_codex(elsewhere.pid());
-        pane.update_codex(agent.pid());
-        written_after_the_agent_started(&fake, &mut pane, &agent);
+        let since = SystemTime::now();
+        let usage = format!("{}\n", CONTEXT.lines().last().expect("usage"));
+        wait_until("the session is written after the agent started", || {
+            fake.append(&usage);
+            rollout_path(agent.pid(), since).is_some()
+        });
 
-        other.update_codex(elsewhere.pid());
-        assert_eq!(other.context(), None);
+        assert_eq!(rollout_path(elsewhere.pid(), since), None);
         let second = fake.agent(project.path());
-        pane.update_codex(agent.pid());
-        assert_eq!(pane.context(), None);
+        assert_eq!(rollout_path(agent.pid(), since), None);
         drop(second);
-        pane.update_codex(agent.pid());
-        assert_eq!(pane.context().cloned(), Some(shown("gpt-5.4", Some(20))));
+        assert_eq!(rollout_path(agent.pid(), since), Some(fake.rollout.clone()));
     }
 }

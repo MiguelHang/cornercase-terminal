@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::SystemTime;
 
 use serde::Deserialize;
@@ -38,20 +39,31 @@ pub struct Pane {
     shown: Option<Context>,
     codex: Option<codex::Rollout>,
     agent: Option<(i32, SystemTime)>,
+    finding: Option<Receiver<Option<PathBuf>>>,
 }
 
 impl Pane {
     pub fn update_codex(&mut self, pid: i32) {
-        let agent = match self.agent {
-            Some((seen, since)) if seen == pid => (pid, since),
-            _ => (pid, SystemTime::now()),
-        };
-        let Some(path) = codex::rollout_path(pid, agent.1) else {
-            *self = Self { agent: Some(agent), ..Self::default() };
-            return;
-        };
-        if self.codex.as_ref().is_none_or(|r| r.path != path) {
-            *self = Self { agent: Some(agent), codex: Some(codex::Rollout::new(path)), ..Self::default() };
+        if self.agent.is_none_or(|(seen, _)| seen != pid) {
+            *self = Self { agent: Some((pid, SystemTime::now())), ..Self::default() };
+        }
+        match self.finding.as_ref().map(Receiver::try_recv) {
+            Some(Ok(found)) => {
+                self.finding = None;
+                if found.as_ref() != self.codex.as_ref().map(|r| &r.path) {
+                    self.codex = found.map(codex::Rollout::new);
+                    self.shown = None;
+                }
+            }
+            Some(Err(TryRecvError::Disconnected)) => self.finding = None,
+            Some(Err(TryRecvError::Empty)) | None => {}
+        }
+        if self.finding.is_none()
+            && let Some((pid, since)) = self.agent
+        {
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || tx.send(codex::rollout_path(pid, since)));
+            self.finding = Some(rx);
         }
         if let Some(rollout) = &mut self.codex {
             rollout.update();
