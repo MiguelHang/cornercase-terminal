@@ -504,8 +504,10 @@ mod tests {
             .spawn()
             .expect("spawn fake codex");
         let pid = i32::try_from(agent.id()).expect("pid");
-        wait_until("the child runs without an environment", || {
-            process::children(pid).into_iter().any(|c| process::args(c).iter().any(|a| Path::new(a) == child))
+        wait_until("the Codex child runs without an environment", || {
+            process::children(pid)
+                .into_iter()
+                .any(|c| process::args(c).get(1).is_some_and(|a| Path::new(a) == child) && home(c).is_none())
         });
 
         assert_eq!(rollout_path(pid, SystemTime::UNIX_EPOCH), Some(fake.rollout.clone()));
