@@ -1,9 +1,10 @@
 ---
 source: src/ui/changes.rs
-expression: "render(&view, None).backend()"
+expression: "render(&filtered(&sample(), \"returns.rs\"), None).backend()"
 ---
 "  uncommitted   commits   all                         ⌕  ×  "
-" 3 files  +7 −3  ▃▃▃▃▃▃▃▃                 vs origin/main ▾  "
+"  ⌕ returns.rs                                           ×  "
+" 2 of 3 files                                        ● live "
 "                                                            "
 " ▌▾ M src/returns.rs                               +5 −2    "
 " ┄┄ impl Address ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ "
@@ -21,7 +22,6 @@ expression: "render(&view, None).backend()"
 "      47 ▎     fn empty_address_is_rejected() {}            "
 "  45  48   }                                                "
 "                                                            "
-"  ▸ M Cargo.lock                          lockfile +1 −1    "
 "  ▸ A tests/returns.rs                            new +1    "
 "                                                            "
 " ────────────────────────────────────────────────────────── "

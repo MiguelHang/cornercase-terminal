@@ -60,6 +60,33 @@ The branch you pick is remembered for that workspace. Picking the default branch
 - Lockfiles (`Cargo.lock`, `package-lock.json`, `pnpm-lock.yaml` and the like) start folded. Binary files and files with thousands of changed lines show their counts but no lines.
 - When a diff is long, every file starts folded. **`fold all`** at the bottom folds or unfolds them all.
 
+## Filter the files
+
+Click **`⌕`** next to the panel's `×` to show only some files. A field opens under the tabs, and what you type goes to it instead of your pane:
+
+<Screen
+  name="changes-filter"
+  crop={[95, 0, 45, 30]}
+  alt="The all tab with !tests.rs in the filter field: 2 of 3 files, src/returns/address.rs and src/returns/mod.rs shown"
+/>
+
+| Type | Shows |
+| --- | --- |
+| `order` | Files whose path contains `order`, such as `src/order.rs` or `src/orders/list.ts`. |
+| `*.test.js` | Only the test files. |
+| `src/api/**` | Only the files under `src/api`. |
+| `*.ts *.rs` | TypeScript and Rust files: every word adds files. |
+| `!*.snap !*.lock` | Every file but snapshots and lockfiles. |
+| `src/ !*.test.js` | What is under `src/`, without its tests. |
+
+- A word without `*` or `?` is a piece of the path. With them it is a pattern, as in `.gitignore`: without `/` it matches a file or folder name anywhere (`*.test.js` finds `src/cart/total.test.js`), with `/` it matches from the root of the workspace, `*` stays within a folder, `**` crosses folders, and a pattern ending in `/` matches only folders.
+- A word that starts with `!` leaves the files it matches out.
+- Case is ignored unless the word has an uppercase letter. A renamed file matches by its old path too.
+- The summary counts what is left, such as `3 of 31 files`.
+- **`Enter`** keeps the filter and gives the keys back to your pane. **`Esc`** or the field's **`×`** closes it and shows every file again.
+
+Clicking in a pane also gives it the keys back and keeps the filter; a click on the field takes them again. The filter stays when you switch tabs or workspaces, and isn't saved with the session.
+
 ### Mark files as viewed
 
 Hover a file row and click the **`✓`** at its right to mark it as viewed: it folds, and the footer counts how many you have viewed. When the file changes again, for example because the agent touched it, the mark goes away and it opens again, so you only review what is new.
