@@ -2,7 +2,30 @@ import type { Cursor } from '../term/canvas';
 import { BOLD, Grid, type Rect, contains } from '../term/grid';
 import { AGENTS, FOLDERS, ISSUES, type Issue, MODES, type Tree } from './data';
 import { BASES, type ChangesMode, type FileDiff, type HunkAction, hasChanges, workspaceDiff } from './changes';
-import { type Border, GROUP_COLOURS, GROUP_ICONS, type Rows, SIDEBARS, type Sidebar, type SidebarRow, type Widths, activeRow, dragged, draggedStacked, layout, mainWidth, sidebarLayout, sidebarRows } from './layout';
+import {
+  type Border,
+  GROUP_COLOURS,
+  GROUP_ICONS,
+  type Landing,
+  type Rows,
+  SIDEBARS,
+  type Sidebar,
+  type SidebarRow,
+  type Widths,
+  type WorkspaceRow,
+  activeRow,
+  dragged,
+  draggedStacked,
+  layout,
+  mainWidth,
+  sidebarDrop,
+  sidebarLayout,
+  sidebarRows,
+  tabLines,
+  workspaceDrop,
+  workspaceLayout,
+  workspaceRows,
+} from './layout';
 import { render as markdown } from './markdown';
 import {
   type Activity,
@@ -27,6 +50,7 @@ import {
   attention,
   defaultConfig,
   projectLabel,
+  tabContext,
   tabLabel,
   tabStatus,
   watchPane,
@@ -73,6 +97,21 @@ type Listener = (event: string, detail?: string) => void;
 
 const SOURCE_NAMES: Record<string, string> = { all: 'All', github: 'GitHub', shortcut: 'Shortcut', linear: 'Linear' };
 const DOUBLE_CLICK = 400;
+const AUTO_SCROLL_EVERY = 150;
+
+export type RowDragView =
+  | { list: 'sidebar'; row: SidebarRow; landing: Landing | null }
+  | { list: 'workspaces'; row: WorkspaceRow; landing: Landing | null };
+
+function moveBefore<T>(items: T[], from: number, before: number, active: number): number {
+  const to = before > from ? before - 1 : before;
+  if (from < 0 || from >= items.length || to >= items.length || to === from) return active;
+  items.splice(to, 0, ...items.splice(from, 1));
+  if (active === from) return to;
+  if (from < active && active <= to) return active - 1;
+  if (to <= active && active < from) return active + 1;
+  return active;
+}
 
 const RENAME: Record<Target['kind'], { label: string; hint: string }> = {
   group: { label: 'rename group', hint: 'leave it empty to keep the current name' },
@@ -113,6 +152,7 @@ export class App {
   focused = false;
   selection: { pane: number; from: Pos; to: Pos; rect: Rect } | null = null;
   dragging: Drag | null = null;
+  rowDrag: { target: Target; row: Rect; moved: boolean; click?: () => void; scrolled: number } | null = null;
   detached = false;
   outerLines: Line[] = [];
   outerInput = '';
@@ -334,6 +374,81 @@ export class App {
       this.projects.map((p) => this.groupIndex(p.group)),
       this.groups.map((g) => g.collapsed),
     );
+  }
+
+  tabLines(): number[][] {
+    return this.project()?.workspaces.map((w) => w.tabs.map((t) => tabLines(!!tabContext(t)))) ?? [];
+  }
+
+  private areas() {
+    return layout(this.cols, this.rows, this.widths, this.nav, this.changesShown(), this.sidebar());
+  }
+
+  rowDragView(): RowDragView | null {
+    const d = this.rowDrag;
+    const h = this.hover;
+    if (!d?.moved || !h) return null;
+    const areas = this.areas();
+    const t = d.target;
+    if (t.kind === 'group' || t.kind === 'project') {
+      const i = t.kind === 'group' ? (this.groupIndex(t.group) ?? -1) : this.projects.findIndex((p) => p.id === t.project);
+      if (i < 0) return null;
+      const row: SidebarRow = t.kind === 'group' ? { kind: 'group', g: i } : { kind: 'project', p: i };
+      return { list: 'sidebar', row, landing: sidebarDrop(areas.list, areas.pitch, this.sidebarRows(), this.projectsScroll, row, h.x, h.y) };
+    }
+    const p = this.project();
+    const w = p && p.id === t.project ? p.workspaces.findIndex((x) => x.id === t.workspace) : -1;
+    if (!p || w < 0) return null;
+    const row: WorkspaceRow = t.kind === 'workspace' ? { kind: 'ws', w } : { kind: 'tab', w, t: p.workspaces[w].tabs.findIndex((x) => x.id === t.tab) };
+    if (row.kind === 'tab' && row.t < 0) return null;
+    const landing = workspaceDrop(areas.workspacesList, areas.pitch, this.tabLines(), this.workspacesScroll, row, h.x, h.y);
+    return { list: 'workspaces', row, landing };
+  }
+
+  private dropRow(target: Target): void {
+    const spot = this.rowDragView()?.landing?.spot;
+    const p = this.project();
+    const w = p?.workspaces.findIndex((x) => 'workspace' in target && x.id === target.workspace) ?? -1;
+    if (!spot) return;
+    if (target.kind === 'group' && spot.kind === 'group') moveBefore(this.groups, this.groupIndex(target.group) ?? -1, spot.before, 0);
+    else if (target.kind === 'project' && spot.kind === 'project') this.moveProject(target.project, spot.group, spot.before);
+    else if (p && target.kind === 'workspace' && spot.kind === 'workspace') p.active = moveBefore(p.workspaces, w, spot.before, p.active);
+    else if (p && w >= 0 && target.kind === 'tab' && spot.kind === 'tab') {
+      const ws = p.workspaces[w];
+      ws.active = moveBefore(ws.tabs, ws.tabs.findIndex((x) => x.id === target.tab), spot.before, ws.active);
+    }
+  }
+
+  private moveProject(id: number, group: number | null, before: number | null): void {
+    const groupId = group === null ? undefined : this.groups[group]?.id;
+    const from = this.projects.findIndex((x) => x.id === id);
+    if ((group !== null && groupId === undefined) || from < 0) return;
+    const beforeId = before === null ? undefined : this.projects[before]?.id;
+    const activeId = this.project()?.id;
+    const [project] = this.projects.splice(from, 1);
+    project.group = groupId;
+    const at = this.projects.findIndex((x) => x.id === beforeId);
+    const last = this.projects.map((x) => x.group).lastIndexOf(groupId);
+    this.projects.splice(at >= 0 ? at : last >= 0 ? last + 1 : this.projects.length, 0, project);
+    this.active = Math.max(0, this.projects.findIndex((x) => x.id === activeId));
+  }
+
+  private autoScroll(): void {
+    const d = this.rowDrag;
+    const h = this.hover;
+    if (!d?.moved || !h || this.now() - d.scrolled < AUTO_SCROLL_EVERY) return;
+    const areas = this.areas();
+    const sidebar = d.target.kind === 'group' || d.target.kind === 'project';
+    const rows = sidebar
+      ? sidebarLayout(areas.list, areas.pitch, this.sidebarRows(), this.projectsScroll)
+      : workspaceLayout(areas.workspacesList, areas.pitch, workspaceRows(this.tabLines()), this.tabLines(), this.workspacesScroll);
+    const delta = rows.edge(h.x, h.y);
+    if (!delta) return;
+    if (sidebar) this.projectsScroll = rows.scrolled(delta);
+    else this.workspacesScroll = rows.scrolled(delta);
+    d.scrolled = this.now();
+    this.dirty();
+    this.after(AUTO_SCROLL_EVERY, () => this.autoScroll());
   }
 
   private follow(): void {
@@ -1733,12 +1848,21 @@ export class App {
   }
 
   cursorAt(x: number, y: number): string {
+    if (this.rowDrag?.moved) return 'grabbing';
     return this.hit(x, y, (r) => !!r.cursor)?.cursor ?? 'default';
   }
 
   pointerMove(x: number, y: number, buttons: number): void {
     const prev = this.hover;
     this.hover = { x, y };
+    if (this.rowDrag) {
+      if (buttons === 1) {
+        this.rowDrag.moved ||= !contains(this.rowDrag.row, x, y);
+        this.autoScroll();
+      } else this.rowDrag = null;
+      this.dirty();
+      return;
+    }
     if (this.dragging && buttons & 1) {
       if (this.dragging.kind === 'border') {
         const { border } = this.dragging;
@@ -1773,6 +1897,11 @@ export class App {
   pointerDown(x: number, y: number, button: number): void {
     this.hover = { x, y };
     if (this.detached) return this.reattach();
+    if (this.rowDrag) {
+      this.rowDrag = null;
+      this.dirty();
+      return;
+    }
     const region = this.hit(x, y, (r) => !!(r.click || r.right || r.drag || r.pane));
     if (!region) return;
     if (region.drag && button === 0) {
@@ -1790,6 +1919,11 @@ export class App {
       this.lastClick = { at: now, border: id };
       this.dragging = region.drag;
       this.dirty();
+      return;
+    }
+    if (region.grab && button === 0) {
+      const click = region.click;
+      this.rowDrag = { target: region.grab, row: region.r, moved: false, click: click && (() => click(x, y)), scrolled: 0 };
       return;
     }
     if (region.pane) {
@@ -1820,6 +1954,14 @@ export class App {
   }
 
   pointerUp(): void {
+    const drag = this.rowDrag;
+    if (drag) {
+      if (drag.moved) this.dropRow(drag.target);
+      this.rowDrag = null;
+      if (!drag.moved) drag.click?.();
+      this.dirty();
+      return;
+    }
     if (this.dragging) {
       this.dragging = null;
       this.dirty();
@@ -1863,6 +2005,11 @@ export class App {
   key(k: Key): boolean {
     if (this.detached) {
       if (k.key === 'Enter') this.reattach();
+      return true;
+    }
+    if (this.rowDrag && k.key === 'Escape') {
+      this.rowDrag = null;
+      this.dirty();
       return true;
     }
     const o = this.overlay;

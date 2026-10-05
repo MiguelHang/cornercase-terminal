@@ -756,6 +756,24 @@ fn a_new_server_reopens_the_saved_projects() {
 }
 
 #[test]
+fn dragging_a_project_reorders_the_sidebar_and_is_saved() {
+    let mut app = Harness::start();
+    let name = format!("ccdr-{}", std::process::id());
+    let dir = temp_dir_named(&name);
+    app.open_project(1, &dir);
+    app.wait_for("project 2 appears", |s| s.contains(&entry(&name)));
+    let (x, first, second) = (list().x + 4, list().y + 1, list().y + 2);
+
+    app.send(format!("\x1b[<0;{x};{second}M\x1b[<32;{x};{first}M\x1b[<0;{x};{first}m").as_bytes());
+
+    let above = |text: &str, a: &str, b: &str| matches!((text.find(a), text.find(b)), (Some(i), Some(j)) if i < j);
+    app.wait_for("the new project is first", |s| above(s, &entry(&name), &first_entry()));
+    let path = |dir: &std::path::Path| format!("\"path\": \"{}\"", dir.display());
+    app.session.wait_for_saved("the order is saved", |saved| above(saved, &path(&dir), &path(&temp())));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn kill_server_says_when_none_is_running() {
     let session = Session::new();
 

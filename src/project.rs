@@ -215,6 +215,23 @@ pub fn shift_active(active: &mut usize, removed: usize) {
     }
 }
 
+pub fn move_before<T>(items: &mut Vec<T>, from: usize, before: usize, active: Option<&mut usize>) {
+    let to = if before > from { before - 1 } else { before };
+    if from >= items.len() || to >= items.len() || to == from {
+        return;
+    }
+    let item = items.remove(from);
+    items.insert(to, item);
+    if let Some(active) = active {
+        *active = match *active {
+            a if a == from => to,
+            a if from < a && a <= to => a - 1,
+            a if to <= a && a < from => a + 1,
+            a => a,
+        };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -230,5 +247,36 @@ mod tests {
         let mut a = active;
         shift_active(&mut a, removed);
         assert_eq!(a, expected);
+    }
+
+    #[rstest]
+    #[case::down(0, 3, "bcad")]
+    #[case::up(3, 1, "adbc")]
+    #[case::to_the_end(1, 4, "acdb")]
+    #[case::to_the_start(2, 0, "cabd")]
+    #[case::before_itself(1, 1, "abcd")]
+    #[case::right_after_itself(1, 2, "abcd")]
+    #[case::past_the_end(1, 9, "abcd")]
+    fn moving_puts_the_item_before_another(#[case] from: usize, #[case] before: usize, #[case] expected: &str) {
+        let mut items: Vec<char> = "abcd".chars().collect();
+        move_before(&mut items, from, before, None);
+        assert_eq!(items.into_iter().collect::<String>(), expected);
+    }
+
+    #[rstest]
+    #[case::the_moved_one(1, 3, 1, 2)]
+    #[case::one_it_passes_down(1, 3, 2, 1)]
+    #[case::one_it_passes_up(3, 1, 2, 3)]
+    #[case::one_it_does_not_pass(0, 2, 3, 3)]
+    fn moving_keeps_the_active_one_active(
+        #[case] from: usize,
+        #[case] before: usize,
+        #[case] active: usize,
+        #[case] expected: usize,
+    ) {
+        let (mut items, mut a) = ((0..4).collect::<Vec<usize>>(), active);
+        let id = items[active];
+        move_before(&mut items, from, before, Some(&mut a));
+        assert_eq!((a, items[a]), (expected, id));
     }
 }

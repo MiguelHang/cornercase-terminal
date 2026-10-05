@@ -265,7 +265,7 @@ impl Server {
             self.app.refresh(Instant::now());
             self.draw();
             self.save();
-            let first = match rx.recv_timeout(TICK) {
+            let first = match rx.recv_timeout(self.app.tick().unwrap_or(TICK)) {
                 Ok(ev) => Some(ev),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => return,

@@ -1,4 +1,4 @@
-import { type Rect, rect } from '../term/grid';
+import { type Rect, contains, rect } from '../term/grid';
 
 export const SIDEBAR_WIDTH = 32;
 export const WORKSPACES_WIDTH = 26;
@@ -29,7 +29,7 @@ const COLOUR_CELL = 4;
 
 export type Nav = 'projects' | 'workspaces' | null;
 
-export type SidebarRow = { kind: 'gap' } | { kind: 'group'; g: number } | { kind: 'project'; p: number };
+export type SidebarRow = { kind: 'gap' } | { kind: 'group'; g: number } | { kind: 'project'; p: number } | { kind: 'landing' };
 
 export function sidebarRows(groups: (number | null)[], collapsed: boolean[]): SidebarRow[] {
   const inGroup = (g: number | null): SidebarRow[] =>
@@ -44,7 +44,27 @@ export function sidebarRows(groups: (number | null)[], collapsed: boolean[]): Si
 }
 
 export const sidebarLayout = (list: Rect, pitch: number, rows: SidebarRow[], scroll: number) =>
-  new Rows(list, rows.map((s) => (s.kind === 'gap' ? GAP : pitch)), pitch, scroll);
+  new Rows(list, rows.map((s) => (s.kind === 'gap' || s.kind === 'landing' ? GAP : pitch)), pitch, scroll);
+
+export type WorkspaceRow = { kind: 'gap' } | { kind: 'ws'; w: number } | { kind: 'tab'; w: number; t: number } | { kind: 'new'; w: number } | { kind: 'landing' };
+
+export function workspaceRows(tabs: number[][]): WorkspaceRow[] {
+  return tabs.flatMap((lines, w) => [
+    ...(w > 0 ? [{ kind: 'gap' } as WorkspaceRow] : []),
+    { kind: 'ws', w } as WorkspaceRow,
+    ...lines.map((_, t) => ({ kind: 'tab', w, t }) as WorkspaceRow),
+    { kind: 'new', w } as WorkspaceRow,
+  ]);
+}
+
+export function workspaceLayout(list: Rect, pitch: number, rows: WorkspaceRow[], tabs: number[][], scroll: number): Rows {
+  const height = (r: WorkspaceRow): number => {
+    if (r.kind === 'gap' || r.kind === 'landing') return GAP;
+    if (r.kind === 'tab') return Math.max(pitch, tabs[r.w][r.t]);
+    return pitch;
+  };
+  return new Rows(list, rows.map(height), pitch, scroll);
+}
 
 export function activeRow(rows: SidebarRow[], active: number, group: number | null): number {
   const own = rows.findIndex((r) => r.kind === 'project' && r.p === active);
@@ -386,6 +406,138 @@ export class Rows {
   moreBelow(): Rect {
     return intersect(rect(this.list.x, this.list.y + this.room(), this.list.w, 1), this.list);
   }
+
+  at(x: number, y: number): number | null {
+    for (let i = this.first(); i < this.end(); i++) if (contains(this.item(i), x, y)) return i;
+    return null;
+  }
+
+  edge(x: number, y: number): number {
+    const [above, below] = this.hidden();
+    const top = this.list.y + this.room();
+    if (above && contains(moreAbove(this.list), x, y)) return -1;
+    if (below && contains(rect(this.list.x, top, this.list.w, bottom(this.list) - top), x, y)) return 1;
+    return 0;
+  }
+
+  boundary(x: number, y: number, onRow: (i: number) => number | null): number | null {
+    if (contains(moreAbove(this.list), x, y)) return this.first();
+    if (!contains(this.list, x, y)) return null;
+    const i = this.at(x, y);
+    return i === null ? this.end() : onRow(i);
+  }
+}
+
+export type Spot =
+  | { kind: 'group'; before: number }
+  | { kind: 'project'; group: number | null; before: number | null }
+  | { kind: 'workspace'; before: number }
+  | { kind: 'tab'; before: number };
+
+export interface Landing {
+  at: number;
+  spot: Spot;
+}
+
+export const landingIndent = (spot: Spot): number => ((spot.kind === 'project' && spot.group !== null) || spot.kind === 'tab' ? 4 : 2);
+
+function groupOf(rows: SidebarRow[], i: number): number | null {
+  for (let j = i; j >= 0; j--) {
+    const r = rows[j];
+    if (r.kind === 'group') return r.g;
+  }
+  return null;
+}
+
+function projectSpot(rows: SidebarRow[], dragged: number, at: number): Spot {
+  const below = at === dragged ? at + 1 : at;
+  const next = rows[below];
+  if (next?.kind === 'project') return { kind: 'project', group: groupOf(rows, below), before: next.p };
+  const k = at - 1 === dragged ? at - 2 : at - 1;
+  const group = k < 0 ? null : rows[k].kind === 'gap' ? groupOf(rows, k - 1) : groupOf(rows, k);
+  return { kind: 'project', group, before: null };
+}
+
+function blockDrop<R>(rows: R[], layout: Rows, x: number, y: number, dragged: number, gap: (r: R) => boolean, header: (r: R) => number | null): [number, number] | null {
+  const len = rows.length;
+  const block = (i: number): number | null => {
+    for (let j = i; j >= 0 && !gap(rows[j]); j--) if (header(rows[j]) !== null) return j;
+    return null;
+  };
+  const after = (from: number, want: (r: R) => boolean): number => {
+    for (let j = from; j < len; j++) if (want(rows[j])) return j;
+    return len;
+  };
+  const at = layout.boundary(x, y, (i) => {
+    const h = block(i);
+    if (h === dragged) return null;
+    if (h === null) return after(i, (r) => header(r) !== null);
+    return h < dragged ? h : after(h, gap);
+  });
+  if (at === null) return null;
+  const next = rows.slice(at).find((r) => header(r) !== null);
+  return [at, next === undefined ? rows.filter((r) => header(r) !== null).length : (header(next) ?? 0)];
+}
+
+export function sidebarDrop(list: Rect, pitch: number, rows: SidebarRow[], scroll: number, dragged: SidebarRow, x: number, y: number): Landing | null {
+  const layout = sidebarLayout(list, pitch, rows, scroll);
+  const d = rows.findIndex((r) => sameRow(r, dragged));
+  if (d < 0) return null;
+  if (dragged.kind === 'group') {
+    const found = blockDrop(rows, layout, x, y, d, (r) => r.kind === 'gap', (r) => (r.kind === 'group' ? r.g : null));
+    return found && { at: found[0], spot: { kind: 'group', before: found[1] } };
+  }
+  const at = layout.boundary(x, y, (i) => {
+    const r = rows[i];
+    if (i === d) return null;
+    if (r.kind === 'project') return i < d ? i : i + 1;
+    return r.kind === 'group' ? i + 1 : i;
+  });
+  return at === null ? null : { at, spot: projectSpot(rows, d, at) };
+}
+
+export function workspaceDrop(list: Rect, pitch: number, tabs: number[][], scroll: number, dragged: WorkspaceRow, x: number, y: number): Landing | null {
+  const rows = workspaceRows(tabs);
+  const layout = workspaceLayout(list, pitch, rows, tabs, scroll);
+  if (dragged.kind === 'ws') {
+    const d = rows.findIndex((r) => sameRow(r, dragged));
+    if (d < 0) return null;
+    const found = blockDrop(rows, layout, x, y, d, (r) => r.kind === 'gap', (r) => (r.kind === 'ws' ? r.w : null));
+    return found && { at: found[0], spot: { kind: 'workspace', before: found[1] } };
+  }
+  if (dragged.kind !== 'tab') return null;
+  const header = rows.findIndex((r) => r.kind === 'ws' && r.w === dragged.w);
+  const newTab = rows.findIndex((r) => r.kind === 'new' && r.w === dragged.w);
+  const at = layout.boundary(x, y, (i) => {
+    const r = rows[i];
+    if (r.kind === 'tab' && r.w === dragged.w) return r.t === dragged.t ? null : r.t < dragged.t ? i : i + 1;
+    return i <= header ? header + 1 : newTab;
+  });
+  if (at === null) return null;
+  const clamped = Math.max(header + 1, Math.min(newTab, at));
+  return { at: clamped, spot: { kind: 'tab', before: clamped - header - 1 } };
+}
+
+export const sameRow = <R extends { kind: string }>(a: R, b: R): boolean => JSON.stringify(a) === JSON.stringify(b);
+
+export function landed<R extends { kind: string }>(rows: R[], layout: Rows, landing: Landing | null, mark: R): [R[], Rect] {
+  const first = layout.first();
+  const end = layout.end();
+  const at = landing?.at;
+  if (at === undefined || at < first || at > end) return [rows, EMPTY];
+  const drawn = [...rows];
+  const gap = [at - 1 >= first ? at - 1 : -1, at < end ? at : -1].find((g) => g >= 0 && rows[g].kind === 'gap');
+  if (gap !== undefined) {
+    drawn[gap] = mark;
+    return [drawn, EMPTY];
+  }
+  if (at === first) return [drawn, moreAbove(layout.list)];
+  if (at === end) {
+    const last = layout.item(end - 1);
+    return [drawn, rect(last.x, bottom(last), last.w, 1)];
+  }
+  drawn.splice(at, 0, mark);
+  return [drawn, EMPTY];
 }
 
 export const moreAbove = (list: Rect): Rect => (list.y < GAP ? EMPTY : rect(list.x, list.y - GAP, list.w, 1));

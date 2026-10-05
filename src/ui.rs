@@ -602,6 +602,37 @@ impl Rows {
     pub fn more_below(&self) -> Rect {
         Rect::new(self.list.x, self.list.y.saturating_add(self.room()), self.list.width, 1).intersection(self.list)
     }
+
+    pub fn edge(&self, pos: Position) -> Option<isize> {
+        let (above, below) = self.hidden();
+        let y = self.list.y.saturating_add(self.room());
+        let bottom = Rect { y, height: self.list.bottom().saturating_sub(y), ..self.list };
+        if !above.is_empty() && more_above(self.list).contains(pos) {
+            Some(-1)
+        } else if !below.is_empty() && bottom.contains(pos) {
+            Some(1)
+        } else {
+            None
+        }
+    }
+
+    fn zone(&self, pos: Position) -> Option<Zone> {
+        if more_above(self.list).contains(pos) {
+            return Some(Zone::Above);
+        }
+        if !self.list.contains(pos) {
+            return None;
+        }
+        Some(self.at(pos).map_or(Zone::Below, Zone::Row))
+    }
+
+    fn boundary(&self, zone: Zone, on_row: impl Fn(usize) -> Option<usize>) -> Option<usize> {
+        match zone {
+            Zone::Above => Some(self.first()),
+            Zone::Row(i) => on_row(i),
+            Zone::Below => Some(self.end()),
+        }
+    }
 }
 
 pub fn more_above(list: Rect) -> Rect {
@@ -613,6 +644,7 @@ pub enum SidebarRow {
     Gap,
     Group(usize),
     Project(usize),
+    Landing,
 }
 
 pub fn sidebar_rows(groups: &[Option<usize>], collapsed: &[bool]) -> Vec<SidebarRow> {
@@ -642,8 +674,8 @@ fn row_rect<R: PartialEq>(layout: &Rows, rows: &[R], row: &R) -> Rect {
 }
 
 pub fn project_rows(list: Rect, pitch: u16, rows: &[SidebarRow], scroll: usize) -> Rows {
-    let heights = rows.iter().map(|r| if *r == SidebarRow::Gap { GAP } else { pitch }).collect();
-    Rows { list, heights, button: pitch, scroll }
+    let heights = rows.iter().map(|r| if matches!(r, SidebarRow::Gap | SidebarRow::Landing) { GAP } else { pitch });
+    Rows { list, heights: heights.collect(), button: pitch, scroll }
 }
 
 pub fn entry_row(list: Rect, pitch: u16, rows: &[SidebarRow], scroll: usize, row: SidebarRow) -> Rect {
@@ -676,7 +708,7 @@ pub fn sidebar_hit(list: Rect, pitch: u16, rows: &[SidebarRow], scroll: usize, p
     }
     let i = layout.at(pos)?;
     match rows[i] {
-        SidebarRow::Gap => None,
+        SidebarRow::Gap | SidebarRow::Landing => None,
         SidebarRow::Group(g) => Some(SidebarHit::Group(g)),
         SidebarRow::Project(p) if row_close_button(layout.item(i), pitch).contains(pos) => Some(SidebarHit::Close(p)),
         SidebarRow::Project(p) => Some(SidebarHit::Select(p)),
@@ -689,6 +721,7 @@ pub enum WorkspaceRow {
     Workspace(usize),
     Tab(usize, usize),
     NewTab(usize),
+    Landing,
 }
 
 pub fn tab_lines(context: bool) -> u16 {
@@ -709,16 +742,20 @@ pub fn workspace_rows(tabs: &[Vec<u16>]) -> Vec<WorkspaceRow> {
         .collect()
 }
 
-pub fn workspace_layout(list: Rect, pitch: u16, tabs: &[Vec<u16>], scroll: usize) -> Rows {
-    let heights = workspace_rows(tabs)
-        .into_iter()
-        .map(|row| match row {
-            WorkspaceRow::Gap => GAP,
+fn workspace_rows_layout(list: Rect, pitch: u16, rows: &[WorkspaceRow], tabs: &[Vec<u16>], scroll: usize) -> Rows {
+    let heights = rows
+        .iter()
+        .map(|row| match *row {
+            WorkspaceRow::Gap | WorkspaceRow::Landing => GAP,
             WorkspaceRow::Tab(w, t) => pitch.max(tabs[w][t]),
             WorkspaceRow::Workspace(_) | WorkspaceRow::NewTab(_) => pitch,
         })
         .collect();
     Rows { list, heights, button: pitch, scroll }
+}
+
+pub fn workspace_layout(list: Rect, pitch: u16, tabs: &[Vec<u16>], scroll: usize) -> Rows {
+    workspace_rows_layout(list, pitch, &workspace_rows(tabs), tabs, scroll)
 }
 
 pub fn new_workspace_button(list: Rect, pitch: u16, tabs: &[Vec<u16>]) -> Rect {
@@ -755,13 +792,187 @@ pub fn workspace_hit(list: Rect, pitch: u16, tabs: &[Vec<u16>], scroll: usize, p
     let i = layout.at(pos)?;
     let on_close = row_close_button(layout.item(i), pitch).contains(pos);
     Some(match workspace_rows(tabs)[i] {
-        WorkspaceRow::Gap => return None,
+        WorkspaceRow::Gap | WorkspaceRow::Landing => return None,
         WorkspaceRow::Workspace(w) if on_close => WorkspaceHit::CloseWorkspace(w),
         WorkspaceRow::Workspace(w) => WorkspaceHit::Workspace(w),
         WorkspaceRow::Tab(w, t) if on_close => WorkspaceHit::CloseTab(w, t),
         WorkspaceRow::Tab(w, t) => WorkspaceHit::Tab(w, t),
         WorkspaceRow::NewTab(w) => WorkspaceHit::NewTab(w),
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spot {
+    Group(usize),
+    Project { group: Option<usize>, before: Option<usize> },
+    Workspace(usize),
+    Tab(usize),
+}
+
+impl Spot {
+    fn indent(self) -> u16 {
+        match self {
+            Self::Project { group: Some(_), .. } | Self::Tab(_) => 4,
+            Self::Group(_) | Self::Project { group: None, .. } | Self::Workspace(_) => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Landing {
+    pub at: usize,
+    pub spot: Spot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Drag {
+    Sidebar(SidebarRow, Option<Landing>),
+    Workspaces(WorkspaceRow, Option<Landing>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Zone {
+    Above,
+    Row(usize),
+    Below,
+}
+
+fn group_of(rows: &[SidebarRow], i: usize) -> Option<usize> {
+    rows[..=i].iter().rev().find_map(|r| match r {
+        SidebarRow::Group(g) => Some(*g),
+        _ => None,
+    })
+}
+
+fn project_spot(rows: &[SidebarRow], dragged: usize, at: usize) -> Spot {
+    if let Some(j) = (at..rows.len()).find(|&j| j != dragged)
+        && let SidebarRow::Project(q) = rows[j]
+    {
+        return Spot::Project { group: group_of(rows, j), before: Some(q) };
+    }
+    let group = match (0..at).rev().find(|&k| k != dragged) {
+        Some(k) if rows[k] == SidebarRow::Gap => group_of(rows, k - 1),
+        Some(k) => group_of(rows, k),
+        None => None,
+    };
+    Spot::Project { group, before: None }
+}
+
+fn project_drop(rows: &[SidebarRow], layout: &Rows, zone: Zone, dragged: usize) -> Option<Landing> {
+    let at = layout.boundary(zone, |i| match rows[i] {
+        _ if i == dragged => None,
+        SidebarRow::Project(_) if i < dragged => Some(i),
+        SidebarRow::Project(_) | SidebarRow::Group(_) => Some(i + 1),
+        SidebarRow::Gap | SidebarRow::Landing => Some(i),
+    })?;
+    Some(Landing { at, spot: project_spot(rows, dragged, at) })
+}
+
+fn block_drop<R: Copy + PartialEq>(
+    rows: &[R],
+    layout: &Rows,
+    zone: Zone,
+    dragged: R,
+    gap: R,
+    header: impl Fn(R) -> Option<usize>,
+) -> Option<(usize, usize)> {
+    let d = rows.iter().position(|r| *r == dragged)?;
+    let len = rows.len();
+    let is_header = |j: usize| header(rows[j]).is_some();
+    let block = |i: usize| (0..=i).rev().take_while(|&j| rows[j] != gap).find(|&j| is_header(j));
+    let at = layout.boundary(zone, |i| match block(i) {
+        Some(h) if h == d => None,
+        Some(h) if h < d => Some(h),
+        Some(h) => Some((h..len).find(|&j| rows[j] == gap).unwrap_or(len)),
+        None => Some((i..len).find(|&j| is_header(j)).unwrap_or(len)),
+    })?;
+    let count = rows.iter().filter(|r| header(**r).is_some()).count();
+    Some((at, rows[at..].iter().find_map(|r| header(*r)).unwrap_or(count)))
+}
+
+fn tab_drop(rows: &[WorkspaceRow], layout: &Rows, zone: Zone, w: usize, t: usize) -> Option<Landing> {
+    let header = rows.iter().position(|r| *r == WorkspaceRow::Workspace(w))?;
+    let new_tab = rows.iter().position(|r| *r == WorkspaceRow::NewTab(w))?;
+    let at = layout.boundary(zone, |i| match rows[i] {
+        WorkspaceRow::Tab(v, u) if v == w && u == t => None,
+        WorkspaceRow::Tab(v, u) if v == w && u < t => Some(i),
+        WorkspaceRow::Tab(v, _) if v == w => Some(i + 1),
+        _ if i <= header => Some(header + 1),
+        _ => Some(new_tab),
+    })?;
+    let at = at.clamp(header + 1, new_tab);
+    Some(Landing { at, spot: Spot::Tab(at - header - 1) })
+}
+
+pub fn sidebar_drop(
+    list: Rect,
+    pitch: u16,
+    rows: &[SidebarRow],
+    scroll: usize,
+    dragged: SidebarRow,
+    pos: Position,
+) -> Option<Landing> {
+    let layout = project_rows(list, pitch, rows, scroll);
+    let zone = layout.zone(pos)?;
+    match dragged {
+        SidebarRow::Project(_) => project_drop(rows, &layout, zone, rows.iter().position(|r| *r == dragged)?),
+        SidebarRow::Group(_) => {
+            let header = |r| if let SidebarRow::Group(g) = r { Some(g) } else { None };
+            let (at, g) = block_drop(rows, &layout, zone, dragged, SidebarRow::Gap, header)?;
+            Some(Landing { at, spot: Spot::Group(g) })
+        }
+        SidebarRow::Gap | SidebarRow::Landing => None,
+    }
+}
+
+pub fn workspace_drop(
+    list: Rect,
+    pitch: u16,
+    tabs: &[Vec<u16>],
+    scroll: usize,
+    dragged: WorkspaceRow,
+    pos: Position,
+) -> Option<Landing> {
+    let layout = workspace_layout(list, pitch, tabs, scroll);
+    let zone = layout.zone(pos)?;
+    let rows = workspace_rows(tabs);
+    match dragged {
+        WorkspaceRow::Workspace(_) => {
+            let header = |r| if let WorkspaceRow::Workspace(w) = r { Some(w) } else { None };
+            let (at, w) = block_drop(&rows, &layout, zone, dragged, WorkspaceRow::Gap, header)?;
+            Some(Landing { at, spot: Spot::Workspace(w) })
+        }
+        WorkspaceRow::Tab(w, t) => tab_drop(&rows, &layout, zone, w, t),
+        WorkspaceRow::Gap | WorkspaceRow::NewTab(_) | WorkspaceRow::Landing => None,
+    }
+}
+
+fn landed<R: Copy + PartialEq>(
+    rows: Vec<R>,
+    layout: &Rows,
+    landing: Option<Landing>,
+    gap: R,
+    mark: R,
+) -> (Vec<R>, Rect) {
+    let (first, end) = (layout.first(), layout.end());
+    let Some(at) = landing.map(|l| l.at).filter(|at| (first..=end).contains(at)) else {
+        return (rows, Rect::default());
+    };
+    let mut drawn = rows;
+    let beside = [at.checked_sub(1).filter(|&g| g >= first), Some(at).filter(|&g| g < end)];
+    if let Some(g) = beside.into_iter().flatten().find(|&g| drawn[g] == gap) {
+        drawn[g] = mark;
+        return (drawn, Rect::default());
+    }
+    if at == first {
+        return (drawn, more_above(layout.list));
+    }
+    if at == end {
+        let last = layout.item(end - 1);
+        return (drawn, Rect { y: last.bottom(), height: 1, ..last });
+    }
+    drawn.insert(at, mark);
+    (drawn, Rect::default())
 }
 
 pub fn menu_area(area: Rect, at: Position, items: &[impl AsRef<str>]) -> Rect {
@@ -1564,6 +1775,7 @@ pub struct View<'a> {
     pub changes: Option<changes::View>,
     pub changes_button: Option<ChangesButton>,
     pub attention: Option<Status>,
+    pub drag: Option<Drag>,
 }
 
 impl View<'_> {
@@ -1593,6 +1805,28 @@ impl View<'_> {
 
     fn row_hovered(&self, r: Rect) -> bool {
         self.resizing.is_none() && self.tab.as_ref().is_none_or(|t| t.dragging.is_none()) && sidebar_hovered(self, r)
+    }
+
+    fn sidebar_landing(&self) -> Option<Landing> {
+        match self.drag {
+            Some(Drag::Sidebar(_, landing)) => landing,
+            _ => None,
+        }
+    }
+
+    fn workspaces_landing(&self) -> Option<Landing> {
+        match self.drag {
+            Some(Drag::Workspaces(_, landing)) => landing,
+            _ => None,
+        }
+    }
+
+    fn dragging_entry(&self, row: SidebarRow) -> bool {
+        matches!(self.drag, Some(Drag::Sidebar(dragged, _)) if dragged == row)
+    }
+
+    fn dragging_workspace_row(&self, row: WorkspaceRow) -> bool {
+        matches!(self.drag, Some(Drag::Workspaces(dragged, _)) if dragged == row)
     }
 
     fn search(&self) -> Option<&Search> {
@@ -1644,7 +1878,7 @@ pub fn draw(f: &mut Frame, view: &View) {
         let border = areas.changes_border;
         draw_column_border(f, border);
         draw_border(f, view, border, Border::Changes);
-        changes::draw(f, areas.changes, panel, view.hover.filter(|_| view.overlay.is_none()));
+        changes::draw(f, areas.changes, panel, view.hover.filter(|_| view.overlay.is_none() && view.drag.is_none()));
     }
     match &view.overlay {
         Some(Overlay::Menu { at, items }) => draw_menu(f, view, *at, items),
@@ -1789,7 +2023,7 @@ fn hovered(view: &View, r: Rect) -> bool {
 }
 
 fn sidebar_hovered(view: &View, r: Rect) -> bool {
-    view.overlay.is_none() && hovered(view, r)
+    view.overlay.is_none() && view.drag.is_none() && hovered(view, r)
 }
 
 fn overlay_block(title: &str) -> Block<'_> {
@@ -2313,15 +2547,30 @@ fn draw_issue_rows(f: &mut Frame, view: &View, list: Rect, items: &[IssueRow], s
 fn draw_sidebar(f: &mut Frame, view: &View, areas: &Areas) {
     draw_title(f, areas.title, "projects");
     let sidebar = view.sidebar_rows();
-    let rows = project_rows(areas.list, areas.pitch, &sidebar, view.projects_scroll);
+    let base = project_rows(areas.list, areas.pitch, &sidebar, view.projects_scroll);
+    let landing = view.sidebar_landing();
+    let (sidebar, line) = landed(sidebar, &base, landing, SidebarRow::Gap, SidebarRow::Landing);
+    let rows = project_rows(areas.list, areas.pitch, &sidebar, base.first());
     draw_entries(f, view, &rows, &sidebar, areas.pitch);
     let (above, below) = rows.hidden();
     let count = |range: Range<usize>| {
-        (!range.is_empty()).then(|| sidebar[range].iter().filter(|r| **r != SidebarRow::Gap).count())
+        (!range.is_empty()).then(|| {
+            sidebar[range].iter().filter(|r| matches!(r, SidebarRow::Group(_) | SidebarRow::Project(_))).count()
+        })
     };
     draw_more(f, [more_above(areas.list), rows.more_below()], count(above), count(below));
     let r = rows.button();
     draw_button(f, r, " ", "+ new project", button_style(view, r, Style::default().fg(Color::Cyan), Color::Cyan));
+    draw_landing(f, line, landing);
+}
+
+fn draw_landing(f: &mut Frame, r: Rect, landing: Option<Landing>) {
+    let Some(landing) = landing else { return };
+    let row = Rect { height: r.height.min(1), ..r };
+    let width = usize::from(row.width.saturating_sub(landing.spot.indent() + 1));
+    let line =
+        Line::from(vec![Span::raw(" ".repeat(usize::from(landing.spot.indent()))), Span::raw("─".repeat(width))]);
+    f.render_widget(Paragraph::new(line.style(Style::default().fg(Color::Cyan))), row);
 }
 
 fn draw_footer(f: &mut Frame, view: &View, areas: &Areas) {
@@ -2550,8 +2799,10 @@ fn draw_workspaces(f: &mut Frame, view: &View, areas: &Areas) {
     let tabs = view.tab_lines();
     let dim = Style::default().fg(Color::DarkGray);
     let accent = Style::default().fg(Color::Cyan);
-    let rows = workspace_rows(&tabs);
-    let layout = workspace_layout(list, areas.pitch, &tabs, view.workspaces_scroll);
+    let base = workspace_layout(list, areas.pitch, &tabs, view.workspaces_scroll);
+    let landing = view.workspaces_landing();
+    let (rows, landing_line) = landed(workspace_rows(&tabs), &base, landing, WorkspaceRow::Gap, WorkspaceRow::Landing);
+    let layout = workspace_rows_layout(list, areas.pitch, &rows, &tabs, base.first());
     for (i, &row) in rows.iter().enumerate() {
         let r = layout.item(i);
         if r.is_empty() {
@@ -2560,6 +2811,7 @@ fn draw_workspaces(f: &mut Frame, view: &View, areas: &Areas) {
         let close_width = usize::from(row_close_button(r, areas.pitch).width);
         match row {
             WorkspaceRow::Gap => {}
+            WorkspaceRow::Landing => draw_landing(f, r, landing),
             WorkspaceRow::Workspace(w) => {
                 let style = if w == view.active_workspace {
                     Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
@@ -2576,7 +2828,7 @@ fn draw_workspaces(f: &mut Frame, view: &View, areas: &Areas) {
                 let name = truncate_right(&entry.name, room.saturating_sub(marks.reserved()));
                 let mut line = vec![Span::styled(format!("  {name}"), style)];
                 marks.push_onto(&mut line, name.chars().count(), room);
-                let bg = view.row_background(r, false);
+                let bg = view.row_background(r, view.dragging_workspace_row(row));
                 draw_band(f, r, Line::from(line), bg);
                 draw_row_close(f, view, r, areas.pitch, bg);
             }
@@ -2587,7 +2839,7 @@ fn draw_workspaces(f: &mut Frame, view: &View, areas: &Areas) {
                 } else {
                     ("  ", Style::default().fg(Color::Gray))
                 };
-                let bg = view.row_background(r, active);
+                let bg = view.row_background(r, active || view.dragging_workspace_row(row));
                 let tab = &view.workspaces[w].tabs[t];
                 let icon = tab.status.map(status_icon);
                 let icon_width = if icon.is_some() { 2 } else { 0 };
@@ -2617,6 +2869,7 @@ fn draw_workspaces(f: &mut Frame, view: &View, areas: &Areas) {
 
     let r = layout.button();
     draw_button(f, r, " ", "+ new workspace", button_style(view, r, accent, Color::Cyan));
+    draw_landing(f, landing_line, landing);
 }
 
 fn draw_issues_row(f: &mut Frame, view: &View, areas: &Areas) {
@@ -2779,6 +3032,7 @@ fn draw_entries(f: &mut Frame, view: &View, rows: &Rows, sidebar: &[SidebarRow],
         }
         match row {
             SidebarRow::Gap => {}
+            SidebarRow::Landing => draw_landing(f, r, view.sidebar_landing()),
             SidebarRow::Group(g) => draw_group(f, view, g, r, pitch, active == Some(i)),
             SidebarRow::Project(p) => draw_project(f, view, p, r, pitch),
         }
@@ -2810,7 +3064,7 @@ fn draw_group(f: &mut Frame, view: &View, g: usize, r: Rect, pitch: u16, holds_a
         Span::styled(count, Style::default().fg(Color::DarkGray)),
     ];
     marks.push_onto(&mut line, shown, room);
-    draw_band(f, r, Line::from(line), view.row_background(r, false));
+    draw_band(f, r, Line::from(line), view.row_background(r, view.dragging_entry(SidebarRow::Group(g))));
 }
 
 fn draw_project(f: &mut Frame, view: &View, p: usize, r: Rect, pitch: u16) {
@@ -2820,7 +3074,7 @@ fn draw_project(f: &mut Frame, view: &View, p: usize, r: Rect, pitch: u16) {
     } else {
         ("  ", Style::default().fg(Color::Gray))
     };
-    let bg = view.row_background(r, p == view.active);
+    let bg = view.row_background(r, p == view.active || view.dragging_entry(SidebarRow::Project(p)));
     let indent = if entry.group.is_some() { GROUP_INDENT } else { "" };
     let count = format!(" ({})", entry.workspaces);
     let reserved = NAME_RESERVED_COLS
@@ -2918,6 +3172,7 @@ mod tests {
             changes: None,
             changes_button: None,
             attention: None,
+            drag: None,
         }
     }
 
@@ -3784,6 +4039,18 @@ mod tests {
         #[test]
         fn renders_groups_in_the_projects_menu() {
             insta::assert_snapshot!(render_small(&with_groups(in_a_project(Some(Nav::Projects)))).backend());
+        }
+
+        #[test]
+        fn renders_the_landing_line_between_tabs() {
+            let v = in_a_project(Some(Nav::Workspaces));
+            let (list, tabs) = (small().workspaces_list, v.tab_lines());
+            let nvim = workspace_row(list, COMPACT_PITCH, &tabs, 0, WorkspaceRow::Tab(0, 1));
+            let dragged = WorkspaceRow::Tab(0, 0);
+            let landing = workspace_drop(list, COMPACT_PITCH, &tabs, 0, dragged, nvim.as_position());
+            insta::assert_snapshot!(
+                render_small(&View { drag: Some(Drag::Workspaces(dragged, landing)), ..v }).backend()
+            );
         }
 
         #[test]
@@ -5514,6 +5781,255 @@ mod tests {
             let tab = TabView { dragging: Some(Vec::new()), ..single(screen(b"")) };
             let v = View { tab: Some(tab), ..v };
             assert_eq!(backgrounds(&v, AREA, r), vec![Color::Reset]);
+        }
+
+        #[test]
+        fn no_row_is_lit_and_no_close_button_shows_while_dragging_a_row() {
+            let (v, r) = hovering(sample(false), AREA, Row::Tab(1));
+            let v = View { drag: Some(Drag::Sidebar(SidebarRow::Project(1), None)), ..v };
+            let t = render(&v);
+            assert_eq!(
+                (backgrounds(&v, AREA, r), t.backend().buffer()[(r.right() - 2, r.y)].symbol()),
+                (vec![Color::Reset], " ")
+            );
+        }
+
+        #[rstest]
+        fn the_dragged_row_keeps_the_surface_background(
+            #[values(Row::Project(1), Row::Group, Row::Workspace, Row::Tab(1))] row: Row,
+            #[values(false, true)] compact: bool,
+        ) {
+            let (size, nav) = if compact { (COMPACT, Some(row.nav())) } else { (AREA, None) };
+            let v = View { nav, ..sample(false) };
+            let drag = match row {
+                Row::Project(p) => Drag::Sidebar(SidebarRow::Project(p), None),
+                Row::Group => Drag::Sidebar(SidebarRow::Group(0), None),
+                Row::Workspace => Drag::Workspaces(WorkspaceRow::Workspace(0), None),
+                Row::Tab(t) => Drag::Workspaces(WorkspaceRow::Tab(0, t), None),
+            };
+            let v = View { drag: Some(drag), ..v };
+            assert_eq!(backgrounds(&v, size, rect(&v, size, row)), vec![DARK_SURFACE]);
+        }
+    }
+
+    mod reorder {
+        use super::*;
+
+        fn grouped() -> View<'static> {
+            let mut v = View { active: 1, has_project: true, ..view(&["tmp", "api", "web", "cornercase"]) };
+            v.groups = vec![
+                GroupEntry { name: "work".into(), icon: '●', colour: 4, collapsed: false },
+                GroupEntry { name: "oss".into(), icon: '★', colour: 99, collapsed: false },
+            ];
+            for (p, g) in [(1, 0), (2, 0), (3, 1)] {
+                v.projects[p].group = Some(g);
+            }
+            v
+        }
+
+        fn sidebar_at(dragged: SidebarRow, y: u16) -> Option<Landing> {
+            let rows = grouped().sidebar_rows();
+            sidebar_drop(list(), 1, &rows, 0, dragged, Position::new(list().x + 3, y))
+        }
+
+        fn row(i: u16) -> u16 {
+            list().y + i
+        }
+
+        fn spot(group: Option<usize>, before: Option<usize>) -> Spot {
+            Spot::Project { group, before }
+        }
+
+        #[test]
+        fn the_rows_are_a_loose_project_then_two_groups() {
+            assert_eq!(
+                grouped().sidebar_rows(),
+                [
+                    SidebarRow::Project(0),
+                    SidebarRow::Gap,
+                    SidebarRow::Group(0),
+                    SidebarRow::Project(1),
+                    SidebarRow::Project(2),
+                    SidebarRow::Gap,
+                    SidebarRow::Group(1),
+                    SidebarRow::Project(3),
+                ]
+            );
+        }
+
+        #[rstest]
+        #[case::onto_itself(row(0), None)]
+        #[case::onto_a_project_below_lands_after_it(row(3), Some((4, spot(Some(0), Some(2)))))]
+        #[case::onto_a_header_lands_first_in_the_group(row(2), Some((3, spot(Some(0), Some(1)))))]
+        #[case::onto_the_last_of_a_group_lands_at_its_end(row(4), Some((5, spot(Some(0), None))))]
+        #[case::onto_the_gap_below_a_group_lands_at_its_end(row(5), Some((5, spot(Some(0), None))))]
+        #[case::onto_the_last_header(row(6), Some((7, spot(Some(1), Some(3)))))]
+        #[case::below_every_row(row(9), Some((8, spot(Some(1), None))))]
+        #[case::outside_the_list(list().bottom(), None)]
+        fn a_loose_project_dragged_down(#[case] y: u16, #[case] expected: Option<(usize, Spot)>) {
+            let expected = expected.map(|(at, spot)| Landing { at, spot });
+            assert_eq!(sidebar_at(SidebarRow::Project(0), y), expected);
+        }
+
+        #[rstest]
+        #[case::onto_a_loose_project_above_lands_before_it(row(0), Some((0, spot(None, Some(0)))))]
+        #[case::onto_the_gap_below_the_loose_ones_ungroups_it(row(1), Some((1, spot(None, None))))]
+        #[case::onto_a_header(row(2), Some((3, spot(Some(0), Some(1)))))]
+        #[case::onto_a_project_above_lands_before_it(row(4), Some((4, spot(Some(0), Some(2)))))]
+        #[case::onto_its_own_header_stays(row(6), Some((7, spot(Some(1), None))))]
+        #[case::above_the_list(list().y - 1, Some((0, spot(None, Some(0)))))]
+        fn a_grouped_project_dragged_up(#[case] y: u16, #[case] expected: Option<(usize, Spot)>) {
+            let expected = expected.map(|(at, spot)| Landing { at, spot });
+            assert_eq!(sidebar_at(SidebarRow::Project(3), y), expected);
+        }
+
+        #[rstest]
+        #[case::onto_a_loose_project_lands_first(SidebarRow::Group(1), row(0), Some((2, Spot::Group(0))))]
+        #[case::onto_a_project_of_a_group_above(SidebarRow::Group(1), row(3), Some((2, Spot::Group(0))))]
+        #[case::onto_the_gap_right_above_itself(SidebarRow::Group(1), row(5), Some((6, Spot::Group(1))))]
+        #[case::onto_one_of_its_projects(SidebarRow::Group(1), row(7), None)]
+        #[case::onto_a_group_below_lands_after_it(SidebarRow::Group(0), row(6), Some((8, Spot::Group(2))))]
+        #[case::below_every_row(SidebarRow::Group(0), row(9), Some((8, Spot::Group(2))))]
+        fn a_group_lands_among_groups(
+            #[case] dragged: SidebarRow,
+            #[case] y: u16,
+            #[case] expected: Option<(usize, Spot)>,
+        ) {
+            let expected = expected.map(|(at, spot)| Landing { at, spot });
+            assert_eq!(sidebar_at(dragged, y), expected);
+        }
+
+        fn workspaces_at(dragged: WorkspaceRow, row: WorkspaceRow) -> Option<Landing> {
+            let (list, tabs) = (Rect { height: 20, ..areas().workspaces_list }, tabs(&[2, 1, 2]));
+            let y = workspace_row(list, 1, &tabs, 0, row).y;
+            workspace_drop(list, 1, &tabs, 0, dragged, Position::new(list.x + 3, y))
+        }
+
+        #[rstest]
+        #[case::onto_a_tab_of_a_workspace_above(WorkspaceRow::Workspace(2), WorkspaceRow::Tab(0, 1), 0, 0)]
+        #[case::onto_the_plus_tab_of_a_workspace_above(WorkspaceRow::Workspace(2), WorkspaceRow::NewTab(1), 5, 1)]
+        #[case::onto_a_workspace_below(WorkspaceRow::Workspace(0), WorkspaceRow::Tab(1, 0), 8, 2)]
+        #[case::onto_the_last_workspace(WorkspaceRow::Workspace(0), WorkspaceRow::Workspace(2), 13, 3)]
+        fn a_workspace_lands_before_or_after_the_one_under_the_mouse(
+            #[case] dragged: WorkspaceRow,
+            #[case] under: WorkspaceRow,
+            #[case] at: usize,
+            #[case] before: usize,
+        ) {
+            assert_eq!(workspaces_at(dragged, under), Some(Landing { at, spot: Spot::Workspace(before) }));
+        }
+
+        #[rstest]
+        #[case::onto_the_next_tab(WorkspaceRow::Tab(0, 0), WorkspaceRow::Tab(0, 1), 3, 2)]
+        #[case::onto_plus_tab(WorkspaceRow::Tab(0, 0), WorkspaceRow::NewTab(0), 3, 2)]
+        #[case::onto_its_workspace(WorkspaceRow::Tab(2, 1), WorkspaceRow::Workspace(2), 10, 0)]
+        #[case::onto_a_workspace_below_stays_in_its_own(WorkspaceRow::Tab(0, 0), WorkspaceRow::Tab(1, 0), 3, 2)]
+        #[case::onto_a_workspace_above_stays_in_its_own(WorkspaceRow::Tab(2, 1), WorkspaceRow::Tab(0, 0), 10, 0)]
+        fn a_tab_lands_within_its_workspace(
+            #[case] dragged: WorkspaceRow,
+            #[case] under: WorkspaceRow,
+            #[case] at: usize,
+            #[case] before: usize,
+        ) {
+            assert_eq!(workspaces_at(dragged, under), Some(Landing { at, spot: Spot::Tab(before) }));
+        }
+
+        #[test]
+        fn a_tab_dropped_on_itself_goes_nowhere() {
+            assert_eq!(workspaces_at(WorkspaceRow::Tab(0, 1), WorkspaceRow::Tab(0, 1)), None);
+        }
+
+        fn many(n: usize, scroll: usize) -> Rows {
+            project_rows(list(), 1, &plain(n), scroll)
+        }
+
+        #[rstest]
+        #[case::the_line_above_scrolls_up(3, more_above(list()).as_position(), Some(-1))]
+        #[case::the_line_below_scrolls_down(3, many(20, 3).more_below().as_position(), Some(1))]
+        #[case::the_new_button_scrolls_down(3, many(20, 3).button().as_position(), Some(1))]
+        #[case::a_row_does_not_scroll(3, Position::new(3, list().y + 2), None)]
+        #[case::nothing_hidden_above(0, more_above(list()).as_position(), None)]
+        fn the_edges_of_a_long_list_scroll_it(
+            #[case] scroll: usize,
+            #[case] pos: Position,
+            #[case] expected: Option<isize>,
+        ) {
+            assert_eq!(many(20, scroll).edge(pos), expected);
+        }
+
+        #[test]
+        fn a_short_list_never_scrolls() {
+            assert_eq!(many(3, 0).edge(many(3, 0).more_below().as_position()), None);
+        }
+
+        fn landed_rows(rows: &[SidebarRow], scroll: usize, at: usize) -> (Vec<SidebarRow>, Rect) {
+            let layout = project_rows(list(), 1, rows, scroll);
+            let landing = Landing { at, spot: Spot::Group(0) };
+            landed(rows.to_vec(), &layout, Some(landing), SidebarRow::Gap, SidebarRow::Landing)
+        }
+
+        #[test]
+        fn the_line_goes_between_two_rows() {
+            let (rows, line) = landed_rows(&plain(3), 0, 1);
+            assert_eq!(
+                (rows, line),
+                (
+                    vec![SidebarRow::Project(0), SidebarRow::Landing, SidebarRow::Project(1), SidebarRow::Project(2)],
+                    Rect::default()
+                )
+            );
+        }
+
+        #[test]
+        fn the_line_takes_the_place_of_a_gap() {
+            let rows = grouped().sidebar_rows();
+            let (drawn, _) = landed_rows(&rows, 0, 6);
+            assert_eq!((drawn.len(), drawn[5]), (rows.len(), SidebarRow::Landing));
+        }
+
+        #[rstest]
+        #[case::above_the_first_row(0, 0, more_above(list()))]
+        #[case::above_the_first_row_shown(5, 5, more_above(list()))]
+        #[case::below_the_last_row(0, 3, Rect::new(list().x, list().y + 3, list().width, 1))]
+        fn the_line_at_an_end_goes_on_the_line_beside_it(#[case] scroll: usize, #[case] at: usize, #[case] line: Rect) {
+            let n = if scroll == 0 { 3 } else { 30 };
+            assert_eq!(landed_rows(&plain(n), scroll, at), (plain(n), line));
+        }
+
+        #[test]
+        fn a_line_out_of_sight_is_not_drawn() {
+            assert_eq!(landed_rows(&plain(30), 5, 2), (plain(30), Rect::default()));
+        }
+
+        #[test]
+        fn a_line_on_the_more_label_replaces_it() {
+            let names: Vec<String> = (0..20).map(|i| format!("p{i}")).collect();
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            let landing = Landing { at: 8, spot: spot(Some(0), Some(8)) };
+            let t = render(&dragging(view(&names), Drag::Sidebar(SidebarRow::Project(0), Some(landing))));
+            let below = project_rows(list(), 1, &plain(20), 0).more_below();
+            assert_eq!(row_text(&t, below).trim_end(), format!("    {}", "─".repeat(usize::from(list().width) - 5)));
+        }
+
+        fn dragging(view: View<'static>, drag: Drag) -> View<'static> {
+            View { drag: Some(drag), ..view }
+        }
+
+        #[test]
+        fn renders_the_landing_line_between_projects() {
+            const TALL: Rect = Rect { x: 0, y: 0, width: W, height: 22 };
+            let (rows, list) = (grouped().sidebar_rows(), layout(TALL, Widths::default()).list);
+            let landing = sidebar_drop(list, 1, &rows, 0, SidebarRow::Project(0), Position::new(3, list.y + 3));
+            let v = dragging(grouped(), Drag::Sidebar(SidebarRow::Project(0), landing));
+            insta::assert_snapshot!(render_sized(&v, TALL.width, TALL.height).backend());
+        }
+
+        #[test]
+        fn the_landing_line_is_cyan() {
+            let landing = Some(Landing { at: 3, spot: spot(Some(0), Some(1)) });
+            let t = render(&dragging(grouped(), Drag::Sidebar(SidebarRow::Project(0), landing)));
+            let cell = &t.backend().buffer()[(list().x + 5, row(3))];
+            assert_eq!((cell.symbol(), cell.fg), ("─", Color::Cyan));
         }
     }
 }
