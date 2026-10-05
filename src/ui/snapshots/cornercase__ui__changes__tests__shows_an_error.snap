@@ -2,7 +2,7 @@
 source: src/ui/changes.rs
 expression: "render(&view, None).backend()"
 ---
-"  uncommitted   commits   all                            ×  "
+"  uncommitted   commits   all                         ⌕  ×  "
 " cannot compare with nope                                   "
 "                                                            "
 "                                                            "

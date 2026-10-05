@@ -3298,6 +3298,7 @@ mod tests {
                 live: false,
                 light: false,
                 tints,
+                filter: None,
             };
             View {
                 has_project: true,

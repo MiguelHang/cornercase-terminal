@@ -5,7 +5,7 @@ description: Every mouse gesture cornercase understands, and the few keys it use
 
 import { Aside } from '@astrojs/starlight/components';
 
-cornercase is driven with the mouse. It has **no keyboard shortcuts** of its own: outside of its dialogs (and `Esc` while you drag a row), every key you press goes to the program in the active pane. That's a deliberate choice, so that nothing you type is ever taken away from your shell, your editor or your agent: `Ctrl+B`, `Ctrl+A`, `Alt` and `Option` combinations all reach them untouched.
+cornercase is driven with the mouse. It has **no keyboard shortcuts** of its own: outside of its dialogs and the changes panel's filter field (and `Esc` while you drag a row), every key you press goes to the program in the active pane. That's a deliberate choice, so that nothing you type is ever taken away from your shell, your editor or your agent: `Ctrl+B`, `Ctrl+A`, `Alt` and `Option` combinations all reach them untouched.
 
 ## The mouse
 
@@ -56,6 +56,8 @@ Programs that use the mouse get clicks, releases, drags, movement and the wheel,
 | Click | `↕ n unchanged lines` | Shows the code between two hunks. |
 | Hover, then click | `open`, `ask agent`, `copy` on a hunk | Opens it in your editor, types its reference into the workspace's agent, copies it as a patch. |
 | Click | `fold all` / `unfold all`, `×` | Folds or unfolds every file, closes the panel. |
+| Click | `⌕` | Opens the field to [filter the files](../../guides/changes/#filter-the-files), or gives it the keys back. |
+| Click | `×` in the filter field | Closes it and shows every file again. |
 | Wheel | The panel | Scrolls the diff. |
 | Drag, double-click | The panel's left border | Resizes it, gives it back its automatic width. |
 
@@ -67,7 +69,7 @@ Click buttons and rows to use them. In lists (the folder picker, the issue brows
 
 ## Keys inside cornercase's dialogs
 
-While a dialog, the search, the settings or the issue browser is open, the keys below drive it instead of your program.
+While a dialog, the search, the settings, the issue browser or the changes panel's filter field is open, the keys below drive it instead of your program.
 
 | Where | Keys |
 | --- | --- |
@@ -80,6 +82,7 @@ While a dialog, the search, the settings or the issue browser is open, the keys 
 | Issue list | Type to filter. `↑` `↓` `PgUp` `PgDn` select. `Enter` reads the issue. `Tab` / `Shift+Tab` switch sources. `Esc` closes. |
 | Issue | `Enter` starts it. `↑` `↓` `PgUp` `PgDn` `Space` `Home` `End` scroll. `Esc` or `←` go back. |
 | Agent, place and person pickers | Type to filter. `↑` `↓` select. `Enter` picks. `Esc` goes back. |
+| Changes panel filter | Type a piece of a path or a pattern: `*.test.js` keeps only those files, `!*.snap` leaves them out. `Enter` keeps the filter and gives the keys back to your program, `Esc` clears it. A click in a pane gives the keys back too. |
 | Branch to compare with | Type to filter. `↑` `↓` select. `Enter` picks the selected branch. `Esc` closes. |
 | Settings | `Enter` or `Space` change the selected row. `↑` `↓` select. `Tab` `→` / `Shift+Tab` `←` switch tabs. `Shift+↑` `Shift+↓` reorder sources. `Delete` removes a saved token. `Esc` closes. |
 | Update | `↑` `↓` scroll the release notes. `Enter` presses the dialog's first button: **update**, **try again**, **restart now** or **copy command**. `Esc` closes it, except while downloading. |

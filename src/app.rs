@@ -1069,6 +1069,7 @@ impl App {
             Some(Overlay::Issues(_)) => return self.issues_key(key, area),
             Some(Overlay::Settings(_)) => self.settings_key(key, area),
             Some(Overlay::Search(_)) => self.search_key(key, area),
+            None if self.filtering() => self.filter_key(key),
             Some(Overlay::Menu { .. }) | None => self.forward_key(key),
             Some(_) => return self.form_key(key, area),
         }
@@ -1094,7 +1095,14 @@ impl App {
         if self.overlay.is_some() {
             return self.overlay_mouse(ev, pos, area);
         }
-        if self.changes_shown() && areas.changes.contains(pos) {
+        let in_panel = self.changes_shown() && areas.changes.contains(pos);
+        if matches!(ev.kind, MouseEventKind::Down(_))
+            && !in_panel
+            && let Some(filter) = &mut self.changes.filter
+        {
+            filter.focused = false;
+        }
+        if in_panel {
             return self.changes_mouse(ev, pos, areas.changes, area);
         }
         if let Some(delta) = wheel(ev.kind)
@@ -1211,7 +1219,7 @@ impl App {
 
     fn toggle_nav(&mut self) {
         if self.nav.is_none() {
-            self.changes.open = false;
+            self.changes.close();
         }
         self.nav = match self.nav {
             Some(_) => None,
@@ -2947,6 +2955,13 @@ impl App {
             }
             return;
         }
+        if self.filtering()
+            && let Some(filter) = &mut self.changes.filter
+        {
+            text.chars().filter(|c| !c.is_control()).for_each(|c| filter.push(c));
+            self.changes.scroll = 0;
+            return;
+        }
         let Some(term) = self.term_mut() else { return };
         let bracketed = term.emulator.bracketed_paste();
         if bracketed {
@@ -3190,8 +3205,28 @@ impl App {
     }
 
     fn toggle_changes(&mut self) {
-        self.changes.open = !self.changes.open;
+        if self.changes.open {
+            self.changes.close();
+        } else {
+            self.changes.open = true;
+        }
         self.nav = None;
+    }
+
+    fn filtering(&self) -> bool {
+        self.overlay.is_none() && self.changes_shown() && self.changes.filter.as_ref().is_some_and(|f| f.focused)
+    }
+
+    fn filter_key(&mut self, key: KeyEvent) {
+        let Some(filter) = &mut self.changes.filter else { return };
+        match key.code {
+            KeyCode::Esc => self.changes.filter = None,
+            KeyCode::Enter => filter.focused = false,
+            KeyCode::Backspace => filter.pop(),
+            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => filter.push(c),
+            _ => return,
+        }
+        self.changes.scroll = 0;
     }
 
     fn changed_diff(&self, target: &Checkout) -> Option<std::sync::Arc<changes::diff::Diff>> {
@@ -3219,6 +3254,14 @@ impl App {
                 }
             }
         }
+        let filter = self.changes.filter.as_ref().map(|f| panel::FilterView {
+            query: f.query().to_string(),
+            focused: f.focused && self.overlay.is_none(),
+            kept: match &body {
+                panel::Body::Ready(diff) => changes::filter::kept(diff, f.query()),
+                _ => Vec::new(),
+            },
+        });
         Some(panel::View {
             mode: self.changes.mode,
             base: self.changes.label(ws).or(target.base),
@@ -3230,6 +3273,7 @@ impl App {
             live: model.is_some_and(|m| m.live(Instant::now())),
             light: self.theme.is_light() == Some(true),
             tints: Tints::of(&self.theme),
+            filter,
         })
     }
 
@@ -3247,7 +3291,9 @@ impl App {
         let file = |i: usize| diff.as_ref().and_then(|d| d.files.get(i).cloned());
         match panel::hit(panel_area, &view, pos) {
             Some(PanelHit::Mode(mode)) => self.changes.set_mode(mode),
-            Some(PanelHit::Close) => self.changes.open = false,
+            Some(PanelHit::Close) => self.changes.close(),
+            Some(PanelHit::Filter | PanelHit::Query) => self.changes.filter.get_or_insert_default().focused = true,
+            Some(PanelHit::ClearFilter) => self.changes.filter = None,
             Some(PanelHit::Base) => self.open_branches(&target),
             Some(PanelHit::FoldAll) => {
                 if let Some(diff) = &diff {
@@ -8109,7 +8155,7 @@ rm -f "$1/sessions/$$.json"
             refresh_until_loaded(&mut app, &rx);
             let view = app.panel_view().expect("panel");
             let gap = panel::rows(&view).iter().position(|r| matches!(r, panel::Row::Gap(0, 1))).expect("a gap");
-            let body = panel::parts(panel_area(&app)).body;
+            let body = panel::parts(panel_area(&app), &view).body;
             let y = body.y + u16::try_from(gap).expect("row");
             click(&mut app, Position::new(body.x + 12, y));
             pump_until(&mut app, &rx, "the unchanged lines open", |a| {
@@ -8180,6 +8226,107 @@ rm -f "$1/sessions/$$.json"
             let file = app.changed_diff(&target).expect("diff").files[0].clone();
             app.hunk_action(&target, &file, 0, HunkAction::Ask, AREA).expect("ask");
             assert_eq!(app.take_host_writes(), vec![clipboard::osc52("a.txt:2")]);
+        }
+
+        fn open_filter(app: &mut App, rx: &Receiver<AppEvent>) {
+            app.changes.open = true;
+            refresh_until_loaded(app, rx);
+            click(app, panel::filter_button(panel_area(app)).as_position());
+        }
+
+        fn query(app: &App) -> Option<&str> {
+            app.changes.filter.as_ref().map(changes::filter::Filter::query)
+        }
+
+        fn screen(app: &mut App) -> String {
+            app.term_mut().and_then(|t| t.emulator.snapshot().ok()).map(|s| s.contents()).unwrap_or_default()
+        }
+
+        fn type_in_pane(app: &mut App, rx: &Receiver<AppEvent>, word: &str) {
+            type_text(app, &format!("echo {word}-\"\"typed"));
+            send_key(app, KeyCode::Enter, KeyModifiers::NONE);
+            wait_until("the pane gets the keys", || {
+                while let Ok(ev) = rx.try_recv() {
+                    app.handle_event(ev, AREA).expect("handle event");
+                }
+                screen(app).contains(&format!("{word}-typed"))
+            });
+        }
+
+        #[test]
+        fn keys_go_to_the_field_until_a_click_in_the_pane() {
+            let repo = repo_with_edit();
+            let (mut app, rx) = app_in(repo.path(), no_config());
+            open_filter(&mut app, &rx);
+            type_text(&mut app, "*.txt");
+            let pane = app.layout(AREA).pane;
+            click(&mut app, Position::new(pane.x + 2, pane.y + 2));
+            type_in_pane(&mut app, &rx, "pane");
+            assert_eq!(query(&app), Some("*.txt"));
+        }
+
+        #[test]
+        fn a_click_on_the_field_takes_the_keys_again() {
+            let repo = repo_with_edit();
+            let (mut app, rx) = app_in(repo.path(), no_config());
+            open_filter(&mut app, &rx);
+            let pane = app.layout(AREA).pane;
+            click(&mut app, Position::new(pane.x + 2, pane.y + 2));
+            let view = app.panel_view().expect("panel");
+            let field = panel::parts(panel_area(&app), &view).field;
+            click(&mut app, Position::new(field.x + 5, field.y));
+            type_text(&mut app, "a.txt");
+            assert_eq!(query(&app), Some("a.txt"));
+        }
+
+        #[test]
+        fn a_paste_goes_to_the_field() {
+            let repo = repo_with_edit();
+            let (mut app, rx) = app_in(repo.path(), no_config());
+            open_filter(&mut app, &rx);
+            app.handle_event(AppEvent::Input(Event::Paste("*.t\nxt".into())), AREA).expect("handle paste");
+            assert_eq!(query(&app), Some("*.txt"));
+        }
+
+        #[test]
+        fn the_filter_hides_the_files_that_do_not_match() {
+            let repo = repo_with_edit();
+            let (mut app, rx) = app_in(repo.path(), no_config());
+            open_filter(&mut app, &rx);
+            type_text(&mut app, "!a.txt");
+            let view = app.panel_view().expect("panel");
+            assert!(!panel::rows(&view).contains(&panel::Row::File(0)));
+        }
+
+        #[test]
+        fn enter_keeps_the_filter_and_gives_the_keys_back() {
+            let repo = repo_with_edit();
+            let (mut app, rx) = app_in(repo.path(), no_config());
+            open_filter(&mut app, &rx);
+            submit_text(&mut app, "*.txt");
+            type_in_pane(&mut app, &rx, "enter");
+            assert_eq!(query(&app), Some("*.txt"));
+        }
+
+        #[test]
+        fn esc_closes_the_field_and_clears_the_filter() {
+            let repo = repo_with_edit();
+            let (mut app, rx) = app_in(repo.path(), no_config());
+            open_filter(&mut app, &rx);
+            type_text(&mut app, "*.txt");
+            send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            assert_eq!((query(&app), app.filtering()), (None, false));
+        }
+
+        #[test]
+        fn closing_the_panel_gives_the_keys_back() {
+            let repo = repo_with_edit();
+            let (mut app, rx) = app_in(repo.path(), no_config());
+            open_filter(&mut app, &rx);
+            let close = panel::close(panel_area(&app)).as_position();
+            click(&mut app, close);
+            app.changes.open = true;
+            assert!(!app.filtering());
         }
 
         #[test]

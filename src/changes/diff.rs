@@ -175,6 +175,13 @@ impl File {
     pub fn lines(&self) -> usize {
         self.hunks.iter().map(|h| h.lines.len()).sum()
     }
+
+    pub fn label(&self) -> String {
+        match &self.old_path {
+            Some(old) => format!("{old} → {}", self.path),
+            None => self.path.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

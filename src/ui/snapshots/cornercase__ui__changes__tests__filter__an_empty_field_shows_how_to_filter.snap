@@ -1,9 +1,10 @@
 ---
 source: src/ui/changes.rs
-expression: "render(&view, None).backend()"
+expression: "render(&filtered(&sample(), \"\"), None).backend()"
 ---
 "  uncommitted   commits   all                         ⌕  ×  "
-" 3 files  +7 −3  ▃▃▃▃▃▃▃▃                 vs origin/main ▾  "
+"  ⌕ path, *.test.js, !*.snap                             ×  "
+" 3 files  +7 −3  ▃▃▃▃▃▃▃▃                            ● live "
 "                                                            "
 " ▌▾ M src/returns.rs                               +5 −2    "
 " ┄┄ impl Address ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ "
@@ -23,6 +24,5 @@ expression: "render(&view, None).backend()"
 "                                                            "
 "  ▸ M Cargo.lock                          lockfile +1 −1    "
 "  ▸ A tests/returns.rs                            new +1    "
-"                                                            "
 " ────────────────────────────────────────────────────────── "
 "  fold all                                    0 of 3 viewed "
