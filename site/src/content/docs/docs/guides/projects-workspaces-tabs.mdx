@@ -123,6 +123,21 @@ cornercase reads what Claude Code reports about itself: the small file it keeps 
 
 ### How full the context is
 
+Claude Code and Codex tabs show their model and the share of the context window used on a second line. The percentage turns orange from 75% and red from 90%. In the [compact layout](../small-terminals/) the line sits at the bottom of the tab's row; long model names are shortened to fit.
+
+**Codex** uses the model recorded in its session and `last_token_usage.total_tokens` divided by its reported `model_context_window`, for example `gpt-5.4 · 20%`. Cached input and reasoning tokens are already included; lifetime token totals are not used. This is the share used out of the reported window, rather than Codex's own remaining percentage, which subtracts a fixed baseline.
+
+<Screen
+  name="codex-context"
+  crop={[0, 2, 57, 12]}
+  alt="The shop project with a Codex tab showing gpt-5.4 · 20% under its name"
+  caption="Codex's model and current context use, from that pane's own session."
+/>
+
+cornercase follows the rollout file held open by the Codex process in each pane, including the native child of an npm wrapper. Sessions in the same folder keep their own numbers. Recent Codex versions hand sessions to a background `codex app-server` that writes every rollout; then cornercase picks the session by folder, and only when one Codex runs in that folder: with two, neither shows a line, and after one exits the other's line comes back within about a minute. The line appears after your first message, when Codex creates the session. The files are under `$CODEX_HOME/sessions` or `~/.codex/sessions`, using the running agent's environment. No hooks or changes to Codex's settings are needed. This format was verified against **Codex CLI 0.160.0**.
+
+After a model change or compaction, Codex's old percentage disappears until fresh usage is recorded. If the window size or current usage is unavailable, only the model appears. A new session, process exit, missing rollout, or an ambiguous association clears the line. On Linux cornercase reads `/proc`; on macOS it uses the system `/usr/sbin/lsof` and process metadata. If access to these is unavailable, or Codex runs remotely or in a container, the line is omitted.
+
 Once Claude has answered, a second line under the tab's name shows its model and how much of its context window the conversation takes up, such as `Opus 5.5 · 23%`: the percentage Claude Code gives its own status line. It turns orange from 75% and red from 90%. After `/compact` or `/clear` the line goes away until Claude's next answer. In the [compact layout](../small-terminals/) it sits at the bottom of the tab's row.
 
 The numbers come from the end of the conversation's transcript, which Claude Code keeps in `~/.claude/projects` (or in `$CLAUDE_CONFIG_DIR/projects`): the model of the last answer and how many tokens it was sent. The size of the window isn't written anywhere, so cornercase works it out the way Claude Code does:

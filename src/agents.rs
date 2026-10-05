@@ -4,11 +4,12 @@ use crate::config::Config;
 
 pub const AUTO: &str = "auto";
 pub const CLAUDE: &str = "claude";
+pub const CODEX: &str = "codex";
 pub const DEFAULT_TRUST_PROMPT: &str =
     "trust the files|trust this (folder|directory|workspace|repository)|do you trust|yes, proceed";
 const KNOWN: [(&str, &str); 14] = [
     (CLAUDE, "claude"),
-    ("codex", "codex"),
+    (CODEX, "codex"),
     ("gemini", "gemini"),
     ("opencode", "opencode"),
     ("cursor", "cursor-agent"),
@@ -183,6 +184,7 @@ pub fn detect(config: &Config, argv: &[String]) -> Option<String> {
     kinds(config).into_iter().find(|kind| {
         let bin = command(config, kind);
         names.contains(&basename(&bin))
+            || (kind == CODEX && argv.get(1).is_some_and(|arg| arg.ends_with("/codex/bin/codex.js")))
     })
 }
 
@@ -338,6 +340,8 @@ mod tests {
         #[rstest]
         #[case::binary(&["/home/a/.local/bin/claude", "--resume"], Some("claude"))]
         #[case::node_script(&["node", "/usr/lib/node_modules/@google/gemini-cli/bin/gemini"], Some("gemini"))]
+        #[case::codex_npm(&["node", "/usr/lib/node_modules/@openai/codex/bin/codex.js"], Some("codex"))]
+        #[case::codex_native(&["/usr/local/bin/codex"], Some("codex"))]
         #[case::renamed_binary(&["cursor-agent"], Some("cursor"))]
         #[case::a_shell(&["-zsh"], None)]
         fn detects_the_agent_in_a_tab(#[case] argv: &[&str], #[case] expected: Option<&str>) {

@@ -47,9 +47,9 @@ function inGroup(app: App, name: string, projects: Project[]): void {
   for (const p of projects) p.group = group.id;
 }
 
-export function agentTab(app: App, p: Project, w: Workspace, task: string, pace: number, beside: Pane[] = []): Agent {
+export function agentTab(app: App, p: Project, w: Workspace, task: string, pace: number, beside: Pane[] = [], kind = 'claude'): Agent {
   const pane = app.newPane(p, w);
-  const agent = new Agent(app.host(p, w, () => pane.id), () => pane.shell.finish(), 'claude', ['--permission-mode', 'plan'], { working: task, shown: 1, pace });
+  const agent = new Agent(app.host(p, w, () => pane.id), () => pane.shell.finish(), kind, kind === 'claude' ? ['--permission-mode', 'plan'] : [], { working: task, shown: 1, pace });
   pane.shell.start(agent);
   const [right, below] = beside;
   w.tabs.push(
@@ -90,7 +90,7 @@ export function world(app: App, opts: { scripted?: boolean } = {}): App {
   const dark = app.addWorkspace(shop, 'feat/dark-mode', true);
   const beside = app.cols >= 130 ? [app.newPane(shop, dark, tests(dark.root)), app.newPane(shop, dark, [prompt('feat-dark-mode', 'git status -sb'), [seg('## feat/dark-mode')], [seg(' M ', { fg: 1 }), seg('src/theme.rs')]])] : [];
   agentTab(app, shop, dark, 'https://github.com/acme/shop/issues/479', pace, beside);
-  agentTab(app, shop, app.addWorkspace(shop, 'feat/gift-cards', true), 'Add gift cards to the checkout', pace + 600);
+  agentTab(app, shop, app.addWorkspace(shop, 'feat/gift-cards', true), 'Add gift cards to the checkout', pace + 600, [], 'codex');
   shop.active = 1;
 
   const api = app.addProject('api', '~/code/api', true, FOLDERS.api.tree);

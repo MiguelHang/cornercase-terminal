@@ -1,0 +1,3 @@
+{"timestamp":"2026-10-05T13:41:47.000Z","type":"session_meta","payload":{"id":"01a10c4c-92a4-7f13-b88b-2799ce5d8fcf","cli_version":"0.160.0","source":"vscode"}}
+{"timestamp":"2026-10-05T13:41:48.000Z","type":"turn_context","payload":{"model":"gpt-6.1-sol"}}
+{"timestamp":"2026-10-05T13:41:49.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":15777},"model_context_window":258400},"rate_limits":null}}

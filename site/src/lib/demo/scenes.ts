@@ -27,7 +27,7 @@ export const SCENES: Record<string, Scene> = {
       shop.active = 0;
       agentTab(app, shop, app.addWorkspace(shop, 'fix/return-labels', true), 'Print return labels as PDF', 600000);
       app.render();
-      agentIn(app, 'shop', 'feat/gift-cards')?.ask('src/checkout.rs');
+      agentIn(app, 'shop', 'feat/dark-mode')?.ask('src/checkout.rs');
       app.advance(20000);
       app.workspacesScroll = 5;
       return rect(0, 2, 48, 17);
