@@ -2,6 +2,12 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.4.3
+
+- Codex tabs now show what Codex is doing, like Claude Code tabs: `◐` while it works, `!` when it waits for your approval, `✓` when it finished while you were in another tab, `○` while it waits for your next message. `!` and `✓` also show on the workspace, project and collapsed group rows, and on the compact `≡`.
+- Codex in a tab you aren't looking at now notifies you too, with the same toast and desktop notification as Claude Code: `codex needs you in shop › main` or `codex finished in shop › main`. With Claude Code and Codex in the same workspace, each gets its own notice, named after the agent.
+- Nothing to set up: cornercase reads the title Codex gives the terminal and the session file it already follows for the context line. If you take the activity out of Codex's terminal title (`/title`), the tab still shows working and finished, but not `!`.
+
 ## 0.4.2
 
 - Tabs running Codex, Gemini CLI or another script file run by Node, Bun, Deno, Python or Ruby are now named after the script, such as `codex`, instead of `node-MainThread` or `node`. Modules (`python3 -m …`) and inline code (`node -e …`) keep the interpreter's name. Known agents are named after their kind (`cursor-agent` shows as `cursor`), and search finds those tabs by that name. A custom tab name still wins.
