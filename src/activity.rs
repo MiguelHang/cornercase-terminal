@@ -21,6 +21,7 @@ pub const CLAUDE_SESSION_ENV: [&str; 10] = [
 const SPINNER: [char; 4] = ['◐', '◓', '◑', '◒'];
 const BRAILLE: RangeInclusive<char> = '\u{2800}'..='\u{28ff}';
 const IDLE: char = '✳';
+const ACTION_REQUIRED: [&str; 2] = ["[ ! ] Action Required", "[ . ] Action Required"];
 const NOTIFY_AFTER: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,12 +146,24 @@ fn claude_dir_from(env: Option<OsString>, home: Option<&Path>) -> Option<PathBuf
     }
 }
 
-fn from_title(title: &str) -> Option<Activity> {
+pub fn codex(title: &str, turn: bool) -> Activity {
+    if ACTION_REQUIRED.iter().any(|prefix| title.starts_with(prefix)) {
+        Activity::Waiting
+    } else if turn || glyph(title).is_some_and(|g| BRAILLE.contains(&g)) {
+        Activity::Working
+    } else {
+        Activity::Idle
+    }
+}
+
+fn glyph(title: &str) -> Option<char> {
     let mut chars = title.chars();
     let glyph = chars.next()?;
-    if chars.next() != Some(' ') {
-        return None;
-    }
+    (chars.next() == Some(' ')).then_some(glyph)
+}
+
+fn from_title(title: &str) -> Option<Activity> {
+    let glyph = glyph(title)?;
     if SPINNER.contains(&glyph) || BRAILLE.contains(&glyph) {
         Some(Activity::Working)
     } else if glyph == IDLE {
@@ -236,6 +249,24 @@ mod tests {
         #[case::empty("", None)]
         fn shows_whether_claude_works(#[case] title: &str, #[case] expected: Option<Activity>) {
             assert_eq!(from_title(title), expected);
+        }
+    }
+
+    mod codex_title {
+        use super::*;
+
+        #[rstest]
+        #[case::starting("⠏ ⠏ | shop", false, Activity::Working)]
+        #[case::working("⠴ Check example.com status | shop", false, Activity::Working)]
+        #[case::approval("[ ! ] Action Required | Check example.com status | shop", true, Activity::Waiting)]
+        #[case::approval_blinking("[ . ] Action Required | Check example.com status | shop", true, Activity::Waiting)]
+        #[case::finished("Check example.com status | shop", false, Activity::Idle)]
+        #[case::fresh("shop", false, Activity::Idle)]
+        #[case::no_activity_in_the_title("shop", true, Activity::Working)]
+        #[case::approval_without_a_turn("[ ! ] Action Required | shop", false, Activity::Waiting)]
+        #[case::empty("", false, Activity::Idle)]
+        fn shows_what_codex_is_doing(#[case] title: &str, #[case] turn: bool, #[case] expected: Activity) {
+            assert_eq!(codex(title, turn), expected);
         }
     }
 

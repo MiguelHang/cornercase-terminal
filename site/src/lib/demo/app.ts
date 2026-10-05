@@ -121,15 +121,17 @@ const RENAME: Record<Target['kind'], { label: string; hint: string }> = {
   tab: { label: 'rename tab', hint: 'leave it empty to use the program name' },
 };
 
-function claudeIn(pane: Pane): Agent | null {
+const WATCHED = ['claude', 'codex'];
+
+function agentIn(pane: Pane): Agent | null {
   const fg = pane.shell.fg;
-  return fg instanceof Agent && fg.name === 'claude' ? fg : null;
+  return fg instanceof Agent && WATCHED.includes(fg.name) ? fg : null;
 }
 
-function agentActivity(claude: Agent | null): Activity | null {
-  if (!claude) return null;
-  if (claude.waiting) return 'waiting';
-  return claude.working ? 'working' : 'idle';
+function agentActivity(agent: Agent | null): Activity | null {
+  if (!agent) return null;
+  if (agent.waiting) return 'waiting';
+  return agent.working ? 'working' : 'idle';
 }
 
 export class App {
@@ -270,11 +272,11 @@ export class App {
       for (const w of p.workspaces) {
         for (const t of w.tabs) {
           for (const pane of t.panes) {
-            const claude = claudeIn(pane);
-            const agent = pane.shell.fg;
-            pane.context = agent instanceof Agent ? agent.context : null;
-            const status = watchPane(pane, agentActivity(claude), t === visible, now);
-            if (status) this.notify(`claude ${status === 'waiting' ? 'needs you' : 'finished'} in ${projectLabel(p)} › ${workspaceLabel(w)}`, status);
+            const agent = agentIn(pane);
+            const fg = pane.shell.fg;
+            pane.context = fg instanceof Agent ? fg.context : null;
+            const status = watchPane(pane, agentActivity(agent), t === visible, now);
+            if (status && agent) this.notify(`${agent.name} ${status === 'waiting' ? 'needs you' : 'finished'} in ${projectLabel(p)} › ${workspaceLabel(w)}`, status);
             else if (pane.since === now && !pane.notified) this.after(NOTIFY_AFTER, () => this.dirty());
           }
         }

@@ -121,15 +121,20 @@ pub(super) struct Rollout {
     id: Option<String>,
     model: Option<String>,
     percent: Option<u16>,
+    turn: bool,
 }
 
 impl Rollout {
     pub fn new(path: PathBuf) -> Self {
-        Self { path, read: 0, skipping: false, stamp: None, id: None, model: None, percent: None }
+        Self { path, read: 0, skipping: false, stamp: None, id: None, model: None, percent: None, turn: false }
     }
 
     pub fn context(&self) -> Option<Context> {
         Some(Context { model: self.model.clone()?, percent: self.percent })
+    }
+
+    pub fn turn(&self) -> bool {
+        self.turn
     }
 
     pub fn update(&mut self) {
@@ -213,6 +218,8 @@ impl Rollout {
                         .map(|(tokens, window)| percent(tokens, window));
                 }
                 Some("context_compacted") => self.percent = None,
+                Some("task_started") => self.turn = true,
+                Some("task_complete" | "turn_aborted") => self.turn = false,
                 _ => {}
             },
             _ => {}
@@ -237,6 +244,9 @@ mod tests {
     const UNAVAILABLE: &str = include_str!("../../tests/fixtures/codex/0.160.0/unavailable.jsonl");
     const MALFORMED: &str = include_str!("../../tests/fixtures/codex/0.160.0/malformed.jsonl");
     const VSCODE: &str = include_str!("../../tests/fixtures/codex/0.160.0/vscode-context.jsonl");
+    const STARTED: &str = include_str!("../../tests/fixtures/codex/0.160.0/turn-started.jsonl");
+    const COMPLETE: &str = include_str!("../../tests/fixtures/codex/0.160.0/turn-complete.jsonl");
+    const ABORTED: &str = include_str!("../../tests/fixtures/codex/0.160.0/turn-aborted.jsonl");
 
     struct Written {
         _dir: TempDir,
@@ -388,6 +398,28 @@ mod tests {
         file.rollout.update();
 
         assert_eq!(file.rollout.context(), None);
+    }
+
+    #[rstest]
+    #[case::no_turn_yet(&[], false)]
+    #[case::started(&[STARTED], true)]
+    #[case::completed(&[STARTED, COMPLETE], false)]
+    #[case::interrupted(&[STARTED, ABORTED], false)]
+    #[case::started_again(&[STARTED, COMPLETE, STARTED], true)]
+    fn a_turn_lasts_from_its_start_until_it_completes_or_is_aborted(#[case] events: &[&str], #[case] turn: bool) {
+        let mut file = Written::new(CONTEXT);
+        for event in events {
+            file.append(event);
+        }
+
+        assert_eq!(file.rollout.turn(), turn);
+    }
+
+    #[test]
+    fn a_turn_already_running_is_found_in_the_initial_tail() {
+        let file = Written::new(&format!("{CONTEXT}{STARTED}"));
+
+        assert!(file.rollout.turn());
     }
 
     #[test]

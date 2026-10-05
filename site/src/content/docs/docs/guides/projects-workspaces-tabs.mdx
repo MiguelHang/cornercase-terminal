@@ -108,18 +108,23 @@ The shell is the one in your `SHELL` environment variable when the server starte
 
 ### What your agents are doing
 
-When Claude Code runs in a tab, an icon before the tab's name tells you what it is doing:
+When Claude Code or Codex runs in a tab, an icon before the tab's name tells you what it is doing:
 
 | Icon | Means |
 | --- | --- |
-| `◐` yellow | Claude is working, or waits for a command it started in the background (a build, a test run). |
-| `!` orange | Claude needs you: it asks for permission or asks you a question. |
-| `✓` green | Claude finished while you were looking at another tab. It goes away when you open the tab. |
-| `○` grey | Claude waits for your next message. |
+| `◐` yellow | The agent is working. For Claude, also while it waits for a command it started in the background (a build, a test run). |
+| `!` orange | The agent needs you: it asks for permission or asks you a question. |
+| `✓` green | The agent finished while you were looking at another tab. It goes away when you open the tab. |
+| `○` grey | The agent waits for your next message. |
 
 So that a finished or waiting agent in another project doesn't go unnoticed, `!` and `✓` also show at the end of its workspace's row, of its project's row and, while the group is collapsed, of its group's header. When several tabs below a row disagree, `!` wins over `✓`. In the [compact layout](../small-terminals/) the `≡` button shows them for every tab except the one on screen.
 
-cornercase reads what Claude Code reports about itself: the small file it keeps for each running session in `~/.claude/sessions` (or in `$CLAUDE_CONFIG_DIR/sessions`), the same one `claude agents --json` reads. Nothing is installed and none of Claude's settings change. Without that file, for example with an older Claude Code, cornercase falls back to the title Claude gives the terminal, which only tells working from idle. Other agents don't get an icon yet.
+cornercase reads what each agent reports about itself. Nothing is installed and none of the agents' settings change.
+
+- **Claude Code**: the small file it keeps for each running session in `~/.claude/sessions` (or in `$CLAUDE_CONFIG_DIR/sessions`), the same one `claude agents --json` reads. Without that file, for example with an older Claude Code, cornercase falls back to the title Claude gives the terminal, which only tells working from idle.
+- **Codex**: the title Codex gives the terminal, which starts with a spinner while it works and with `[ ! ] Action Required` while it waits for an approval, and the session's rollout file (the one behind the [context line](#how-full-the-context-is)), which records when each turn starts and ends. If you take the activity out of Codex's terminal title (its `/title` setting), the tab still shows working and finished, but not `!`. Verified against Codex CLI 0.160.0.
+
+Other agents don't get an icon yet.
 
 ### How full the context is
 
@@ -151,9 +156,9 @@ The variables are read from the running `claude` and from the `env` of its setti
 
 ### Notifications
 
-When Claude Code asks you something or finishes in a tab you aren't looking at, cornercase also tells you:
+When Claude Code or Codex asks you something or finishes in a tab you aren't looking at, cornercase also tells you:
 
-- a **toast** in the bottom right corner says where, such as `! claude needs you in shop › main` or `✓ claude finished in shop › main`;
+- a **toast** in the bottom right corner says which agent and where, such as `! claude needs you in shop › main` or `✓ codex finished in shop › main`;
 - your terminal shows a **desktop notification**, so you find out while you are in another window.
 
 cornercase waits a second before telling you, so a question answered at once stays quiet, and it tells you once each time. The tab on screen doesn't notify you, even while cornercase's window is in the background.
