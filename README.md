@@ -57,6 +57,7 @@ The first build takes a couple of minutes.
 
 ```sh
 cornercase              # open the UI (starts the server if needed)
+cornercase update       # install the latest release and restart the server
 cornercase kill-server  # stop the server and every shell in it
 cornercase --version    # print the version
 ```

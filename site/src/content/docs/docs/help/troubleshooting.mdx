@@ -21,7 +21,7 @@ The prebuilt Linux binaries need glibc 2.35 or newer (Ubuntu 22.04 or later, and
 
 ### An update fails
 
-The update dialog shows what went wrong in red, keeps the old binary, and offers **try again**:
+The update dialog shows what went wrong in red, keeps the old binary, and offers **try again**. `cornercase update` prints the same errors and also keeps the old binary:
 
 - *the download does not match its checksum*: the download was cut short or altered on the way. Try again.
 - *the new cornercase does not run here: …*: the new binary was downloaded but couldn't start on this machine, for instance because glibc is older than 2.35. The old one stays in place.
@@ -31,7 +31,7 @@ You can always update by hand with the install script or `brew upgrade cornercas
 
 ### No update shows up
 
-cornercase checks when the server starts and then once a day, and only if **settings → TUI → check for updates** is on; builds made with `cargo run` never check. A server that has been running for less than a day since a release may not have asked yet. When the check itself fails, `server.log` says why, in a line starting with `cornercase server: the update check failed`.
+cornercase checks when the server starts and then once a day, and only if **settings → TUI → check for updates** is on; builds made with `cargo run` never check. A server that has been running for less than a day since a release may not have asked yet. Run `cornercase update` to install it right away. When the check itself fails, `server.log` says why, in a line starting with `cornercase server: the update check failed`.
 
 ### Turning update checks off
 
