@@ -1855,9 +1855,11 @@ export class App {
   pointerMove(x: number, y: number, buttons: number): void {
     const prev = this.hover;
     this.hover = { x, y };
-    if (this.rowDrag && buttons & 1) {
-      this.rowDrag.moved ||= !contains(this.rowDrag.row, x, y);
-      this.autoScroll();
+    if (this.rowDrag) {
+      if (buttons === 1) {
+        this.rowDrag.moved ||= !contains(this.rowDrag.row, x, y);
+        this.autoScroll();
+      } else this.rowDrag = null;
       this.dirty();
       return;
     }
@@ -1895,6 +1897,11 @@ export class App {
   pointerDown(x: number, y: number, button: number): void {
     this.hover = { x, y };
     if (this.detached) return this.reattach();
+    if (this.rowDrag) {
+      this.rowDrag = null;
+      this.dirty();
+      return;
+    }
     const region = this.hit(x, y, (r) => !!(r.click || r.right || r.drag || r.pane));
     if (!region) return;
     if (region.drag && button === 0) {
