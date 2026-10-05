@@ -271,12 +271,58 @@ type Row =
   | { kind: 'spacer' };
 
 const DARK: Style = { fg: 8 };
+
+const chars = (text: string, fold: boolean) => [...text].map((c) => (fold ? c.toLowerCase()[0] : c));
+
+function glob(p: string[], t: string[]): boolean {
+  if (!p.length) return !t.length;
+  const ends = (stop: number) => Array.from({ length: stop + 1 }, (_, i) => i);
+  if (p[0] === '*' && p[1] === '*') {
+    const rest = p.slice(2);
+    const skip = rest[0] === '/' && ends(t.length).some((i) => (i === 0 || t[i - 1] === '/') && glob(rest.slice(1), t.slice(i)));
+    return skip || ends(t.length).some((i) => glob(rest, t.slice(i)));
+  }
+  if (p[0] === '*') {
+    const slash = t.indexOf('/');
+    return ends(slash < 0 ? t.length : slash).some((i) => glob(p.slice(1), t.slice(i)));
+  }
+  if (p[0] === '?') return t.length > 0 && t[0] !== '/' && glob(p.slice(1), t.slice(1));
+  return t[0] === p[0] && glob(p.slice(1), t.slice(1));
+}
+
+function pathMatches(word: string, path: string): boolean {
+  const fold = word === word.toLowerCase();
+  if (!/[*?]/.test(word)) return chars(path, fold).join('').includes(chars(word, fold).join(''));
+  const dir = word.endsWith('/');
+  const anchored = word.startsWith('/');
+  const pattern = word.slice(anchored ? 1 : 0, dir ? -1 : undefined);
+  if (anchored || pattern.includes('/')) {
+    const t = chars(path, fold);
+    return (!dir && glob(chars(pattern, fold), t)) || glob(chars(`${pattern}/**`, fold), t);
+  }
+  const parts = path.split('/');
+  return parts.some((part, i) => (!dir || i < parts.length - 1) && glob(chars(pattern, fold), chars(part, fold)));
+}
+
+export function keptFiles(files: FileDiff[], query: string): Set<number> | null {
+  const words = query.split(/\s+/).filter(Boolean);
+  if (!words.length) return null;
+  const exclude = words.filter((w) => w.length > 1 && w.startsWith('!')).map((w) => w.slice(1));
+  const include = words.filter((w) => !(w.length > 1 && w.startsWith('!')));
+  const kept = new Set<number>();
+  files.forEach((f, i) => {
+    const path = f.change.path;
+    if ((!include.length || include.some((w) => pathMatches(w, path))) && !exclude.some((w) => pathMatches(w, path))) kept.add(i);
+  });
+  return kept;
+}
 const ACTIONS = ['open', 'ask agent', 'copy'] as const;
 export type HunkAction = (typeof ACTIONS)[number];
 
-function rows(app: App, files: FileDiff[]): Row[] {
+function rows(app: App, files: FileDiff[], kept: Set<number> | null): Row[] {
   const out: Row[] = [];
   files.forEach((f, i) => {
+    if (kept && !kept.has(i)) return;
     out.push({ kind: 'file', i });
     if (app.changesFolded(f)) return;
     f.hunks.forEach((hunk, h) => {
@@ -306,6 +352,9 @@ export function drawChanges(p: Painter, areas: Areas): void {
   const tints = app.light ? TINTS.light : TINTS.dark;
   const surface = app.light ? 254 : 236;
 
+  const filter = app.changesFilter;
+  const kept = filter ? keptFiles(files, filter.query) : null;
+
   let x = inner.x;
   for (const mode of CHANGES_MODES) {
     const r = rect(x, inner.y, mode.length + 2, 1);
@@ -317,8 +366,12 @@ export function drawChanges(p: Painter, areas: Areas): void {
   const close = rect(right(inner) - 3, inner.y, 3, 1);
   p.span(close.x + 1, close.y, '×', p.hovered(close) ? { fg: 1, add: BOLD } : DARK);
   p.region({ r: close, click: () => app.toggleChanges(), cursor: 'pointer' });
+  const button = rect(close.x - 3, inner.y, 3, 1);
+  p.span(button.x + 1, button.y, '⌕', filter || p.hovered(button) ? { fg: 6 } : DARK);
+  p.region({ r: button, click: () => app.openChangesFilter(), cursor: 'pointer' });
+  if (filter) filterField(p, rect(inner.x, inner.y + 1, inner.w, 1), filter, surface);
 
-  const sy = inner.y + 1;
+  const sy = inner.y + (filter ? 2 : 1);
   let selector = rect(0, 0, 0, 0);
   if (app.changesMode !== 'uncommitted') {
     const label = ` vs ${app.changesBase} ▾ `;
@@ -328,9 +381,10 @@ export function drawChanges(p: Painter, areas: Areas): void {
   }
   const added = files.reduce((n, f) => n + f.added, 0);
   const removed = files.reduce((n, f) => n + f.removed, 0);
-  x = p.span(inner.x, sy, String(files.length), { fg: 15, add: BOLD });
-  x = p.span(x, sy, files.length === 1 ? ' file' : ' files', { fg: 7 });
-  if (added + removed > 0) {
+  const noun = files.length === 1 ? 'file' : 'files';
+  x = p.span(inner.x, sy, String(kept ? kept.size : files.length), { fg: 15, add: BOLD });
+  x = p.span(x, sy, kept ? ` of ${files.length} ${noun}` : ` ${noun}`, { fg: 7 });
+  if (added + removed > 0 && !kept) {
     x = p.span(x + 2, sy, `+${added}`, { fg: 2, add: BOLD });
     x = p.span(x + 1, sy, `−${removed}`, { fg: 1, add: BOLD });
     const green = Math.min(8, Math.ceil((added * 8) / (added + removed)));
@@ -342,15 +396,16 @@ export function drawChanges(p: Painter, areas: Areas): void {
     p.span(lx, sy, ' live', DARK);
   }
 
-  const body = rect(area.x, area.y + 3, area.w, Math.max(0, area.h - 5));
-  const list = rows(app, files);
+  const top = filter ? 4 : 3;
+  const body = rect(area.x, area.y + top, area.w, Math.max(0, area.h - top - 2));
+  const list = rows(app, files, kept);
   const max = Math.max(0, list.length - body.h);
   const first = Math.min(app.changesScroll, max);
   p.region({ r: body, wheel: (dy) => app.scrollChanges(dy, max) });
   if (!files.length) {
     const text = app.changesMode === 'uncommitted' ? 'no changes' : app.changesMode === 'commits' ? `no commits since ${app.changesBase}` : `nothing changed since ${app.changesBase}`;
     p.span(body.x + 1, body.y, text, DARK);
-  }
+  } else if (kept && !kept.size) p.span(body.x + 1, body.y, 'no file matches', DARK);
   const shown = list.slice(first, first + body.h).map((row, k) => ({ row, r: rect(body.x, body.y + k, body.w, 1) }));
   const hot = shown.find(({ r }) => p.hovered(r))?.row;
   const hotHunk = hot && (hot.kind === 'hunk' || hot.kind === 'line') ? `${hot.i}:${hot.h}` : null;
@@ -376,6 +431,21 @@ export function drawChanges(p: Painter, areas: Areas): void {
     const text = `${viewed} of ${files.length} viewed`;
     p.span(right(inner) - text.length, foot, text, DARK);
   }
+}
+
+function filterField(p: Painter, row: Rect, filter: { query: string; focused: boolean }, surface: number): void {
+  const app = p.app;
+  p.g.fill(row, { bg: surface });
+  const clear = rect(right(row) - 3, row.y, 3, 1);
+  p.span(clear.x + 1, clear.y, '×', p.hovered(clear) ? { fg: 1, add: BOLD } : DARK);
+  p.region({ r: clear, click: () => app.closeChangesFilter(), cursor: 'pointer' });
+  const end = clear.x;
+  const start = p.span(row.x + 1, row.y, '⌕', { fg: filter.focused ? 6 : 8 }) + 1;
+  const room = Math.max(0, end - start - 1);
+  if (!filter.query) p.span(start, row.y, truncateRight('path, *.test.js, !*.snap', room), DARK);
+  const x = p.span(start, row.y, truncateLeft(filter.query, room), { add: BOLD });
+  if (filter.focused && x < end) p.cursor = { x, y: row.y, shape: 'block' };
+  p.region({ r: rect(row.x, row.y, end - row.x, 1), click: () => app.openChangesFilter(), cursor: 'text' });
 }
 
 function numberWidth(f: FileDiff): number {

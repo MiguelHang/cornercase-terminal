@@ -2,7 +2,7 @@
 source: src/ui.rs
 expression: "render_sized(&with_panel(), 140, 16).backend()"
 ---
-"  ⌕ search projects, workspaces, tabs                    │  no tab open                             │  uncommitted   commits   all       ×  "
+"  ⌕ search projects, workspaces, tabs                    │  no tab open                             │  uncommitted   commits   all    ⌕  ×  "
 "                                                         │                                          │ reading changes…                      "
 " projects                      │ workspaces              │                                          │                                       "
 "                               │                         │                                          │                                       "

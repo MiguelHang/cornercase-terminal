@@ -140,6 +140,7 @@ export class App {
   changesMode: ChangesMode = 'uncommitted';
   changesBase = BASES[0];
   changesScroll = 0;
+  changesFilter: { query: string; focused: boolean } | null = null;
   private folded = new Map<string, boolean>();
   private viewed = new Set<string>();
   nav: 'projects' | 'workspaces' | null = null;
@@ -727,9 +728,39 @@ export class App {
 
   toggleChanges(): void {
     this.changesOpen = !this.changesOpen;
+    if (this.changesFilter) this.changesFilter.focused = false;
     this.nav = null;
     if (this.changesOpen) this.emit('narrate', 'Everything this workspace changed, right next to its agent. Hover a hunk to open it, copy it or send it back.');
     this.dirty();
+  }
+
+  openChangesFilter(): void {
+    if (this.changesFilter) this.changesFilter.focused = true;
+    else this.changesFilter = { query: '', focused: true };
+    this.dirty();
+  }
+
+  closeChangesFilter(): void {
+    this.changesFilter = null;
+    this.dirty();
+  }
+
+  private changesFilterKey(k: Key): boolean {
+    const filter = this.changesFilter;
+    if (!filter) return false;
+    const ch = this.typed(k);
+    if (k.key === 'Escape') this.changesFilter = null;
+    else if (k.key === 'Enter') filter.focused = false;
+    else if (k.key === 'Backspace') filter.query = filter.query.slice(0, -1);
+    else if (ch) filter.query += ch;
+    else return true;
+    this.changesScroll = 0;
+    this.dirty();
+    return true;
+  }
+
+  private filteringChanges(): boolean {
+    return !this.overlay && this.changesShown() && !!this.changesFilter?.focused;
   }
 
   setChangesMode(mode: ChangesMode): void {
@@ -1961,6 +1992,7 @@ export class App {
       this.dirty();
       return;
     }
+    if (this.changesFilter && !this.overlay && !(this.changesShown() && contains(this.areas().changes, x, y))) this.changesFilter.focused = false;
     const region = this.hit(x, y, (r) => !!(r.click || r.right || r.drag || r.pane));
     if (!region) return;
     if (region.drag && button === 0) {
@@ -2057,6 +2089,12 @@ export class App {
       this.dirty();
       return;
     }
+    if (this.filteringChanges() && this.changesFilter) {
+      this.changesFilter.query += text.replace(/\s+/g, ' ');
+      this.changesScroll = 0;
+      this.dirty();
+      return;
+    }
     const t = this.tab();
     if (t) activePane(t)?.shell.paste(text);
   }
@@ -2076,6 +2114,7 @@ export class App {
     }
     const o = this.overlay;
     if (o) return this.overlayKey(o, k);
+    if (this.filteringChanges()) return this.changesFilterKey(k);
     const t = this.tab();
     const pane = t ? activePane(t) : undefined;
     if (!pane) return false;

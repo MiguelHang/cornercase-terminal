@@ -1,4 +1,5 @@
 pub mod diff;
+pub mod filter;
 pub mod git;
 
 use std::collections::HashMap;
@@ -81,6 +82,7 @@ pub struct Panel {
     pub mode: Mode,
     pub scroll: usize,
     pub workspace: Option<u64>,
+    pub filter: Option<filter::Filter>,
     models: HashMap<u64, Model>,
     folded: HashMap<FileKey, bool>,
     viewed: HashMap<FileKey, u64>,
@@ -204,6 +206,13 @@ impl Panel {
     pub fn toggle_fold(&mut self, workspace: u64, diff: &Diff, file: &File) {
         let folded = self.folded(workspace, diff, file);
         self.folded.insert(key(workspace, file), !folded);
+    }
+
+    pub fn close(&mut self) {
+        self.open = false;
+        if let Some(filter) = &mut self.filter {
+            filter.focused = false;
+        }
     }
 
     pub fn fold_all(&mut self, workspace: u64, diff: &Diff) {

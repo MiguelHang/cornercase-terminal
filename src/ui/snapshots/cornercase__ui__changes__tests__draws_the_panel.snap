@@ -2,7 +2,7 @@
 source: src/ui/changes.rs
 expression: "render(&sample(), None).backend()"
 ---
-"  uncommitted   commits   all                            ×  "
+"  uncommitted   commits   all                         ⌕  ×  "
 " 3 files  +7 −3  ▃▃▃▃▃▃▃▃                            ● live "
 "                                                            "
 " ▌▾ M src/returns.rs                               +5 −2    "
