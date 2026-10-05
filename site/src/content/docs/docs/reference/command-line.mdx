@@ -9,6 +9,7 @@ cornercase has a deliberately small command line. Everything else happens in the
 
 ```sh
 cornercase              # open the UI, starting the server if needed
+cornercase update       # install the latest release and restart the server
 cornercase kill-server  # stop the server and every shell in it
 cornercase --version    # print the version
 ```
@@ -29,6 +30,35 @@ Restart it now? Its terminals close, and your session comes back with new shells
 ```
 
 Answer `y` to stop the old server and start one on the new binary: your projects, workspaces, tabs and splits come back, each pane with a new shell in its folder. Any other answer leaves the old server running and exits with the [message](#messages) below. When the input isn't a terminal, as in a script, it doesn't ask.
+
+### `cornercase update`
+
+Installs the latest release from any shell, without waiting for the daily check:
+
+```sh
+cornercase update          # install it, then ask whether to restart the server
+cornercase update --yes    # install it and restart the server without asking (-y works too)
+cornercase update --check  # only say whether a newer version is out
+```
+
+It asks GitHub for the latest release. If yours is the latest, it prints `cornercase 0.5.0 is up to date` and stops. Otherwise it replaces the binary the same way the [update dialog](../../installation/#update) does (download, checksum, a test run of the new binary) and prints `updated cornercase 0.4.2 → 0.5.0`. If anything fails, it says why and the old binary stays.
+
+The server that is running still has the old version, so `update` then asks:
+
+```text
+The running cornercase server still runs 0.4.2.
+Restart it now? Its terminals close, and your session comes back with new shells in the same folders. [y/N]
+```
+
+With `y` or `--yes`, it saves your session and restarts the server: every attached window reopens on the new version. Your projects, workspaces, tabs and splits come back, and each pane gets a new shell in its folder. If you say no, or when the input isn't a terminal and `--yes` isn't given, the old server keeps running until you run `cornercase kill-server`. `update` never opens the UI. Run `cornercase` afterwards if you want it.
+
+You can run it inside one of cornercase's own panes. That pane closes with the server and reopens with the rest of your session.
+
+A server running 0.4.2 or older doesn't know how to restart itself, so this first time `update` stops it instead, like `kill-server`, and the attached windows close. Run `cornercase` again to get your session back on the new version. From the next update on, the windows reopen by themselves.
+
+When cornercase can't replace its own binary (Homebrew installed it, you can't write to its folder, or your platform isn't one it knows), `update` changes nothing. It prints the command to run instead (`brew upgrade cornercase`, or the install script) and exits with a non-zero status. After that command, the next `cornercase` [offers to restart](#a-server-from-another-build) the old server.
+
+`--check` prints `cornercase 0.5.0 is out (you have 0.4.2). Update it with:` followed by the command, or that you are up to date. It exits with status 0 in both cases. Builds made with `cargo run` refuse to update.
 
 ### `cornercase kill-server`
 
@@ -60,6 +90,8 @@ CORNERCASE_SOCKET=/tmp/cc-demo/server.sock cornercase kill-server
 | `the running cornercase server is incompatible with this build. Run cornercase kill-server …` | Same cause, detected while talking to the server. |
 | `failed to start the cornercase server; see <log>` | The server didn't come up within a few seconds. The log next to the socket says why. |
 | `a cornercase server is already running on <socket>` | Printed by `cornercase server` when another server holds the socket's lock. |
-| ``unknown command `…`; use `cornercase`, `cornercase kill-server` or `cornercase --version` `` | Only those three forms exist. |
+| ``unknown command `…`; use `cornercase`, `cornercase update`, `cornercase kill-server` or `cornercase --version` `` | Only those four forms exist. |
+| ``unknown option `…`; use `cornercase update [--check] [--yes]` `` | `update` only takes those options. |
+| ``this is a development build; `cornercase update` only updates released builds`` | You ran `update` from a build made with `cargo run`. Pull and build again instead. |
 
 On any of these, `cornercase` exits with a non-zero status.

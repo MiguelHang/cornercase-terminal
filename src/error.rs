@@ -38,6 +38,8 @@ pub enum Error {
     Nested,
     #[error("{0}")]
     Rejected(String),
+    #[error("this is a development build; `cornercase update` only updates released builds")]
+    DevelopmentBuild,
     #[error("failed to register signal handlers")]
     Signals(#[source] std::io::Error),
     #[error("failed to run git: {0}")]

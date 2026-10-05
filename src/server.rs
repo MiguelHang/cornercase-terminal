@@ -312,6 +312,9 @@ impl Server {
             ServerEvent::Accepted(stream) => self.accept(stream),
             ServerEvent::Message(id, ClientMessage::Hello(hello)) => self.hello(id, *hello),
             ServerEvent::Message(id, ClientMessage::Event(ev)) => self.input(id, ev),
+            ServerEvent::Message(_, ClientMessage::Restart) => {
+                self.restart = Some(std::env::current_exe().unwrap_or_default());
+            }
             ServerEvent::Incompatible(id) => self.reject(id, OTHER_BUILD),
             ServerEvent::Gone(id) => self.remove(id),
         }
