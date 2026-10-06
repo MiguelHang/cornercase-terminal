@@ -31,7 +31,7 @@ You can always update by hand with the install script or `brew upgrade cornercas
 
 ### No update shows up
 
-cornercase checks when the server starts and then once a day, and only if **settings → TUI → check for updates** is on; builds made with `cargo run` never check. A server that has been running for less than a day since a release may not have asked yet. Run `cornercase update` to install it right away. When the check itself fails, `server.log` says why, in a line starting with `cornercase server: the update check failed`.
+cornercase checks when the server starts and then every hour, and only if **settings → TUI → check for updates** is on; builds made with `cargo run` never check. A release that came out less than an hour ago may not have been seen yet. Run `cornercase update` to install it right away. When the check itself fails, `server.log` says why, in a line starting with `cornercase server: the update check failed`.
 
 ### Turning update checks off
 

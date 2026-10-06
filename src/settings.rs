@@ -738,7 +738,7 @@ impl Settings {
                 false,
             ),
             Row::Updates => {
-                let value = if config.check_updates { "[x] once a day" } else { "[ ] never" };
+                let value = if config.check_updates { "[x] every hour" } else { "[ ] never" };
                 ("check for updates".into(), value.into(), "asks GitHub for the latest release".into(), false)
             }
             Row::Trust => {

@@ -2570,7 +2570,9 @@ impl App {
         self.updates.checked = Some(now);
         let (url, tx) = (self.updates.url.clone(), self.tx.clone());
         std::thread::spawn(move || {
-            let _ = tx.send(AppEvent::UpdateChecked(update::check(&url, update::CURRENT)));
+            let found = update::check(&url, update::CURRENT);
+            let found = found.map(|release| release.map(|release| update::with_changelog(release, update::CURRENT)));
+            let _ = tx.send(AppEvent::UpdateChecked(found));
         });
     }
 
@@ -2634,7 +2636,9 @@ impl App {
             return Vec::new();
         };
         let width = usize::from(ui::update_notes(area).width);
-        markdown::render(&format!("**What's new in {}**\n\n{}", release.version, release.notes), width)
+        let notes: Vec<String> =
+            release.notes.iter().map(|(version, notes)| format!("**What's new in {version}**\n\n{notes}")).collect();
+        markdown::render(&notes.join("\n\n"), width)
     }
 
     fn submit_update(&mut self, step: UpdateStep) -> Option<Overlay> {
@@ -8018,19 +8022,65 @@ rm -f "$1/sessions/$$.json"
             assert_eq!(step(&app), Some(&UpdateStep::Updating));
         }
 
-        #[test]
-        fn the_check_asks_github_once_a_day() {
-            let server = FakeHttp::start(vec![("GET /releases/latest", 200, LATEST)]);
+        fn checking(server: &FakeHttp) -> (App, Receiver<AppEvent>) {
             let (mut app, rx) = empty_app();
             app.updates.enabled = true;
             app.updates.url = format!("{}/releases/latest", server.url());
+            (app, rx)
+        }
+
+        #[test]
+        fn the_check_asks_github_once_an_hour() {
+            let server = FakeHttp::start(vec![("GET /releases/latest", 200, LATEST)]);
+            let (mut app, rx) = checking(&server);
             let now = Instant::now();
 
             app.refresh(now);
             pump_until(&mut app, &rx, "the update is found", |app| app.update_label().is_some());
             app.refresh(now + Duration::from_secs(60));
-
             assert_eq!(server.requests().len(), 1);
+
+            app.refresh(now + update::CHECK_EVERY);
+            wait_until("the second check", || server.requests().len() == 2);
+        }
+
+        #[test]
+        fn a_later_release_replaces_the_one_shown_and_says_so_again() {
+            let (mut app, _rx) = found(replaced());
+            app.toast = None;
+            let later = update::release(&serde_json::json!({"tag_name": "v9.1.0", "assets": []})).expect("a release");
+
+            app.handle_event(AppEvent::UpdateChecked(Ok(Some(later.clone()))), AREA).expect("handle check");
+            assert_eq!(app.update_label().as_deref(), Some("↑ 9.1.0"));
+            assert_eq!(toast(&app), Some(UPDATE_AVAILABLE));
+
+            app.toast = None;
+            app.handle_event(AppEvent::UpdateChecked(Ok(Some(later))), AREA).expect("handle check");
+            assert_eq!(toast(&app), None);
+        }
+
+        #[test]
+        fn the_dialog_shows_the_changelog_of_every_version_since_this_one() {
+            let changelog = format!(
+                "# Changelog\n\n## 9.0.0\n\n- Newest.\n\n## 8.0.0\n\n- Skipped one.\n\n## {}\n\n- This one.\n",
+                update::CURRENT
+            );
+            let files = FakeHttp::start(vec![("GET /CHANGELOG.md", 200, changelog)]);
+            let latest = serde_json::json!({"tag_name": "v9.0.0", "assets": [
+                {"name": "CHANGELOG.md", "browser_download_url": format!("{}/CHANGELOG.md", files.url())}
+            ]});
+            let server = FakeHttp::start(vec![("GET /releases/latest", 200, latest.to_string())]);
+            let (mut app, rx) = checking(&server);
+            app.updates.install = replaced();
+
+            app.refresh(Instant::now());
+            pump_until(&mut app, &rx, "the update is found", |app| app.update_label().is_some());
+            open(&mut app);
+
+            assert_eq!(
+                shown_notes(&app),
+                ["What's new in 9.0.0", "", "• Newest.", "", "What's new in 8.0.0", "", "• Skipped one."]
+            );
         }
 
         #[test]

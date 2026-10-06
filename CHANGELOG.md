@@ -2,6 +2,11 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.7.1
+
+- cornercase now looks for a new version every hour instead of once a day, so a release reaches you the same morning. It is still one small request to GitHub (plus the changelog once a new version is out), and **settings → TUI → check for updates** still turns it off.
+- The update dialog now shows what changed in every version since yours, newest first, so if a second release comes out before you update, you also see what the first one brought.
+
 ## 0.7.0
 
 - A new setting, **settings → TUI → memory**, shows how much memory each Claude Code and Codex tab uses at the end of the line under its name: `Opus 5.5 · 23% · 1.2 GB`. It counts the agent and everything it started (MCP servers, language servers, background commands), as `ps` does, so take it as a guide to which agent is growing. It is off by default; while on, the tabs of the project on screen are measured every 2 seconds.

@@ -34,7 +34,7 @@ Prebuilt binaries cover Linux and macOS on x86_64 and arm64.
 
 ### Updates
 
-Once a day cornercase asks GitHub for the latest release. When there is a newer one, a ` ↑ 0.2.0 ` button shows up next to ` settings `: it shows what is new, downloads the new binary, checks its checksum and replaces the old one, then offers to restart. Your session comes back after the restart, with new shells in the same folders. Homebrew installs show `brew upgrade cornercase` instead. Turn the check off in ` settings ` → TUI.
+Every hour cornercase asks GitHub for the latest release. When there is a newer one, a ` ↑ 0.2.0 ` button shows up next to ` settings `: it shows what is new since your version, downloads the new binary, checks its checksum and replaces the old one, then offers to restart. Your session comes back after the restart, with new shells in the same folders. Homebrew installs show `brew upgrade cornercase` instead. Turn the check off in ` settings ` → TUI.
 
 ### From source
 
