@@ -29,7 +29,8 @@ impl App {
             .collect();
         let adding = field.filter(|f| f.item.is_none()).map(|f| f.editor.clone());
         let light = self.theme.is_light() == Some(true);
-        let mut view = panel::View { items, scroll: self.todo.scroll, adding, light, drag: None };
+        let muted = ui::muted(&self.theme);
+        let mut view = panel::View { items, scroll: self.todo.scroll, adding, light, muted, drag: None };
         if let Some((drag, pos)) = self.row_drag.filter(|d| d.moved).zip(self.hover)
             && let Grab::Todo(id) = drag.target
         {
@@ -145,7 +146,8 @@ impl App {
                 }
             }
             Some(Hit::Item { id, row, .. }) => {
-                self.row_drag = Some(RowDrag { target: Grab::Todo(id), row, moved: false, area, scrolled: None });
+                self.row_drag =
+                    Some(RowDrag { target: Grab::Todo(id), row, moved: false, area, scrolled: None, fold: false });
             }
             None => {}
         }

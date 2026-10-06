@@ -15,6 +15,7 @@ pub mod todo;
 
 use crate::activity::{self, Status};
 use crate::emulator::Snapshot;
+use crate::host_theme::HostTheme;
 use crate::markdown;
 use crate::split::{Dir, Node};
 use crate::usage::Severity;
@@ -59,6 +60,8 @@ const DARK_SURFACE: Color = Color::Indexed(236);
 const LIGHT_SURFACE: Color = Color::Indexed(254);
 const DARK_HOVER: Color = Color::Indexed(235);
 const LIGHT_HOVER: Color = Color::Indexed(255);
+const DARK_MUTED: Color = Color::Indexed(243);
+const LIGHT_MUTED: Color = Color::Indexed(245);
 const CLOSE_BUTTON_WIDTH: u16 = 3;
 const COMPACT_CLOSE_WIDTH: u16 = 5;
 const TOAST_ICON: &str = " ✓ ";
@@ -88,20 +91,22 @@ pub enum Border {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Sidebar {
-    #[default]
     SideBySide,
+    #[default]
     ProjectsOnTop,
     WorkspacesOnTop,
+    Tree,
 }
 
 impl Sidebar {
-    pub const ALL: [Self; 3] = [Self::SideBySide, Self::ProjectsOnTop, Self::WorkspacesOnTop];
+    pub const ALL: [Self; 4] = [Self::SideBySide, Self::ProjectsOnTop, Self::WorkspacesOnTop, Self::Tree];
 
     pub fn id(self) -> &'static str {
         match self {
             Self::SideBySide => "side_by_side",
             Self::ProjectsOnTop => "projects_on_top",
             Self::WorkspacesOnTop => "workspaces_on_top",
+            Self::Tree => "tree",
         }
     }
 
@@ -110,6 +115,7 @@ impl Sidebar {
             Self::SideBySide => "projects and workspaces in two columns",
             Self::ProjectsOnTop => "one column, workspaces below projects",
             Self::WorkspacesOnTop => "one column, projects below workspaces",
+            Self::Tree => "one list: projects, workspaces and tabs",
         }
     }
 
@@ -239,6 +245,7 @@ pub enum Nav {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Areas {
     pub pitch: u16,
+    pub tree: bool,
     pub bar: Rect,
     pub search: Rect,
     pub search_button: Rect,
@@ -327,7 +334,7 @@ fn right_edge(r: Rect) -> Rect {
 }
 
 fn sidebar_block() -> Block<'static> {
-    Block::default().borders(Borders::RIGHT).border_style(Style::default().fg(Color::DarkGray))
+    Block::default().borders(Borders::RIGHT)
 }
 
 fn projects_column(r: Rect) -> [Rect; 6] {
@@ -370,7 +377,11 @@ pub fn layout_with(area: Rect, widths: Widths, changes: bool, sidebar: Sidebar) 
     if area.width < COMPACT_WIDTH {
         return compact_layout(area, changes);
     }
-    let columns = |r: Rect| if sidebar.stacked() { stacked_layout(r, widths, sidebar) } else { wide_layout(r, widths) };
+    let columns = |r: Rect| match sidebar {
+        Sidebar::SideBySide => wide_layout(r, widths),
+        Sidebar::Tree => tree_layout(r, widths),
+        Sidebar::ProjectsOnTop | Sidebar::WorkspacesOnTop => stacked_layout(r, widths, sidebar),
+    };
     if !changes {
         return columns(area);
     }
@@ -404,6 +415,7 @@ fn wide_layout(area: Rect, widths: Widths) -> Areas {
         workspaces_column(below_header(sidebar_block().inner(workspaces)));
     Areas {
         pitch: 1,
+        tree: false,
         bar: Rect::default(),
         search,
         search_button: search,
@@ -438,7 +450,7 @@ fn section(r: Rect) -> [Rect; 2] {
     [title, list]
 }
 
-fn stacked_layout(area: Rect, widths: Widths, sidebar: Sidebar) -> Areas {
+fn one_column(area: Rect, widths: Widths) -> (Areas, Rect) {
     let column = Rect { width: widths.stacked_width(area.width), ..area };
     let pane_x = column.right().saturating_add(PANE_PADDING).min(area.right());
     let pane = Rect { x: pane_x, width: area.right() - pane_x, ..area };
@@ -446,39 +458,60 @@ fn stacked_layout(area: Rect, widths: Widths, sidebar: Sidebar) -> Areas {
     let [header, results] = Layout::vertical([Constraint::Length(HEADER_HEIGHT), Constraint::Min(0)]).areas(inner);
     let search = search_area(header);
     let room = stack_room(inner);
-    let top_rows = widths.top_rows(room.height);
     let footer_y = inner.bottom().saturating_sub(STACK_FOOTER).max(room.y);
-    let sections = Rect { height: footer_y - room.y, ..room };
-    let top = Rect { height: top_rows, ..room }.intersection(sections);
-    let line = Rect { y: room.y + top_rows, height: 1, ..room }.intersection(sections);
-    let under = Rect { y: room.y + top_rows + 1, height: room.height - top_rows, ..room }.intersection(sections);
     let footer = Rect { y: footer_y, height: inner.bottom() - footer_y, ..inner };
     let [separator, issues, todo, settings, usage, quit] = Layout::vertical([Constraint::Length(1); 6]).areas(footer);
-    let (projects, workspaces) = if sidebar == Sidebar::WorkspacesOnTop { (under, top) } else { (top, under) };
-    let [title, list] = section(projects);
-    let [workspaces_title, workspaces_list] = section(workspaces);
-    let widen = |r: Rect| Rect { x: column.x, width: column.width, ..r };
-    Areas {
+    let frame = Areas {
         pitch: 1,
         search,
         search_button: search,
-        sidebar: widen(projects),
-        title,
-        list,
+        sidebar: column,
         separator,
         settings,
         usage,
         quit,
-        workspaces: widen(workspaces),
-        workspaces_title,
-        workspaces_list,
         issues,
         results,
         pane,
         projects_border: right_edge(column),
-        stack_border: line,
         todo_button: changes_button(todo, TODO_LABEL),
         ..Areas::default()
+    };
+    (frame, Rect { height: footer_y - room.y, ..room })
+}
+
+fn stacked_layout(area: Rect, widths: Widths, sidebar: Sidebar) -> Areas {
+    let (frame, sections) = one_column(area, widths);
+    let room = Rect { height: sections.height.saturating_sub(1), ..sections };
+    let top_rows = widths.top_rows(room.height);
+    let top = Rect { height: top_rows, ..room }.intersection(sections);
+    let line = Rect { y: room.y + top_rows, height: 1, ..room }.intersection(sections);
+    let under = Rect { y: room.y + top_rows + 1, height: room.height - top_rows, ..room }.intersection(sections);
+    let (projects, workspaces) = if sidebar == Sidebar::WorkspacesOnTop { (under, top) } else { (top, under) };
+    let [title, list] = section(projects);
+    let [workspaces_title, workspaces_list] = section(workspaces);
+    let widen = |r: Rect| Rect { x: frame.sidebar.x, width: frame.sidebar.width, ..r };
+    Areas {
+        sidebar: widen(projects),
+        title,
+        list,
+        workspaces: widen(workspaces),
+        workspaces_title,
+        workspaces_list,
+        stack_border: line,
+        ..frame
+    }
+}
+
+fn tree_layout(area: Rect, widths: Widths) -> Areas {
+    let (frame, sections) = one_column(area, widths);
+    let [title, list] = section(sections);
+    Areas {
+        tree: true,
+        sidebar: Rect { x: frame.sidebar.x, width: frame.sidebar.width, ..sections },
+        title,
+        list,
+        ..frame
     }
 }
 
@@ -509,6 +542,7 @@ fn compact_layout(area: Rect, changes: bool) -> Areas {
     let back = Rect { width: button_width(BACK_LABEL) + 2, ..workspaces_title }.intersection(workspaces_title);
     Areas {
         pitch,
+        tree: false,
         bar,
         search: bar,
         search_button,
@@ -814,6 +848,178 @@ pub fn workspace_hit(list: Rect, pitch: u16, tabs: &[Vec<u16>], scroll: usize, p
     })
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TreeShape {
+    pub groups: Vec<bool>,
+    pub projects: Vec<ProjectShape>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectShape {
+    pub group: Option<usize>,
+    pub collapsed: bool,
+    pub workspaces: Vec<WorkspaceShape>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceShape {
+    pub collapsed: bool,
+    pub tabs: Vec<u16>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeRow {
+    Gap,
+    Group(usize),
+    Project(usize),
+    Workspace(usize, usize),
+    Tab(usize, usize, usize),
+    NewTab(usize, usize),
+    NewWorkspace(usize),
+    Landing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeHit {
+    Fold(TreeRow),
+    Select(TreeRow),
+    Close(TreeRow),
+    NewTab(usize, usize),
+    NewWorkspace(usize),
+    NewProject,
+}
+
+pub fn tree_rows(shape: &TreeShape) -> Vec<TreeRow> {
+    let groups: Vec<Option<usize>> = shape.projects.iter().map(|p| p.group).collect();
+    let mut rows = Vec::new();
+    for row in sidebar_rows(&groups, &shape.groups) {
+        match row {
+            SidebarRow::Gap => rows.push(TreeRow::Gap),
+            SidebarRow::Group(g) => rows.push(TreeRow::Group(g)),
+            SidebarRow::Project(p) => {
+                rows.push(TreeRow::Project(p));
+                let project = &shape.projects[p];
+                if project.collapsed {
+                    continue;
+                }
+                for (w, workspace) in project.workspaces.iter().enumerate() {
+                    rows.push(TreeRow::Workspace(p, w));
+                    if !workspace.collapsed {
+                        rows.extend((0..workspace.tabs.len()).map(|t| TreeRow::Tab(p, w, t)));
+                        rows.push(TreeRow::NewTab(p, w));
+                    }
+                }
+                rows.push(TreeRow::NewWorkspace(p));
+            }
+            SidebarRow::Landing => {}
+        }
+    }
+    rows
+}
+
+fn tree_height(shape: &TreeShape, row: TreeRow) -> u16 {
+    match row {
+        TreeRow::Gap | TreeRow::Landing => GAP,
+        TreeRow::Tab(p, w, t) => {
+            let lines = shape.projects.get(p).and_then(|p| p.workspaces.get(w)).and_then(|w| w.tabs.get(t));
+            lines.copied().unwrap_or(1).max(1)
+        }
+        _ => 1,
+    }
+}
+
+fn tree_depth(shape: &TreeShape, row: TreeRow) -> u16 {
+    let project = |p: usize| u16::from(shape.projects.get(p).is_some_and(|p| p.group.is_some()));
+    match row {
+        TreeRow::Gap | TreeRow::Landing | TreeRow::Group(_) => 0,
+        TreeRow::Project(p) => project(p),
+        TreeRow::Workspace(p, _) | TreeRow::NewWorkspace(p) => project(p) + 1,
+        TreeRow::Tab(p, ..) | TreeRow::NewTab(p, _) => project(p) + 2,
+    }
+}
+
+fn tree_indent(shape: &TreeShape, row: TreeRow) -> u16 {
+    2 + 2 * tree_depth(shape, row)
+}
+
+fn arrow_in(r: Rect, shape: &TreeShape, row: TreeRow) -> Rect {
+    match row {
+        TreeRow::Group(_) | TreeRow::Project(_) | TreeRow::Workspace(..) => {
+            Rect { x: r.x.saturating_add(tree_indent(shape, row)), width: 2, height: 1, ..r }.intersection(r)
+        }
+        _ => Rect::default(),
+    }
+}
+
+pub fn tree_layout_rows(list: Rect, shape: &TreeShape, rows: &[TreeRow], scroll: usize) -> Rows {
+    Rows { list, heights: rows.iter().map(|r| tree_height(shape, *r)).collect(), button: 1, scroll }
+}
+
+pub fn tree_row(list: Rect, shape: &TreeShape, scroll: usize, row: TreeRow) -> Rect {
+    let rows = tree_rows(shape);
+    row_rect(&tree_layout_rows(list, shape, &rows, scroll), &rows, &row)
+}
+
+pub fn tree_arrow(list: Rect, shape: &TreeShape, scroll: usize, row: TreeRow) -> Rect {
+    arrow_in(tree_row(list, shape, scroll, row), shape, row)
+}
+
+pub fn tree_close(list: Rect, shape: &TreeShape, scroll: usize, row: TreeRow) -> Rect {
+    row_close_button(tree_row(list, shape, scroll, row), 1)
+}
+
+pub fn tree_drop(list: Rect, shape: &TreeShape, scroll: usize, dragged: TreeRow, pos: Position) -> Option<Landing> {
+    let rows = tree_rows(shape);
+    let layout = tree_layout_rows(list, shape, &rows, scroll);
+    let zone = layout.zone(pos)?;
+    match dragged {
+        TreeRow::Group(_) => {
+            let header = |r| if let TreeRow::Group(g) = r { Some(g) } else { None };
+            let (at, g) = block_drop(&rows, &layout, zone, dragged, TreeRow::Gap, header)?;
+            Some(Landing { at, spot: Spot::Group(g) })
+        }
+        TreeRow::Project(_) => tree_project_drop(&rows, &layout, zone, rows.iter().position(|r| *r == dragged)?),
+        TreeRow::Workspace(p, w) => tree_workspace_drop(&rows, &layout, zone, p, w),
+        TreeRow::Tab(p, w, t) => {
+            let tab = |r| if let TreeRow::Tab(q, v, u) = r { (q == p && v == w).then_some(u) } else { None };
+            sibling_drop(&rows, &layout, zone, (TreeRow::Workspace(p, w), TreeRow::NewTab(p, w)), tab, t)
+        }
+        _ => None,
+    }
+}
+
+pub fn tree_active_row(rows: &[TreeRow], shape: &TreeShape, active: (usize, usize, Option<usize>)) -> Option<usize> {
+    let (p, w, t) = active;
+    let find = |row: TreeRow| rows.iter().position(|r| *r == row);
+    t.and_then(|t| find(TreeRow::Tab(p, w, t)))
+        .or_else(|| find(TreeRow::Workspace(p, w)))
+        .or_else(|| find(TreeRow::Project(p)))
+        .or_else(|| find(TreeRow::Group(shape.projects.get(p)?.group?)))
+}
+
+pub fn tree_hit(list: Rect, shape: &TreeShape, scroll: usize, pos: Position) -> Option<TreeHit> {
+    if !list.contains(pos) {
+        return None;
+    }
+    let rows = tree_rows(shape);
+    let layout = tree_layout_rows(list, shape, &rows, scroll);
+    if layout.button().contains(pos) {
+        return Some(TreeHit::NewProject);
+    }
+    let i = layout.at(pos)?;
+    let (r, row) = (layout.item(i), rows[i]);
+    let on_close = row_close_button(r, 1).contains(pos);
+    Some(match row {
+        TreeRow::Gap | TreeRow::Landing => return None,
+        TreeRow::NewTab(p, w) => TreeHit::NewTab(p, w),
+        TreeRow::NewWorkspace(p) => TreeHit::NewWorkspace(p),
+        _ if on_close => TreeHit::Close(row),
+        TreeRow::Group(_) => TreeHit::Fold(row),
+        _ if arrow_in(r, shape, row).contains(pos) => TreeHit::Fold(row),
+        _ => TreeHit::Select(row),
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Spot {
     Group(usize),
@@ -841,6 +1047,7 @@ pub struct Landing {
 pub enum Drag {
     Sidebar(SidebarRow, Option<Landing>),
     Workspaces(WorkspaceRow, Option<Landing>),
+    Tree(TreeRow, Option<Landing>),
     Todo(u64),
 }
 
@@ -851,21 +1058,48 @@ enum Zone {
     Below,
 }
 
-fn group_of(rows: &[SidebarRow], i: usize) -> Option<usize> {
-    rows[..=i].iter().rev().find_map(|r| match r {
-        SidebarRow::Group(g) => Some(*g),
-        _ => None,
-    })
+trait ListRow: Copy + PartialEq {
+    const GAP: Self;
+    fn group(self) -> Option<usize>;
+    fn project(self) -> Option<usize>;
 }
 
-fn project_spot(rows: &[SidebarRow], dragged: usize, at: usize) -> Spot {
-    if let Some(j) = (at..rows.len()).find(|&j| j != dragged)
-        && let SidebarRow::Project(q) = rows[j]
+impl ListRow for SidebarRow {
+    const GAP: Self = Self::Gap;
+
+    fn group(self) -> Option<usize> {
+        if let Self::Group(g) = self { Some(g) } else { None }
+    }
+
+    fn project(self) -> Option<usize> {
+        if let Self::Project(p) = self { Some(p) } else { None }
+    }
+}
+
+impl ListRow for TreeRow {
+    const GAP: Self = Self::Gap;
+
+    fn group(self) -> Option<usize> {
+        if let Self::Group(g) = self { Some(g) } else { None }
+    }
+
+    fn project(self) -> Option<usize> {
+        if let Self::Project(p) = self { Some(p) } else { None }
+    }
+}
+
+fn group_of<R: ListRow>(rows: &[R], i: usize) -> Option<usize> {
+    rows[..=i].iter().rev().find_map(|r| r.group())
+}
+
+fn project_spot<R: ListRow>(rows: &[R], dragged: Range<usize>, at: usize) -> Spot {
+    if let Some(j) = (at..rows.len()).find(|j| !dragged.contains(j))
+        && let Some(q) = rows[j].project()
     {
         return Spot::Project { group: group_of(rows, j), before: Some(q) };
     }
-    let group = match (0..at).rev().find(|&k| k != dragged) {
-        Some(k) if rows[k] == SidebarRow::Gap => group_of(rows, k - 1),
+    let group = match (0..at).rev().find(|k| !dragged.contains(k)) {
+        Some(k) if rows[k] == R::GAP => group_of(rows, k - 1),
         Some(k) => group_of(rows, k),
         None => None,
     };
@@ -879,7 +1113,7 @@ fn project_drop(rows: &[SidebarRow], layout: &Rows, zone: Zone, dragged: usize) 
         SidebarRow::Project(_) | SidebarRow::Group(_) => Some(i + 1),
         SidebarRow::Gap | SidebarRow::Landing => Some(i),
     })?;
-    Some(Landing { at, spot: project_spot(rows, dragged, at) })
+    Some(Landing { at, spot: project_spot(rows, dragged..dragged + 1, at) })
 }
 
 fn block_drop<R: Copy + PartialEq>(
@@ -904,18 +1138,88 @@ fn block_drop<R: Copy + PartialEq>(
     Some((at, rows[at..].iter().find_map(|r| header(*r)).unwrap_or(count)))
 }
 
-fn tab_drop(rows: &[WorkspaceRow], layout: &Rows, zone: Zone, w: usize, t: usize) -> Option<Landing> {
-    let header = rows.iter().position(|r| *r == WorkspaceRow::Workspace(w))?;
-    let new_tab = rows.iter().position(|r| *r == WorkspaceRow::NewTab(w))?;
-    let at = layout.boundary(zone, |i| match rows[i] {
-        WorkspaceRow::Tab(v, u) if v == w && u == t => None,
-        WorkspaceRow::Tab(v, u) if v == w && u < t => Some(i),
-        WorkspaceRow::Tab(v, _) if v == w => Some(i + 1),
-        _ if i <= header => Some(header + 1),
-        _ => Some(new_tab),
+fn sibling_drop<R: Copy + PartialEq>(
+    rows: &[R],
+    layout: &Rows,
+    zone: Zone,
+    (header, end): (R, R),
+    tab: impl Fn(R) -> Option<usize>,
+    t: usize,
+) -> Option<Landing> {
+    let header = rows.iter().position(|r| *r == header)?;
+    let end = rows.iter().position(|r| *r == end)?;
+    let at = layout.boundary(zone, |i| match tab(rows[i]) {
+        Some(u) if u == t => None,
+        Some(u) if u < t => Some(i),
+        Some(_) => Some(i + 1),
+        None if i <= header => Some(header + 1),
+        None => Some(end),
     })?;
-    let at = at.clamp(header + 1, new_tab);
+    let at = at.clamp(header + 1, end);
     Some(Landing { at, spot: Spot::Tab(at - header - 1) })
+}
+
+fn tab_drop(rows: &[WorkspaceRow], layout: &Rows, zone: Zone, w: usize, t: usize) -> Option<Landing> {
+    let tab = |r| if let WorkspaceRow::Tab(v, u) = r { (v == w).then_some(u) } else { None };
+    sibling_drop(rows, layout, zone, (WorkspaceRow::Workspace(w), WorkspaceRow::NewTab(w)), tab, t)
+}
+
+fn inside(parent: TreeRow, row: TreeRow) -> bool {
+    match (parent, row) {
+        (
+            TreeRow::Project(p),
+            TreeRow::Workspace(q, _) | TreeRow::Tab(q, ..) | TreeRow::NewTab(q, _) | TreeRow::NewWorkspace(q),
+        ) => p == q,
+        (TreeRow::Workspace(p, w), TreeRow::Tab(q, v, _) | TreeRow::NewTab(q, v)) => p == q && w == v,
+        _ => false,
+    }
+}
+
+fn block_end(rows: &[TreeRow], i: usize) -> usize {
+    (i + 1..rows.len()).find(|&j| !inside(rows[i], rows[j])).unwrap_or(rows.len())
+}
+
+fn owner(rows: &[TreeRow], i: usize, is_owner: impl Fn(TreeRow) -> bool) -> usize {
+    (0..=i).rev().find(|&j| is_owner(rows[j]) && (j == i || inside(rows[j], rows[i]))).unwrap_or(i)
+}
+
+fn block_drop_at(
+    rows: &[TreeRow],
+    layout: &Rows,
+    zone: Zone,
+    d: usize,
+    is_owner: impl Fn(TreeRow) -> bool,
+) -> Option<usize> {
+    let dragged = d..block_end(rows, d);
+    let at = layout.boundary(zone, |i| {
+        let o = owner(rows, i, &is_owner);
+        match rows[o] {
+            _ if dragged.contains(&o) => None,
+            row if is_owner(row) && o < d => Some(o),
+            row if is_owner(row) => Some(block_end(rows, o)),
+            TreeRow::Group(_) => Some(o + 1),
+            _ => Some(o),
+        }
+    })?;
+    let o = owner(rows, at.min(rows.len().saturating_sub(1)), &is_owner);
+    Some(if at < rows.len() && o < at && is_owner(rows[o]) { block_end(rows, o) } else { at })
+}
+
+fn tree_project_drop(rows: &[TreeRow], layout: &Rows, zone: Zone, d: usize) -> Option<Landing> {
+    let at = block_drop_at(rows, layout, zone, d, |r| matches!(r, TreeRow::Project(_)))?;
+    Some(Landing { at, spot: project_spot(rows, d..block_end(rows, d), at) })
+}
+
+fn tree_workspace_drop(rows: &[TreeRow], layout: &Rows, zone: Zone, p: usize, w: usize) -> Option<Landing> {
+    let header = rows.iter().position(|r| *r == TreeRow::Project(p))?;
+    let end = rows.iter().position(|r| *r == TreeRow::NewWorkspace(p))?;
+    let d = rows.iter().position(|r| *r == TreeRow::Workspace(p, w))?;
+    let is_workspace = |r| matches!(r, TreeRow::Workspace(q, _) if q == p);
+    let at = block_drop_at(rows, layout, zone, d, is_workspace)?.clamp(header + 1, end);
+    let index = |r: &TreeRow| if let TreeRow::Workspace(q, v) = *r { (q == p).then_some(v) } else { None };
+    let before =
+        rows[at..end].iter().find_map(index).unwrap_or_else(|| rows[header..end].iter().filter_map(index).count());
+    Some(Landing { at, spot: Spot::Workspace(before) })
 }
 
 pub fn sidebar_drop(
@@ -1175,7 +1479,7 @@ pub fn update_scroll(area: Rect, lines: usize, scroll: usize) -> usize {
 pub fn usage_area(area: Rect, usage: &Usage) -> Rect {
     let width = area.width.saturating_sub(4).min(FORM_WIDTH);
     let body = form_inner(Rect::new(0, 0, width, 3)).width;
-    let lines = u16::try_from(usage_lines(usage, body).len()).unwrap_or(u16::MAX);
+    let lines = u16::try_from(usage_lines(Color::Reset, usage, body).len()).unwrap_or(u16::MAX);
     let height = lines.saturating_add(3).min(area.height);
     Rect::new(area.x + (area.width - width) / 2, area.y + (area.height - height) / 2, width, height)
 }
@@ -1758,6 +2062,11 @@ impl From<String> for TabEntry {
     }
 }
 
+pub struct TreeView {
+    pub shape: TreeShape,
+    pub workspaces: Vec<Vec<WorkspaceEntry>>,
+}
+
 pub struct ChangesButton {
     pub label: String,
     pub open: bool,
@@ -1801,6 +2110,7 @@ pub struct View<'a> {
     pub sidebar: Sidebar,
     pub resizing: Option<Border>,
     pub light: bool,
+    pub muted: Color,
     pub tab: Option<TabView>,
     pub overlay: Option<Overlay>,
     pub toast: Option<Toast<'a>>,
@@ -1811,6 +2121,7 @@ pub struct View<'a> {
     pub todo: Option<todo::View>,
     pub attention: Option<Status>,
     pub drag: Option<Drag>,
+    pub tree: Option<TreeView>,
 }
 
 impl View<'_> {
@@ -1864,6 +2175,10 @@ impl View<'_> {
         matches!(self.drag, Some(Drag::Workspaces(dragged, _)) if dragged == row)
     }
 
+    fn dragging_tree_row(&self, row: TreeRow) -> bool {
+        matches!(self.drag, Some(Drag::Tree(dragged, _)) if dragged == row)
+    }
+
     fn search(&self) -> Option<&Search> {
         match &self.overlay {
             Some(Overlay::Search(search)) => Some(search),
@@ -1877,10 +2192,9 @@ pub fn draw(f: &mut Frame, view: &View) {
     let areas = layout_with(f.area(), view.widths, panel, view.sidebar).shown(view.nav);
     match &view.tab {
         Some(tab) => draw_tab(f, view, tab, areas.pane),
-        None if view.has_project => f.render_widget(
-            Paragraph::new(Span::styled(" no tab open", Style::default().fg(Color::DarkGray))),
-            areas.pane,
-        ),
+        None if view.has_project => {
+            f.render_widget(Paragraph::new(Span::styled(" no tab open", Style::default().fg(view.muted))), areas.pane);
+        }
         None => {}
     }
     if areas.compact() {
@@ -1889,13 +2203,15 @@ pub fn draw(f: &mut Frame, view: &View) {
             f.render_widget(Clear, areas.pane);
         }
     } else {
-        draw_column_border(f, areas.projects_border);
-        draw_column_border(f, areas.workspaces_border);
-        draw_separator(f, areas.stack_border);
+        draw_column_border(f, view.muted, areas.projects_border);
+        draw_column_border(f, view.muted, areas.workspaces_border);
+        draw_separator(f, view.muted, areas.stack_border);
         draw_borders(f, view, &areas);
         draw_search_bar(f, view, areas.search);
     }
-    if !areas.sidebar.is_empty() {
+    if areas.tree {
+        draw_tree(f, view, &areas);
+    } else if !areas.sidebar.is_empty() {
         draw_sidebar(f, view, &areas);
     }
     if [areas.separator, areas.settings, areas.usage, areas.quit].iter().any(|r| !r.is_empty()) {
@@ -1910,7 +2226,7 @@ pub fn draw(f: &mut Frame, view: &View) {
     if panel && !areas.changes.is_empty() {
         f.render_widget(Clear, areas.changes);
         let border = areas.changes_border;
-        draw_column_border(f, border);
+        draw_column_border(f, view.muted, border);
         draw_border(f, view, border, Border::Changes);
         let hover = view.hover.filter(|_| view.overlay.is_none());
         match (&view.changes, &view.todo) {
@@ -1961,7 +2277,7 @@ fn draw_toast(f: &mut Frame, view: &View, toast: Toast) {
     let icon = match toast.icon {
         ToastIcon::Check => Span::styled(TOAST_ICON, Style::default().fg(Color::Green)),
         ToastIcon::Agent(status) => {
-            let icon = status_icon(status);
+            let icon = status_icon(view.muted, status);
             Span::styled(format!(" {} ", icon.content), icon.style)
         }
         ToastIcon::Bug => Span::styled(BUG_ICON, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
@@ -2076,7 +2392,7 @@ fn draw_dividers(f: &mut Frame, view: &View, tab: &TabView, area: Rect) {
     }
     let buf = f.buffer_mut();
     for ((x, y), (links, lit)) in cells {
-        let color = if lit { Color::Cyan } else { Color::DarkGray };
+        let color = if lit { Color::Cyan } else { view.muted };
         buf[(x, y)].set_symbol(divider_symbol(links)).set_style(Style::default().fg(color));
     }
 }
@@ -2085,8 +2401,8 @@ fn hovered(view: &View, r: Rect) -> bool {
     view.hover.is_some_and(|p| r.contains(p))
 }
 
-fn dim() -> Style {
-    Style::default().fg(Color::DarkGray)
+fn dim(muted: Color) -> Style {
+    Style::default().fg(muted)
 }
 
 fn hovered_at(hover: Option<Position>, r: Rect) -> bool {
@@ -2100,8 +2416,9 @@ fn put(buf: &mut Buffer, x: u16, y: u16, text: &str, style: Style, end: u16) -> 
     buf.set_stringn(x, y, text, usize::from(end - x), style).0
 }
 
-fn draw_close(buf: &mut Buffer, r: Rect, hover: Option<Position>) {
-    let style = if hovered_at(hover, r) { Style::default().fg(Color::Red).add_modifier(Modifier::BOLD) } else { dim() };
+fn draw_close(buf: &mut Buffer, r: Rect, hover: Option<Position>, muted: Color) {
+    let style =
+        if hovered_at(hover, r) { Style::default().fg(Color::Red).add_modifier(Modifier::BOLD) } else { dim(muted) };
     put(buf, r.x + 1, r.y, "×", style, r.right());
 }
 
@@ -2117,8 +2434,8 @@ fn sidebar_hovered(view: &View, r: Rect) -> bool {
     view.overlay.is_none() && view.drag.is_none() && hovered(view, r)
 }
 
-fn overlay_block(title: &str) -> Block<'_> {
-    let block = Block::bordered().border_style(Style::default().fg(Color::DarkGray));
+fn overlay_block(muted: Color, title: &str) -> Block<'_> {
+    let block = Block::bordered().border_style(Style::default().fg(muted));
     if title.is_empty() {
         block
     } else {
@@ -2129,7 +2446,7 @@ fn overlay_block(title: &str) -> Block<'_> {
 fn draw_menu(f: &mut Frame, view: &View, at: Position, items: &[String]) {
     let menu = menu_area(f.area(), at, items);
     f.render_widget(Clear, menu);
-    f.render_widget(overlay_block(""), menu);
+    f.render_widget(overlay_block(view.muted, ""), menu);
     for (i, item) in items.iter().enumerate() {
         let r = menu_item(menu, i);
         let style = if hovered(view, r) {
@@ -2144,9 +2461,9 @@ fn draw_menu(f: &mut Frame, view: &View, at: Position, items: &[String]) {
 fn draw_form(f: &mut Frame, view: &View, form: &Form) {
     let r = form_area(f.area());
     f.render_widget(Clear, r);
-    f.render_widget(overlay_block(form.title), r);
+    f.render_widget(overlay_block(view.muted, form.title), r);
     let [label, input, hint, toggle, note, _] = form_rows(r);
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(view.muted);
 
     f.render_widget(Paragraph::new(Span::styled(form.label, dim)), label);
     if let Some(t) = &form.toggle {
@@ -2166,7 +2483,7 @@ fn draw_form(f: &mut Frame, view: &View, form: &Form) {
     );
     f.render_widget(Paragraph::new(Span::styled(truncate_left(&form.hint, usize::from(hint.width)), dim)), hint);
 
-    draw_note(f, form.note.as_ref(), note);
+    draw_note(f, view.muted, form.note.as_ref(), note);
 
     draw_dialog_buttons(f, view, form_buttons(r, form.submit), form.submit);
 
@@ -2184,9 +2501,9 @@ fn draw_group_style(f: &mut Frame, view: &View, group: &GroupEntry) {
     let area = f.area();
     let r = form_area(area);
     f.render_widget(Clear, r);
-    f.render_widget(overlay_block(&group.name), r);
+    f.render_widget(overlay_block(view.muted, &group.name), r);
     let [icon_label, icons, colour_label, colours, last] = style_rows(area);
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(view.muted);
     f.render_widget(Paragraph::new(Span::styled("icon", dim)), icon_label);
     f.render_widget(Paragraph::new(Span::styled("colour", dim)), colour_label);
     let selected = Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD);
@@ -2224,14 +2541,14 @@ fn draw_group_style(f: &mut Frame, view: &View, group: &GroupEntry) {
     draw_submit(f, view, done, crate::settings::DONE);
 }
 
-fn draw_note(f: &mut Frame, note: Option<&Note>, r: Rect) {
+fn draw_note(f: &mut Frame, muted: Color, note: Option<&Note>, r: Rect) {
     match note {
         Some(Note::Error(text)) => f.render_widget(
             Paragraph::new(text.as_str()).style(Style::default().fg(Color::Red)).wrap(Wrap { trim: true }),
             r,
         ),
         Some(Note::Busy(text)) => {
-            f.render_widget(Paragraph::new(Span::styled(*text, Style::default().fg(Color::DarkGray))), r);
+            f.render_widget(Paragraph::new(Span::styled(*text, Style::default().fg(muted))), r);
         }
         None => {}
     }
@@ -2240,24 +2557,24 @@ fn draw_note(f: &mut Frame, note: Option<&Note>, r: Rect) {
 fn draw_confirm(f: &mut Frame, view: &View, confirm: &Confirm) {
     let r = form_area(f.area());
     f.render_widget(Clear, r);
-    f.render_widget(overlay_block(confirm.title), r);
+    f.render_widget(overlay_block(view.muted, confirm.title), r);
     let [label, _, _, toggle, note, _] = form_rows(r);
     let message = Rect::new(label.x, label.y, label.width, toggle.bottom().saturating_sub(label.y));
     f.render_widget(Paragraph::new(confirm.message.as_str()).wrap(Wrap { trim: true }), message);
-    draw_note(f, confirm.note.as_ref(), note);
+    draw_note(f, view.muted, confirm.note.as_ref(), note);
     draw_dialog_buttons(f, view, form_buttons(r, confirm.submit), confirm.submit);
 }
 
 fn draw_update(f: &mut Frame, view: &View, update: &Update) {
     let r = picker_area(f.area());
     f.render_widget(Clear, r);
-    f.render_widget(overlay_block("update"), r);
+    f.render_widget(overlay_block(view.muted, "update"), r);
     let [message, notes, note, _] = update_rows(r);
     f.render_widget(Paragraph::new(update.message.as_str()).wrap(Wrap { trim: true }), message);
     let scroll = update_scroll(f.area(), update.notes.len(), update.scroll);
     let visible: Vec<Line> = update.notes.iter().skip(scroll).take(usize::from(notes.height)).cloned().collect();
     f.render_widget(Paragraph::new(visible), notes);
-    draw_note(f, update.note.as_ref(), note);
+    draw_note(f, view.muted, update.note.as_ref(), note);
     draw_dialog_buttons(f, view, update_buttons(f.area(), update.submit), update.submit);
 }
 
@@ -2269,8 +2586,8 @@ fn severity_color(severity: Severity) -> Color {
     }
 }
 
-fn usage_section_lines(section: &UsageSection, width: usize, lines: &mut Vec<Line<'static>>) {
-    let dim = Style::default().fg(Color::DarkGray);
+fn usage_section_lines(muted: Color, section: &UsageSection, width: usize, lines: &mut Vec<Line<'static>>) {
+    let dim = Style::default().fg(muted);
     let used = section.title.chars().count() + section.status.chars().count();
     lines.extend([
         Line::from(vec![
@@ -2312,10 +2629,10 @@ fn usage_section_lines(section: &UsageSection, width: usize, lines: &mut Vec<Lin
     }
 }
 
-fn usage_lines(usage: &Usage, width: u16) -> Vec<Line<'static>> {
+fn usage_lines(muted: Color, usage: &Usage, width: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for section in &usage.sections {
-        usage_section_lines(section, usize::from(width), &mut lines);
+        usage_section_lines(muted, section, usize::from(width), &mut lines);
     }
     lines
 }
@@ -2323,9 +2640,9 @@ fn usage_lines(usage: &Usage, width: u16) -> Vec<Line<'static>> {
 fn draw_usage(f: &mut Frame, view: &View, usage: &Usage) {
     let r = usage_area(f.area(), usage);
     f.render_widget(Clear, r);
-    f.render_widget(overlay_block(USAGE_LABEL), r);
+    f.render_widget(overlay_block(view.muted, USAGE_LABEL), r);
     let [body, _] = usage_rows(r);
-    f.render_widget(Paragraph::new(usage_lines(usage, body.width)), body);
+    f.render_widget(Paragraph::new(usage_lines(view.muted, usage, body.width)), body);
     draw_submit(f, view, usage_done(f.area(), usage), crate::settings::DONE);
 }
 
@@ -2339,7 +2656,7 @@ fn draw_submit(f: &mut Frame, view: &View, r: Rect, label: &str) {
 }
 
 fn draw_dialog_buttons(f: &mut Frame, view: &View, [submit, cancel]: [Rect; 2], label: &str) {
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(view.muted);
     let cancel_style = if hovered(view, cancel) { Style::default().fg(Color::Black).bg(Color::Gray) } else { dim };
     draw_submit(f, view, submit, label);
     f.render_widget(Paragraph::new(Span::styled(format!(" {CANCEL_LABEL} "), cancel_style)), cancel);
@@ -2348,9 +2665,9 @@ fn draw_dialog_buttons(f: &mut Frame, view: &View, [submit, cancel]: [Rect; 2], 
 fn draw_picker(f: &mut Frame, view: &View, picker: &Picker) {
     let r = picker_area(f.area());
     f.render_widget(Clear, r);
-    f.render_widget(overlay_block(picker.title), r);
+    f.render_widget(overlay_block(view.muted, picker.title), r);
     let [input, list, note, _] = picker_rows(r);
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(view.muted);
 
     let max = usize::from(input.width).saturating_sub(INPUT_PROMPT.chars().count() + 1);
     let filter = truncate_left(&picker.filter, max);
@@ -2380,7 +2697,7 @@ fn draw_picker(f: &mut Frame, view: &View, picker: &Picker) {
             let style = Style::default().fg(Color::Black).bg(Color::Cyan);
             (style.add_modifier(Modifier::BOLD), style)
         } else {
-            (Style::default(), Style::default().fg(Color::DarkGray))
+            (Style::default(), Style::default().fg(view.muted))
         };
         let branch = item.branch.as_deref().unwrap_or_default();
         let branch_width = branch.chars().count();
@@ -2422,14 +2739,14 @@ fn draw_settings(f: &mut Frame, view: &View, settings: &Settings) {
     let area = f.area();
     let r = settings_area(area);
     f.render_widget(Clear, r);
-    f.render_widget(overlay_block("settings"), r);
+    f.render_widget(overlay_block(view.muted, "settings"), r);
     let [_, body, edit_row, note, _] = settings_rows(r);
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(view.muted);
     let mut cursor = None;
     draw_tabs(f, view, &settings_tabs(r, &settings.tabs), &settings.tabs, settings.tab);
 
     if let Some(pick) = &settings.pick {
-        cursor = draw_input(f, Rect { height: 1, ..body }, &pick.title, &pick.filter);
+        cursor = draw_input(f, view.muted, Rect { height: 1, ..body }, &pick.title, &pick.filter);
         let list = settings_pick_list(r);
         if pick.items.is_empty() {
             f.render_widget(Paragraph::new(Span::styled(" nothing matches", dim)), list);
@@ -2471,7 +2788,7 @@ fn draw_settings(f: &mut Frame, view: &View, settings: &Settings) {
     }
 
     if let Some(edit) = &settings.edit {
-        cursor = draw_input(f, edit_row, &format!("{}:", edit.label), &edit.value);
+        cursor = draw_input(f, view.muted, edit_row, &format!("{}:", edit.label), &edit.value);
     }
     let (text, style) = match &settings.note {
         Some(Note::Error(text)) => (text.as_str(), Style::default().fg(Color::Red)),
@@ -2486,7 +2803,7 @@ fn draw_settings(f: &mut Frame, view: &View, settings: &Settings) {
 }
 
 fn draw_settings_row(f: &mut Frame, view: &View, row: &SettingsRow, selected: bool, r: Rect) {
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(view.muted);
     let (marker, bg) = if selected { ("› ", Style::default().bg(view.surface())) } else { ("  ", Style::default()) };
     let label_style = if selected { bg.add_modifier(Modifier::BOLD) } else { bg };
     let value_style = if row.dangerous { bg.fg(Color::Red) } else { bg };
@@ -2498,7 +2815,7 @@ fn draw_settings_row(f: &mut Frame, view: &View, row: &SettingsRow, selected: bo
         Span::styled(format!("{label:<26}"), label_style),
         Span::styled(value.clone(), value_style),
         Span::styled(if value.is_empty() || row.note.is_empty() { String::new() } else { "  ".into() }, bg),
-        Span::styled(row.note.clone(), bg.fg(Color::DarkGray)),
+        Span::styled(row.note.clone(), bg.fg(view.muted)),
     ];
     f.render_widget(Paragraph::new(Line::from(spans)).style(bg), r);
     if !hovered(view, r) {
@@ -2521,9 +2838,9 @@ fn draw_settings_row(f: &mut Frame, view: &View, row: &SettingsRow, selected: bo
 fn draw_issues(f: &mut Frame, view: &View, issues: &Issues) {
     let r = issues_area(f.area());
     f.render_widget(Clear, r);
-    f.render_widget(overlay_block(&issues.title), r);
+    f.render_widget(overlay_block(view.muted, &issues.title), r);
     let [_, input, list, note, _] = issues_rows(r);
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(view.muted);
 
     let cursor = match &issues.body {
         IssuesBody::Detail { lines, scroll } => {
@@ -2534,7 +2851,7 @@ fn draw_issues(f: &mut Frame, view: &View, issues: &Issues) {
         }
         IssuesBody::List { filter, items, selected, scroll, empty } => {
             draw_issue_tabs(f, view, issues, r);
-            let cursor = draw_input(f, input, "", filter);
+            let cursor = draw_input(f, view.muted, input, "", filter);
             if items.is_empty() {
                 f.render_widget(Paragraph::new(Span::styled(format!(" {empty}"), dim)), list);
             }
@@ -2543,7 +2860,7 @@ fn draw_issues(f: &mut Frame, view: &View, issues: &Issues) {
         }
         IssuesBody::Token { label, input: typed, help } => {
             draw_issue_tabs(f, view, issues, r);
-            let cursor = draw_input(f, input, label, typed);
+            let cursor = draw_input(f, view.muted, input, label, typed);
             let text: Vec<Line> = help.iter().map(|h| Line::from(h.as_str())).collect();
             f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), list.inner(Margin::new(1, 0)));
             cursor
@@ -2573,7 +2890,7 @@ fn draw_issues(f: &mut Frame, view: &View, issues: &Issues) {
     }
 }
 
-fn draw_input(f: &mut Frame, row: Rect, label: &str, value: &str) -> Option<Position> {
+fn draw_input(f: &mut Frame, muted: Color, row: Rect, label: &str, value: &str) -> Option<Position> {
     let label = if label.is_empty() { String::new() } else { format!("{label} ") };
     let max = usize::from(row.width).saturating_sub(INPUT_PROMPT.chars().count() + label.chars().count() + 1);
     let value = truncate_left(value, max);
@@ -2581,7 +2898,7 @@ fn draw_input(f: &mut Frame, row: Rect, label: &str, value: &str) -> Option<Posi
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(INPUT_PROMPT, Style::default().fg(Color::Cyan)),
-            Span::styled(label, Style::default().fg(Color::DarkGray)),
+            Span::styled(label, Style::default().fg(muted)),
             Span::styled(value, Style::default().add_modifier(Modifier::BOLD)),
         ])),
         row,
@@ -2615,7 +2932,7 @@ fn draw_tabs(f: &mut Frame, view: &View, rects: &[Rect], names: &[&str], active:
 
 fn draw_issue_rows(f: &mut Frame, view: &View, list: Rect, items: &[IssueRow], selected: Option<usize>, scroll: usize) {
     let key_width = items.iter().map(|i| i.key.chars().count()).max().unwrap_or(0);
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(view.muted);
     for (i, item) in items.iter().enumerate() {
         let row = list_item(list, items.len(), scroll, i);
         if row.is_empty() {
@@ -2646,36 +2963,38 @@ fn draw_issue_rows(f: &mut Frame, view: &View, list: Rect, items: &[IssueRow], s
 }
 
 fn draw_sidebar(f: &mut Frame, view: &View, areas: &Areas) {
-    draw_title(f, areas.title, "projects");
+    draw_title(f, view.muted, areas.title, "projects");
     let sidebar = view.sidebar_rows();
     let base = project_rows(areas.list, areas.pitch, &sidebar, view.projects_scroll);
     let landing = view.sidebar_landing();
     let (sidebar, line) = landed(sidebar, &base, landing, SidebarRow::Gap, SidebarRow::Landing);
     let rows = project_rows(areas.list, areas.pitch, &sidebar, base.first());
     draw_entries(f, view, &rows, &sidebar, areas.pitch);
-    let (above, below) = rows.hidden();
-    let count = |range: Range<usize>| {
-        (!range.is_empty()).then(|| {
-            sidebar[range].iter().filter(|r| matches!(r, SidebarRow::Group(_) | SidebarRow::Project(_))).count()
-        })
-    };
-    draw_more(f, [more_above(areas.list), rows.more_below()], count(above), count(below));
-    let r = rows.button();
-    draw_button(f, r, " ", "+ new project", button_style(view, r, Style::default().fg(Color::Cyan), Color::Cyan));
-    draw_landing(f, line, landing);
+    draw_hidden(f, view.muted, &rows, &sidebar, |r| matches!(r, SidebarRow::Group(_) | SidebarRow::Project(_)));
+    draw_new_project(f, view, rows.button());
+    draw_landing(f, line, landing.map(|l| l.spot.indent()));
 }
 
-fn draw_landing(f: &mut Frame, r: Rect, landing: Option<Landing>) {
-    let Some(landing) = landing else { return };
+fn draw_hidden<R: Copy>(f: &mut Frame, muted: Color, layout: &Rows, rows: &[R], named: impl Fn(R) -> bool) {
+    let (above, below) = layout.hidden();
+    let count = |range: Range<usize>| (!range.is_empty()).then(|| rows[range].iter().filter(|r| named(**r)).count());
+    draw_more(f, muted, [more_above(layout.list), layout.more_below()], count(above), count(below));
+}
+
+fn draw_new_project(f: &mut Frame, view: &View, r: Rect) {
+    draw_button(f, r, " ", "+ new project", button_style(view, r, Style::default().fg(Color::Cyan), Color::Cyan));
+}
+
+fn draw_landing(f: &mut Frame, r: Rect, indent: Option<u16>) {
+    let Some(indent) = indent else { return };
     let row = Rect { height: r.height.min(1), ..r };
-    let width = usize::from(row.width.saturating_sub(landing.spot.indent() + 1));
-    let line =
-        Line::from(vec![Span::raw(" ".repeat(usize::from(landing.spot.indent()))), Span::raw("─".repeat(width))]);
+    let width = usize::from(row.width.saturating_sub(indent + 1));
+    let line = Line::from(vec![Span::raw(" ".repeat(usize::from(indent))), Span::raw("─".repeat(width))]);
     f.render_widget(Paragraph::new(line.style(Style::default().fg(Color::Cyan))), row);
 }
 
 fn draw_footer(f: &mut Frame, view: &View, areas: &Areas) {
-    draw_separator(f, areas.separator);
+    draw_separator(f, view.muted, areas.separator);
     let mut settings = areas.settings;
     if let Some(label) = &view.update {
         let r = update_button(areas.settings, label);
@@ -2688,8 +3007,8 @@ fn draw_footer(f: &mut Frame, view: &View, areas: &Areas) {
     draw_quit_button(f, view, areas.quit);
 }
 
-fn draw_column_border(f: &mut Frame, r: Rect) {
-    let line = Paragraph::new(vec![Line::from("│"); usize::from(r.height)]).style(Style::default().fg(Color::DarkGray));
+fn draw_column_border(f: &mut Frame, muted: Color, r: Rect) {
+    let line = Paragraph::new(vec![Line::from("│"); usize::from(r.height)]).style(Style::default().fg(muted));
     f.render_widget(line, r);
 }
 
@@ -2711,7 +3030,7 @@ fn draw_border(f: &mut Frame, view: &View, r: Rect, border: Border) {
 }
 
 fn draw_search_bar(f: &mut Frame, view: &View, r: Rect) {
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(view.muted);
     let accent = Style::default().fg(Color::Cyan);
     let line = if let Some(search) = view.search() {
         let max = usize::from(r.width).saturating_sub(SEARCH_ICON.chars().count() + 1);
@@ -2736,7 +3055,7 @@ fn draw_search_bar(f: &mut Frame, view: &View, r: Rect) {
 fn draw_results(f: &mut Frame, view: &View, search: &Search, r: Rect) {
     f.render_widget(Clear, r);
     let [list, hint] = results_rows(r);
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(view.muted);
     if search.results.is_empty() {
         f.render_widget(Paragraph::new(Span::styled("  no matches", dim)), list);
     }
@@ -2794,24 +3113,34 @@ fn draw_bar(f: &mut Frame, view: &View, areas: &Areas) {
     let pressed = Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD);
     let r = areas.todo_button;
     let mut right = areas.search_button.width + r.width;
-    let style = if view.todo.is_some() || sidebar_hovered(view, r) { pressed } else { surface.fg(Color::DarkGray) };
+    let style = if view.todo.is_some() || sidebar_hovered(view, r) { pressed } else { surface.fg(view.muted) };
     draw_band(f, r, Span::styled(centered(TODO_ICON, r.width), style), style);
     if let Some(button) = &view.changes_button {
         let r = areas.changes_button;
         right += r.width;
-        let style = if button.open || sidebar_hovered(view, r) { pressed } else { surface.fg(Color::DarkGray) };
+        let style = if button.open || sidebar_hovered(view, r) { pressed } else { surface.fg(view.muted) };
         draw_band(f, r, Span::styled(centered(CHANGES_ICON, r.width), style), style);
     }
     let menu = Rect { width: areas.bar.width.saturating_sub(right), ..areas.bar };
     let icon = Rect { width: COMPACT_BUTTON_WIDTH.min(menu.width), ..menu };
     let lit = view.nav.is_some() || sidebar_hovered(view, menu);
     let style = if lit { pressed } else { surface.fg(Color::Cyan) };
-    draw_band(f, icon, menu_label(view.attention, icon.width, style, lit), style);
+    draw_band(f, icon, menu_label(view.muted, view.attention, icon.width, style, lit), style);
     let crumbs = Rect { x: icon.right() + 2, width: menu.width.saturating_sub(icon.width + 2), ..middle(menu) };
     f.render_widget(Paragraph::new(Line::from(breadcrumb(view, usize::from(crumbs.width)))), crumbs);
     let r = areas.search_button;
-    let style = if sidebar_hovered(view, r) { pressed } else { surface.fg(Color::DarkGray) };
+    let style = if sidebar_hovered(view, r) { pressed } else { surface.fg(view.muted) };
     draw_band(f, r, Span::styled(centered(SEARCH_ICON.trim(), r.width), style), style);
+}
+
+pub fn muted(theme: &HostTheme) -> Color {
+    if theme.muted_is_readable() {
+        Color::DarkGray
+    } else if theme.is_light() == Some(true) {
+        LIGHT_MUTED
+    } else {
+        DARK_MUTED
+    }
 }
 
 fn middle(r: Rect) -> Rect {
@@ -2857,18 +3186,18 @@ fn draw_back(f: &mut Frame, view: &View, areas: &Areas) {
         ..areas.workspaces_title
     };
     let max = usize::from(rest.width).saturating_sub(1);
-    let style = Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD);
+    let style = Style::default().fg(view.muted).add_modifier(Modifier::BOLD);
     f.render_widget(Paragraph::new(Span::styled(format!(" {}", truncate_right(name, max)), style)), middle(rest));
 }
 
-fn draw_title(f: &mut Frame, r: Rect, title: &str) {
-    let style = Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD);
+fn draw_title(f: &mut Frame, muted: Color, r: Rect, title: &str) {
+    let style = Style::default().fg(muted).add_modifier(Modifier::BOLD);
     f.render_widget(Paragraph::new(Span::styled(format!(" {title}"), style)), middle(r));
 }
 
-fn draw_separator(f: &mut Frame, r: Rect) {
+fn draw_separator(f: &mut Frame, muted: Color, r: Rect) {
     let line = "─".repeat(usize::from(r.width.saturating_sub(2)));
-    f.render_widget(Paragraph::new(Span::styled(format!(" {line}"), Style::default().fg(Color::DarkGray))), r);
+    f.render_widget(Paragraph::new(Span::styled(format!(" {line}"), Style::default().fg(muted))), r);
 }
 
 fn button_style(view: &View, r: Rect, idle: Style, hover_bg: Color) -> Style {
@@ -2879,7 +3208,7 @@ fn button_style(view: &View, r: Rect, idle: Style, hover_bg: Color) -> Style {
     }
 }
 
-fn draw_button(f: &mut Frame, r: Rect, indent: &'static str, label: &str, style: Style) {
+fn draw_button(f: &mut Frame, r: Rect, indent: &str, label: &str, style: Style) {
     if r.height > 1
         && let Some(bg) = style.bg
     {
@@ -2891,7 +3220,7 @@ fn draw_button(f: &mut Frame, r: Rect, indent: &'static str, label: &str, style:
 
 fn draw_workspaces(f: &mut Frame, view: &View, areas: &Areas) {
     if areas.back.is_empty() {
-        draw_title(f, areas.workspaces_title, "workspaces");
+        draw_title(f, view.muted, areas.workspaces_title, "workspaces");
     } else {
         draw_back(f, view, areas);
     }
@@ -2901,7 +3230,7 @@ fn draw_workspaces(f: &mut Frame, view: &View, areas: &Areas) {
 
     let list = areas.workspaces_list;
     let tabs = view.tab_lines();
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(view.muted);
     let accent = Style::default().fg(Color::Cyan);
     let base = workspace_layout(list, areas.pitch, &tabs, view.workspaces_scroll);
     let landing = view.workspaces_landing();
@@ -2912,74 +3241,92 @@ fn draw_workspaces(f: &mut Frame, view: &View, areas: &Areas) {
         if r.is_empty() {
             continue;
         }
-        let close_width = usize::from(row_close_button(r, areas.pitch).width);
         match row {
             WorkspaceRow::Gap => {}
-            WorkspaceRow::Landing => draw_landing(f, r, landing),
+            WorkspaceRow::Landing => draw_landing(f, r, landing.map(|l| l.spot.indent())),
             WorkspaceRow::Workspace(w) => {
-                let style = if w == view.active_workspace {
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)
-                };
-                let entry = &view.workspaces[w];
-                let room = usize::from(r.width).saturating_sub(2 + close_width + 1);
-                let badge = activity::attention(entry.tabs.iter().map(|t| t.status)).map(status_icon);
-                let behind = Some(entry.behind)
-                    .filter(|n| *n > 0)
-                    .map(|n| Span::styled(format!("{BEHIND_ICON}{n}"), Style::default().fg(Color::Yellow)));
-                let marks = Tags::fit(badge.into_iter().chain(behind).collect(), room);
-                let name = truncate_right(&entry.name, room.saturating_sub(marks.reserved()));
-                let mut line = vec![Span::styled(format!("  {name}"), style)];
-                marks.push_onto(&mut line, name.chars().count(), room);
                 let bg = view.row_background(r, view.dragging_workspace_row(row));
-                draw_band(f, r, Line::from(line), bg);
-                draw_row_close(f, view, r, areas.pitch, bg);
+                let band = Band { r, pitch: areas.pitch, lead: vec![Span::raw("  ")], bg };
+                draw_workspace_band(f, view, band, &view.workspaces[w], w == view.active_workspace, true);
             }
             WorkspaceRow::Tab(w, t) => {
                 let active = w == view.active_workspace && view.active_tab == Some(t);
-                let (marker, style) = if active {
-                    ("▌ ", Style::default().fg(Color::White))
-                } else {
-                    ("  ", Style::default().fg(Color::Gray))
-                };
                 let bg = view.row_background(r, active || view.dragging_workspace_row(row));
-                let tab = &view.workspaces[w].tabs[t];
-                let icon = tab.status.map(status_icon);
-                let icon_width = if icon.is_some() { 2 } else { 0 };
-                let max = usize::from(r.width).saturating_sub(4 + icon_width + close_width + 1);
-                let mut line = vec![Span::raw("  "), Span::styled(marker, accent)];
-                if let Some(icon) = icon {
-                    line.extend([icon, Span::raw(" ")]);
-                }
-                line.push(Span::styled(truncate_right(&tab.name, max), style));
-                draw_band(f, r, Line::from(line), bg);
-                if tab.details.lines() > 1 {
-                    draw_details(f, r, areas.pitch, &tab.details, 4 + icon_width);
-                }
-                draw_row_close(f, view, r, areas.pitch, bg);
+                let band = Band { r, pitch: areas.pitch, lead: vec![Span::raw("  ")], bg };
+                draw_tab_band(f, view, band, &view.workspaces[w].tabs[t], active);
             }
             WorkspaceRow::NewTab(_) => draw_button(f, r, "   ", "+ tab", button_style(view, r, dim, Color::Cyan)),
         }
     }
 
-    let (above, below) = layout.hidden();
-    let named = |range: Range<usize>| {
-        (!range.is_empty()).then(|| {
-            rows[range].iter().filter(|r| matches!(r, WorkspaceRow::Workspace(_) | WorkspaceRow::Tab(..))).count()
-        })
-    };
-    draw_more(f, [more_above(list), layout.more_below()], named(above), named(below));
+    draw_hidden(f, view.muted, &layout, &rows, |r| matches!(r, WorkspaceRow::Workspace(_) | WorkspaceRow::Tab(..)));
 
     let r = layout.button();
     draw_button(f, r, " ", "+ new workspace", button_style(view, r, accent, Color::Cyan));
-    draw_landing(f, landing_line, landing);
+    draw_landing(f, landing_line, landing.map(|l| l.spot.indent()));
+}
+
+struct Band {
+    r: Rect,
+    pitch: u16,
+    lead: Vec<Span<'static>>,
+    bg: Style,
+}
+
+impl Band {
+    fn lead_width(&self) -> usize {
+        self.lead.iter().map(Span::width).sum()
+    }
+
+    fn room(&self) -> usize {
+        usize::from(self.r.width)
+            .saturating_sub(self.lead_width() + usize::from(row_close_button(self.r, self.pitch).width) + 1)
+    }
+}
+
+fn draw_workspace_band(f: &mut Frame, view: &View, band: Band, entry: &WorkspaceEntry, active: bool, badge: bool) {
+    let style = Style::default().fg(if active { Color::White } else { Color::Gray }).add_modifier(Modifier::BOLD);
+    let room = band.room();
+    let badge = badge
+        .then(|| activity::attention(entry.tabs.iter().map(|t| t.status)))
+        .flatten()
+        .map(|status| status_icon(view.muted, status));
+    let behind = Some(entry.behind)
+        .filter(|n| *n > 0)
+        .map(|n| Span::styled(format!("{BEHIND_ICON}{n}"), Style::default().fg(Color::Yellow)));
+    let marks = Tags::fit(badge.into_iter().chain(behind).collect(), room);
+    let name = truncate_right(&entry.name, room.saturating_sub(marks.reserved()));
+    let used = name.chars().count();
+    let mut line = band.lead;
+    line.push(Span::styled(name, style));
+    marks.push_onto(&mut line, used, room);
+    draw_band(f, band.r, Line::from(line), band.bg);
+    draw_row_close(f, view, band.r, band.pitch, band.bg);
+}
+
+fn draw_tab_band(f: &mut Frame, view: &View, band: Band, tab: &TabEntry, active: bool) {
+    let style = Style::default().fg(if active { Color::White } else { Color::Gray });
+    let icon = tab.status.map(|status| status_icon(view.muted, status));
+    let icon_width = if icon.is_some() { 2 } else { 0 };
+    let indent = band.lead_width() + 2 + icon_width;
+    let max = band.room().saturating_sub(2 + icon_width);
+    let mut line = band.lead;
+    line.push(marker(active));
+    if let Some(icon) = icon {
+        line.extend([icon, Span::raw(" ")]);
+    }
+    line.push(Span::styled(truncate_right(&tab.name, max), style));
+    draw_band(f, band.r, Line::from(line), band.bg);
+    if tab.details.lines() > 1 {
+        draw_details(f, view.muted, band.r, band.pitch, &tab.details, indent);
+    }
+    draw_row_close(f, view, band.r, band.pitch, band.bg);
 }
 
 fn draw_issues_row(f: &mut Frame, view: &View, areas: &Areas) {
     let changes = view.changes_button.as_ref().filter(|_| !areas.compact());
     if view.issues {
-        draw_separator(f, areas.workspaces_separator);
+        draw_separator(f, view.muted, areas.workspaces_separator);
         let issues = match changes {
             Some(button) => {
                 let start = changes_button(areas.issues, &button.label).x;
@@ -2987,7 +3334,7 @@ fn draw_issues_row(f: &mut Frame, view: &View, areas: &Areas) {
             }
             None => areas.issues,
         };
-        let style = button_style(view, issues, Style::default().fg(Color::DarkGray), Color::Cyan);
+        let style = button_style(view, issues, Style::default().fg(view.muted), Color::Cyan);
         draw_button(f, issues, " ", ISSUES_LABEL, style);
     }
     if let Some(button) = changes {
@@ -3002,16 +3349,16 @@ fn draw_panel_button(f: &mut Frame, view: &View, r: Rect, label: &str, open: boo
     let idle = if open {
         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(view.muted)
     };
     draw_button(f, r, "", label, button_style(view, r, idle, Color::Cyan));
 }
 
-fn draw_details(f: &mut Frame, row: Rect, pitch: u16, details: &Details, indent: usize) {
+fn draw_details(f: &mut Frame, muted: Color, row: Rect, pitch: u16, details: &Details, indent: usize) {
     let r = Rect { y: middle(row).y + 1, height: 1, ..row }.intersection(row);
     let close = row_close_button(row, pitch);
     let reserved = if close.bottom() > r.y { usize::from(close.width) } else { 0 };
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(muted);
     let percent = details.percent.map(|used| {
         let level = match Severity::of(used) {
             Severity::Normal => dim,
@@ -3045,9 +3392,9 @@ fn memory_size(bytes: u64) -> String {
     format!("{}.{} GB", tenths / 10, tenths % 10)
 }
 
-fn status_icon(status: Status) -> Span<'static> {
+fn status_icon(muted: Color, status: Status) -> Span<'static> {
     let (glyph, style) = match status {
-        Status::Idle => ("○", Style::default().fg(Color::DarkGray)),
+        Status::Idle => ("○", Style::default().fg(muted)),
         Status::Working => ("◐", Style::default().fg(Color::Yellow)),
         Status::Done => ("✓", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
         Status::Waiting => ("!", Style::default().fg(WAITING_COLOR).add_modifier(Modifier::BOLD)),
@@ -3059,11 +3406,11 @@ fn group_attention(view: &View, g: usize) -> Option<Status> {
     activity::attention(view.projects.iter().filter(|p| p.group == Some(g)).map(|p| p.status))
 }
 
-fn menu_label(attention: Option<Status>, width: u16, style: Style, lit: bool) -> Line<'static> {
+fn menu_label(muted: Color, attention: Option<Status>, width: u16, style: Style, lit: bool) -> Line<'static> {
     let Some(status) = attention else { return Line::from(Span::styled(centered(MENU_ICON, width), style)) };
     let width = usize::from(width);
     let left = width.saturating_sub(1) / 2;
-    let badge = status_icon(status);
+    let badge = status_icon(muted, status);
     let badge = if lit { Span::styled(badge.content, style) } else { badge };
     Line::from(vec![
         Span::styled(format!("{}{MENU_ICON} ", " ".repeat(left)), style),
@@ -3111,8 +3458,8 @@ impl Tags {
     }
 }
 
-fn draw_more(f: &mut Frame, [top, bottom]: [Rect; 2], above: Option<usize>, below: Option<usize>) {
-    let dim = Style::default().fg(Color::DarkGray);
+fn draw_more(f: &mut Frame, muted: Color, [top, bottom]: [Rect; 2], above: Option<usize>, below: Option<usize>) {
+    let dim = Style::default().fg(muted);
     for (hidden, arrow, r) in [(above, "↑", top), (below, "↓", bottom)] {
         let label = match hidden {
             None => continue,
@@ -3128,22 +3475,22 @@ fn draw_row_close(f: &mut Frame, view: &View, row: Rect, pitch: u16, bg: Style) 
         return;
     }
     let r = row_close_button(row, pitch);
-    let style = if hovered(view, r) { bg.fg(Color::Red).add_modifier(Modifier::BOLD) } else { bg.fg(Color::DarkGray) };
+    let style = if hovered(view, r) { bg.fg(Color::Red).add_modifier(Modifier::BOLD) } else { bg.fg(view.muted) };
     draw_band(f, r, Span::styled(centered("×", r.width), style), style);
 }
 
 fn draw_settings_button(f: &mut Frame, view: &View, r: Rect) {
-    let style = button_style(view, r, Style::default().fg(Color::DarkGray), Color::Cyan);
+    let style = button_style(view, r, Style::default().fg(view.muted), Color::Cyan);
     draw_button(f, r, " ", "settings", style);
 }
 
 fn draw_usage_button(f: &mut Frame, view: &View, r: Rect) {
-    let style = button_style(view, r, Style::default().fg(Color::DarkGray), Color::Cyan);
+    let style = button_style(view, r, Style::default().fg(view.muted), Color::Cyan);
     draw_button(f, r, " ", USAGE_LABEL, style);
 }
 
 fn draw_quit_button(f: &mut Frame, view: &View, r: Rect) {
-    let style = button_style(view, r, Style::default().fg(Color::DarkGray), Color::Red);
+    let style = button_style(view, r, Style::default().fg(view.muted), Color::Red);
     draw_button(f, r, " ", "quit", style);
 }
 
@@ -3157,65 +3504,145 @@ fn draw_entries(f: &mut Frame, view: &View, rows: &Rows, sidebar: &[SidebarRow],
         }
         match row {
             SidebarRow::Gap => {}
-            SidebarRow::Landing => draw_landing(f, r, view.sidebar_landing()),
-            SidebarRow::Group(g) => draw_group(f, view, g, r, pitch, active == Some(i)),
-            SidebarRow::Project(p) => draw_project(f, view, p, r, pitch),
+            SidebarRow::Landing => draw_landing(f, r, view.sidebar_landing().map(|l| l.spot.indent())),
+            SidebarRow::Group(g) => {
+                let bg = view.row_background(r, view.dragging_entry(row));
+                draw_group(f, view, g, Band { r, pitch, lead: vec![marker(active == Some(i))], bg });
+            }
+            SidebarRow::Project(p) => {
+                let bg = view.row_background(r, p == view.active || view.dragging_entry(row));
+                let indent = if view.projects[p].group.is_some() { GROUP_INDENT } else { "" };
+                let lead = vec![marker(p == view.active), Span::raw(indent)];
+                draw_project_band(f, view, Band { r, pitch, lead, bg }, p, true);
+            }
         }
     }
 }
 
-fn draw_group(f: &mut Frame, view: &View, g: usize, r: Rect, pitch: u16, holds_active: bool) {
+fn marker(shown: bool) -> Span<'static> {
+    Span::styled(if shown { "▌ " } else { "  " }, Style::default().fg(Color::Cyan))
+}
+
+fn arrow(muted: Color, folded: bool) -> Span<'static> {
+    Span::styled(if folded { "▸ " } else { "▾ " }, Style::default().fg(muted))
+}
+
+fn draw_group(f: &mut Frame, view: &View, g: usize, band: Band) {
     let group = &view.groups[g];
-    let marker = if holds_active { "▌ " } else { "  " };
-    let (arrow, count) = if group.collapsed {
-        ("▸ ", format!(" ({})", view.projects.iter().filter(|p| p.group == Some(g)).count()))
+    let count = if group.collapsed {
+        format!(" ({})", view.projects.iter().filter(|p| p.group == Some(g)).count())
     } else {
-        ("▾ ", String::new())
+        String::new()
     };
-    let badge = group.collapsed.then(|| group_attention(view, g)).flatten().map(status_icon);
-    let room = usize::from(r.width).saturating_sub(4 + usize::from(row_close_button(r, pitch).width) + 1);
+    let badge =
+        group.collapsed.then(|| group_attention(view, g)).flatten().map(|status| status_icon(view.muted, status));
+    let room = band.room().saturating_sub(2);
     let used = 2 + count.chars().count();
     let marks = Tags::fit(badge.into_iter().collect(), room.saturating_sub(used));
     let max = room.saturating_sub(used + marks.reserved());
     let shown = used + truncate_right(&group.name, max).chars().count();
-    let mut line = vec![
-        Span::styled(marker, Style::default().fg(Color::Cyan)),
-        Span::styled(arrow, Style::default().fg(Color::DarkGray)),
+    let mut line = band.lead;
+    line.extend([
+        arrow(view.muted, group.collapsed),
         group_header(group, max),
-        Span::styled(count, Style::default().fg(Color::DarkGray)),
-    ];
+        Span::styled(count, Style::default().fg(view.muted)),
+    ]);
     marks.push_onto(&mut line, shown, room);
-    let bg = view.row_background(r, view.dragging_entry(SidebarRow::Group(g)));
-    draw_band(f, r, Line::from(line), bg);
-    draw_row_close(f, view, r, pitch, bg);
+    draw_band(f, band.r, Line::from(line), band.bg);
+    draw_row_close(f, view, band.r, band.pitch, band.bg);
 }
 
-fn draw_project(f: &mut Frame, view: &View, p: usize, r: Rect, pitch: u16) {
+fn draw_project_band(f: &mut Frame, view: &View, band: Band, p: usize, summary: bool) {
     let entry = &view.projects[p];
-    let (marker, title_style) = if p == view.active {
-        ("▌ ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+    let title_style = if p == view.active {
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
     } else {
-        ("  ", Style::default().fg(Color::Gray))
+        Style::default().fg(Color::Gray)
     };
-    let bg = view.row_background(r, p == view.active || view.dragging_entry(SidebarRow::Project(p)));
-    let indent = if entry.group.is_some() { GROUP_INDENT } else { "" };
-    let count = format!(" ({})", entry.workspaces);
-    let reserved = 2 + indent.len() + usize::from(row_close_button(r, pitch).width) + 1;
-    let room = usize::from(r.width).saturating_sub(reserved);
-    let marks =
-        Tags::fit(entry.status.map(status_icon).into_iter().collect(), room.saturating_sub(count.chars().count()));
+    let count = if summary { format!(" ({})", entry.workspaces) } else { String::new() };
+    let room = band.room();
+    let badge = entry.status.filter(|_| summary).map(|status| status_icon(view.muted, status));
+    let marks = Tags::fit(badge.into_iter().collect(), room.saturating_sub(count.chars().count()));
     let max = room.saturating_sub(count.chars().count() + marks.reserved());
     let name = truncate_right(&entry.name, max);
     let shown = name.chars().count() + count.chars().count();
-    let mut line = vec![
-        Span::styled(marker, Style::default().fg(Color::Cyan)),
-        Span::raw(indent),
-        Span::styled(name, title_style),
-        Span::styled(count, Style::default().fg(Color::DarkGray)),
-    ];
+    let mut line = band.lead;
+    line.extend([Span::styled(name, title_style), Span::styled(count, Style::default().fg(view.muted))]);
     marks.push_onto(&mut line, shown, room);
-    draw_band(f, r, Line::from(line), bg);
-    draw_row_close(f, view, r, pitch, bg);
+    draw_band(f, band.r, Line::from(line), band.bg);
+    draw_row_close(f, view, band.r, band.pitch, band.bg);
+}
+
+fn tree_landing_indent(shape: &TreeShape, dragged: TreeRow, spot: Spot) -> u16 {
+    match dragged {
+        TreeRow::Workspace(..) | TreeRow::Tab(..) => tree_indent(shape, dragged),
+        _ => spot.indent(),
+    }
+}
+
+fn folded(shape: &TreeShape, row: TreeRow) -> bool {
+    let project = |p: usize| shape.projects.get(p);
+    match row {
+        TreeRow::Project(p) => project(p).is_some_and(|p| p.collapsed),
+        TreeRow::Workspace(p, w) => project(p).and_then(|p| p.workspaces.get(w)).is_some_and(|w| w.collapsed),
+        _ => false,
+    }
+}
+
+fn draw_tree(f: &mut Frame, view: &View, areas: &Areas) {
+    draw_title(f, view.muted, areas.title, "projects");
+    let Some(tree) = &view.tree else { return };
+    let shape = &tree.shape;
+    let rows = tree_rows(shape);
+    let base = tree_layout_rows(areas.list, shape, &rows, view.projects_scroll);
+    let (dragged, landing) = match view.drag {
+        Some(Drag::Tree(row, landing)) => (Some(row), landing),
+        _ => (None, None),
+    };
+    let indent = dragged.zip(landing).map(|(row, l)| tree_landing_indent(shape, row, l.spot));
+    let (rows, line) = landed(rows, &base, landing, TreeRow::Gap, TreeRow::Landing);
+    let layout = tree_layout_rows(areas.list, shape, &rows, base.first());
+    let active = (view.active, view.active_workspace, view.active_tab);
+    let marked = tree_active_row(&rows, shape, active).filter(|_| view.has_project);
+    let (above, below) = layout.hidden();
+    let workspace = |p: usize, w: usize| tree.workspaces.get(p).and_then(|ws| ws.get(w));
+    for (i, &row) in rows.iter().enumerate().take(below.start).skip(above.end) {
+        let (r, mark) = (layout.item(i), marked == Some(i));
+        let bg = view.row_background(r, mark || view.dragging_tree_row(row));
+        let lead = " ".repeat(usize::from(tree_indent(shape, row) - 2));
+        let band = |lead: Vec<Span<'static>>| Band { r, pitch: 1, lead, bg };
+        match row {
+            TreeRow::Gap => {}
+            TreeRow::Landing => draw_landing(f, r, indent),
+            TreeRow::Group(g) => draw_group(f, view, g, band(vec![marker(mark)])),
+            TreeRow::Project(p) => {
+                let band = band(vec![Span::raw(lead), marker(mark), arrow(view.muted, folded(shape, row))]);
+                draw_project_band(f, view, band, p, folded(shape, row));
+            }
+            TreeRow::Workspace(p, w) => {
+                let Some(entry) = workspace(p, w) else { continue };
+                let band = band(vec![Span::raw(lead), marker(mark), arrow(view.muted, folded(shape, row))]);
+                let active = p == view.active && w == view.active_workspace;
+                draw_workspace_band(f, view, band, entry, active, folded(shape, row));
+            }
+            TreeRow::Tab(p, w, tab) => {
+                let Some(entry) = workspace(p, w).and_then(|w| w.tabs.get(tab)) else { continue };
+                draw_tab_band(f, view, band(vec![Span::raw(lead)]), entry, mark);
+            }
+            TreeRow::NewTab(..) => {
+                let style = button_style(view, r, Style::default().fg(view.muted), Color::Cyan);
+                draw_button(f, r, &format!("{lead} "), "+ tab", style);
+            }
+            TreeRow::NewWorkspace(_) => {
+                let style = button_style(view, r, Style::default().fg(Color::Cyan), Color::Cyan);
+                draw_button(f, r, &format!("{lead} "), "+ new workspace", style);
+            }
+        }
+    }
+    let named = |r| matches!(r, TreeRow::Group(_) | TreeRow::Project(_) | TreeRow::Workspace(..) | TreeRow::Tab(..));
+    draw_hidden(f, view.muted, &layout, &rows, named);
+    draw_new_project(f, view, layout.button());
+    draw_landing(f, line, indent);
 }
 
 pub fn folder_name(path: &Path, home: Option<&Path>) -> String {
@@ -3283,6 +3710,7 @@ mod tests {
             sidebar: Sidebar::SideBySide,
             resizing: None,
             light: false,
+            muted: Color::DarkGray,
             projects_scroll: 0,
             workspaces_scroll: 0,
             tab: None,
@@ -3295,6 +3723,7 @@ mod tests {
             todo: None,
             attention: None,
             drag: None,
+            tree: None,
         }
     }
 
@@ -3356,9 +3785,10 @@ mod tests {
         #[case::side_by_side("side_by_side", Sidebar::SideBySide)]
         #[case::projects_on_top("projects_on_top", Sidebar::ProjectsOnTop)]
         #[case::workspaces_on_top("workspaces_on_top", Sidebar::WorkspacesOnTop)]
+        #[case::tree("tree", Sidebar::Tree)]
         #[case::any_case_and_spaces(" Projects_On_Top ", Sidebar::ProjectsOnTop)]
-        #[case::unknown("sideways", Sidebar::SideBySide)]
-        #[case::empty("", Sidebar::SideBySide)]
+        #[case::unknown("sideways", Sidebar::ProjectsOnTop)]
+        #[case::empty("", Sidebar::ProjectsOnTop)]
         fn is_read_from_the_config(#[case] setting: &str, #[case] expected: Sidebar) {
             assert_eq!(Sidebar::from_setting(setting), expected);
         }
@@ -3366,13 +3796,13 @@ mod tests {
         #[test]
         fn only_side_by_side_keeps_two_columns() {
             let stacked: Vec<bool> = Sidebar::ALL.into_iter().map(Sidebar::stacked).collect();
-            assert_eq!(stacked, [false, true, true]);
+            assert_eq!(stacked, [false, true, true, true]);
         }
 
         #[test]
         fn each_choice_is_its_id_with_a_note() {
             let ids: Vec<&str> = Sidebar::choices().into_iter().map(|(id, _)| id).collect();
-            assert_eq!(ids, ["side_by_side", "projects_on_top", "workspaces_on_top"]);
+            assert_eq!(ids, ["side_by_side", "projects_on_top", "workspaces_on_top", "tree"]);
         }
     }
 
@@ -3418,6 +3848,7 @@ mod tests {
                 scroll: 0,
                 live: false,
                 light: false,
+                muted: Color::DarkGray,
                 tints,
                 filter: None,
             };
@@ -3457,6 +3888,7 @@ mod tests {
                 scroll: 0,
                 adding: None,
                 light: false,
+                muted: Color::DarkGray,
                 drag: None,
             };
             View { changes: None, todo: Some(panel), ..with_panel() }
@@ -3909,6 +4341,414 @@ mod tests {
             for height in 1..=TALL.height {
                 render_sized(&with_lists(Sidebar::WorkspacesOnTop), W, height);
             }
+        }
+    }
+
+    mod tree_layout {
+        use super::*;
+
+        const TALL: Rect = Rect { x: 0, y: 0, width: W, height: 30 };
+
+        fn tree() -> Areas {
+            layout_with(TALL, Widths::default(), false, Sidebar::Tree)
+        }
+
+        #[test]
+        fn one_list_runs_from_its_title_to_the_footer() {
+            let a = tree();
+            assert_eq!(
+                (a.title.y, a.list.y, a.list.bottom(), a.separator.y, a.issues.y, a.todo_button.y, a.quit.y),
+                (HEADER_HEIGHT, HEADER_HEIGHT + 2, 24, 24, 25, 26, 29)
+            );
+        }
+
+        #[test]
+        fn has_no_workspaces_list_and_no_line() {
+            let a = tree();
+            assert_eq!([a.workspaces, a.workspaces_list, a.stack_border], [Rect::default(); 3]);
+        }
+
+        #[test]
+        fn the_pane_gets_the_width_of_the_workspaces_column() {
+            let side = layout(TALL, Widths::default());
+            assert_eq!(tree().pane.width, side.pane.width + WORKSPACES_WIDTH);
+        }
+
+        #[test]
+        fn the_wheel_scrolls_it_anywhere_in_the_column() {
+            let a = tree();
+            assert_eq!(
+                (a.sidebar.x, a.sidebar.width, a.sidebar.contains(a.list.as_position())),
+                (0, SIDEBAR_WIDTH, true)
+            );
+        }
+
+        #[test]
+        fn only_the_tree_says_it_is_one() {
+            let trees: Vec<bool> =
+                Sidebar::ALL.into_iter().map(|s| layout_with(TALL, Widths::default(), false, s).tree).collect();
+            assert_eq!(trees, [false, false, false, true]);
+        }
+
+        #[test]
+        fn narrow_terminals_get_the_compact_menu() {
+            let a = layout_with(Rect { width: 80, ..TALL }, Widths::default(), false, Sidebar::Tree);
+            assert_eq!((a.compact(), a.tree), (true, false));
+        }
+    }
+
+    mod tree_rows {
+        use super::*;
+
+        const LIST: Rect = Rect { x: 0, y: 4, width: SIDEBAR_WIDTH - 1, height: 20 };
+
+        fn shape() -> TreeShape {
+            let main = WorkspaceShape { collapsed: false, tabs: vec![1, 2] };
+            let login = WorkspaceShape { collapsed: true, tabs: vec![1] };
+            TreeShape {
+                groups: vec![false],
+                projects: vec![
+                    ProjectShape { group: None, collapsed: true, workspaces: vec![WorkspaceShape::default()] },
+                    ProjectShape { group: Some(0), collapsed: false, workspaces: vec![main, login] },
+                ],
+            }
+        }
+
+        #[test]
+        fn list_groups_projects_workspaces_and_tabs_in_order() {
+            assert_eq!(
+                tree_rows(&shape()),
+                [
+                    TreeRow::Project(0),
+                    TreeRow::Gap,
+                    TreeRow::Group(0),
+                    TreeRow::Project(1),
+                    TreeRow::Workspace(1, 0),
+                    TreeRow::Tab(1, 0, 0),
+                    TreeRow::Tab(1, 0, 1),
+                    TreeRow::NewTab(1, 0),
+                    TreeRow::Workspace(1, 1),
+                    TreeRow::NewWorkspace(1),
+                ]
+            );
+        }
+
+        #[test]
+        fn a_folded_group_hides_its_projects() {
+            let mut s = shape();
+            s.groups[0] = true;
+            assert_eq!(tree_rows(&s), [TreeRow::Project(0), TreeRow::Gap, TreeRow::Group(0)]);
+        }
+
+        #[test]
+        fn a_tab_with_its_details_takes_two_rows() {
+            let rows = [TreeRow::Tab(1, 0, 0), TreeRow::Tab(1, 0, 1)].map(|r| tree_row(LIST, &shape(), 0, r).height);
+            assert_eq!(rows, [1, 2]);
+        }
+
+        #[rstest]
+        #[case::the_tab(shape(), (1, 0, Some(1)), TreeRow::Tab(1, 0, 1))]
+        #[case::a_folded_workspace(shape(), (1, 1, Some(0)), TreeRow::Workspace(1, 1))]
+        #[case::a_workspace_without_tabs(shape(), (1, 0, None), TreeRow::Workspace(1, 0))]
+        #[case::a_folded_project(shape(), (0, 0, Some(0)), TreeRow::Project(0))]
+        #[case::a_folded_group(TreeShape { groups: vec![true], ..shape() }, (1, 0, Some(0)), TreeRow::Group(0))]
+        fn the_active_mark_goes_on_the_nearest_row_shown(
+            #[case] shape: TreeShape,
+            #[case] active: (usize, usize, Option<usize>),
+            #[case] expected: TreeRow,
+        ) {
+            let rows = tree_rows(&shape);
+            assert_eq!(tree_active_row(&rows, &shape, active).map(|i| rows[i]), Some(expected));
+        }
+
+        #[test]
+        fn rows_are_indented_one_step_per_level() {
+            let arrows = [TreeRow::Group(0), TreeRow::Project(0), TreeRow::Project(1), TreeRow::Workspace(1, 0)]
+                .map(|r| tree_arrow(LIST, &shape(), 0, r).x);
+            assert_eq!(arrows, [2, 2, 4, 6]);
+        }
+
+        fn hit(row: TreeRow, x: impl Fn(Rect) -> u16) -> Option<TreeHit> {
+            let r = tree_row(LIST, &shape(), 0, row);
+            tree_hit(LIST, &shape(), 0, Position::new(x(r), r.y))
+        }
+
+        #[rstest]
+        #[case::the_arrow_folds(TreeRow::Workspace(1, 0), 6, Some(TreeHit::Fold(TreeRow::Workspace(1, 0))))]
+        #[case::the_name_selects(TreeRow::Workspace(1, 0), 9, Some(TreeHit::Select(TreeRow::Workspace(1, 0))))]
+        #[case::a_project_name_selects(TreeRow::Project(1), 7, Some(TreeHit::Select(TreeRow::Project(1))))]
+        #[case::a_group_folds_anywhere(TreeRow::Group(0), 10, Some(TreeHit::Fold(TreeRow::Group(0))))]
+        #[case::a_tab_selects(TreeRow::Tab(1, 0, 0), 2, Some(TreeHit::Select(TreeRow::Tab(1, 0, 0))))]
+        #[case::add_a_tab(TreeRow::NewTab(1, 0), 9, Some(TreeHit::NewTab(1, 0)))]
+        #[case::add_a_workspace(TreeRow::NewWorkspace(1), 7, Some(TreeHit::NewWorkspace(1)))]
+        #[case::a_gap_is_nothing(TreeRow::Gap, 4, None)]
+        fn a_click_lands_on_what_is_under_it(#[case] row: TreeRow, #[case] x: u16, #[case] expected: Option<TreeHit>) {
+            assert_eq!(hit(row, |r| r.x + x), expected);
+        }
+
+        #[rstest]
+        #[case::a_group(TreeRow::Group(0))]
+        #[case::a_project(TreeRow::Project(1))]
+        #[case::a_workspace(TreeRow::Workspace(1, 0))]
+        #[case::a_tab(TreeRow::Tab(1, 0, 1))]
+        fn the_close_button_closes_the_row(#[case] row: TreeRow) {
+            let x = tree_close(LIST, &shape(), 0, row);
+            assert_eq!(tree_hit(LIST, &shape(), 0, x.as_position()), Some(TreeHit::Close(row)));
+        }
+
+        #[test]
+        fn the_button_at_the_bottom_adds_a_project() {
+            let rows = tree_rows(&shape());
+            let button = tree_layout_rows(LIST, &shape(), &rows, 0).button();
+            assert_eq!(tree_hit(LIST, &shape(), 0, button.as_position()), Some(TreeHit::NewProject));
+        }
+    }
+
+    mod muted {
+        use libghostty_vt::style::RgbColor;
+        use rstest::rstest;
+
+        use super::*;
+        use crate::host_theme::HostTheme;
+
+        #[rstest]
+        #[case::unknown_background(None, Color::DarkGray)]
+        #[case::dark_without_palette(Some(RgbColor { r: 0x1d, g: 0x20, b: 0x22 }), Color::Indexed(243))]
+        #[case::light_without_palette(Some(RgbColor { r: 0xff, g: 0xff, b: 0xff }), Color::Indexed(245))]
+        fn swaps_a_bright_black_that_may_not_show_for_a_fixed_grey(
+            #[case] background: Option<RgbColor>,
+            #[case] expected: Color,
+        ) {
+            assert_eq!(muted(&HostTheme { background, ..HostTheme::default() }), expected);
+        }
+
+        #[test]
+        fn keeps_a_bright_black_that_shows() {
+            let mut theme =
+                HostTheme { background: Some(RgbColor { r: 0x28, g: 0x2a, b: 0x36 }), ..HostTheme::default() };
+            theme.palette[8] = Some(RgbColor { r: 0x62, g: 0x72, b: 0xa4 });
+
+            assert_eq!(muted(&theme), Color::DarkGray);
+        }
+    }
+
+    mod tree_drawing {
+        use super::*;
+
+        const TALL: Rect = Rect { x: 0, y: 0, width: W, height: 30 };
+
+        fn project(name: &str, workspaces: usize, group: Option<usize>, status: Option<Status>) -> ProjectEntry {
+            ProjectEntry { name: name.into(), workspaces, group, status }
+        }
+
+        fn with_tree() -> View<'static> {
+            let shape = TreeShape {
+                groups: vec![false],
+                projects: vec![
+                    ProjectShape { group: None, collapsed: true, workspaces: Vec::new() },
+                    ProjectShape {
+                        group: Some(0),
+                        collapsed: false,
+                        workspaces: vec![
+                            WorkspaceShape { collapsed: false, tabs: vec![2, 1] },
+                            WorkspaceShape { collapsed: true, tabs: Vec::new() },
+                        ],
+                    },
+                    ProjectShape { group: Some(0), collapsed: true, workspaces: Vec::new() },
+                ],
+            };
+            let details = Details { model: Some("Opus 5.5".into()), percent: Some(23), memory: None };
+            let claude = TabEntry { name: "claude".into(), status: Some(Status::Working), details };
+            let finished = TabEntry { status: Some(Status::Done), ..TabEntry::from("") };
+            let workspaces = vec![
+                Vec::new(),
+                vec![
+                    WorkspaceEntry { name: "main".into(), tabs: vec![claude, "zsh".into()], behind: 0 },
+                    WorkspaceEntry { name: "issue-50-reorder".into(), tabs: vec![finished], behind: 2 },
+                ],
+                Vec::new(),
+            ];
+            View {
+                has_project: true,
+                issues: true,
+                sidebar: Sidebar::Tree,
+                active: 1,
+                active_tab: Some(0),
+                groups: vec![GroupEntry { name: "work".into(), icon: '●', colour: 4, collapsed: false }],
+                projects: vec![
+                    project("notes", 1, None, None),
+                    project("cornercase", 2, Some(0), Some(Status::Done)),
+                    project("api", 1, Some(0), Some(Status::Waiting)),
+                ],
+                tree: Some(TreeView { shape, workspaces }),
+                ..view(&[])
+            }
+        }
+
+        #[test]
+        fn grey_text_takes_the_muted_colour() {
+            let v = View { muted: Color::Indexed(243), ..with_tree() };
+            let t = render_sized(&v, W, TALL.height);
+            let a = layout_with(TALL, v.widths, false, Sidebar::Tree);
+            let arrow = tree_arrow(a.list, &v.tree.as_ref().expect("a tree").shape, 0, TreeRow::Project(1));
+            let first = |r: Rect| {
+                let buf = t.backend().buffer();
+                (r.x..r.right()).map(|x| &buf[(x, r.y)]).find(|c| !c.symbol().trim().is_empty()).map(|c| c.fg)
+            };
+
+            let greys = [a.title, middle(a.search), arrow, a.settings, a.usage, a.quit].map(first);
+
+            assert_eq!(greys, [Some(Color::Indexed(243)); 6]);
+        }
+
+        fn row_of(v: &View, row: TreeRow) -> Rect {
+            let a = layout_with(TALL, v.widths, false, Sidebar::Tree);
+            tree_row(a.list, &v.tree.as_ref().expect("a tree").shape, 0, row)
+        }
+
+        fn line(v: &View, row: TreeRow) -> String {
+            row_text(&render_sized(v, W, TALL.height), row_of(v, row)).trim_end().to_string()
+        }
+
+        #[test]
+        fn renders_groups_projects_workspaces_and_tabs() {
+            insta::assert_snapshot!(render_sized(&with_tree(), W, TALL.height).backend());
+        }
+
+        #[test]
+        fn a_narrow_column_cuts_the_names() {
+            let v = View { widths: Widths { projects: MIN_COLUMN_WIDTH, ..Widths::default() }, ..with_tree() };
+            insta::assert_snapshot!(render_sized(&v, W, TALL.height).backend());
+        }
+
+        #[test]
+        fn the_active_tab_holds_the_mark() {
+            assert_eq!(line(&with_tree(), TreeRow::Tab(1, 0, 0)), "      ▌ ◐ claude");
+        }
+
+        #[test]
+        fn a_folded_project_holds_the_mark_of_its_active_tab() {
+            let mut v = with_tree();
+            v.tree.as_mut().expect("a tree").shape.projects[1].collapsed = true;
+            let text = line(&v, TreeRow::Project(1));
+            assert!(text.starts_with("  ▌ ▸ cornercase (2)"), "{text}");
+        }
+
+        #[rstest]
+        #[case::a_folded_project(TreeRow::Project(2), "!")]
+        #[case::a_folded_workspace(TreeRow::Workspace(1, 1), "✓ ↓2")]
+        #[case::an_open_project(TreeRow::Project(1), "cornercase")]
+        #[case::an_open_workspace(TreeRow::Workspace(1, 0), "main")]
+        fn only_folded_rows_show_what_needs_you(#[case] row: TreeRow, #[case] end: &str) {
+            let text = line(&with_tree(), row);
+            assert!(text.ends_with(end), "{text}");
+        }
+
+        #[rstest]
+        #[case::a_tab(TreeRow::Tab(1, 0, 1), Landing { at: 5, spot: Spot::Tab(0) }, 8)]
+        #[case::a_workspace(TreeRow::Workspace(1, 1), Landing { at: 4, spot: Spot::Workspace(0) }, 6)]
+        #[case::a_project_into_a_group(TreeRow::Project(0), Landing { at: 3, spot: Spot::Project { group: Some(0), before: Some(1) } }, 4)]
+        fn the_landing_line_starts_where_the_row_would(
+            #[case] row: TreeRow,
+            #[case] landing: Landing,
+            #[case] indent: usize,
+        ) {
+            let v = View { drag: Some(Drag::Tree(row, Some(landing))), ..with_tree() };
+            let t = render_sized(&v, W, TALL.height);
+            let list = layout_with(TALL, v.widths, false, Sidebar::Tree).list;
+            let line =
+                (list.y..list.bottom()).map(|y| row_text(&t, Rect { y, height: 1, ..list })).find(|l| l.contains('─'));
+            assert_eq!(line.map(|l| l.find('─').map(|b| l[..b].chars().count())), Some(Some(indent)));
+        }
+
+        #[test]
+        fn a_hovered_row_shows_its_close_button() {
+            let v = with_tree();
+            let r = row_of(&v, TreeRow::Tab(1, 0, 1));
+            let t = render_sized(&View { hover: Some(Position::new(r.x + 8, r.y)), ..v }, W, TALL.height);
+            assert_eq!(t.backend().buffer()[(r.right() - 2, r.y)].symbol(), "×");
+        }
+    }
+
+    mod tree_drop {
+        use super::*;
+
+        const LIST: Rect = Rect { x: 0, y: 4, width: SIDEBAR_WIDTH - 1, height: 24 };
+
+        fn shape() -> TreeShape {
+            let workspace = |tabs: usize| WorkspaceShape { collapsed: false, tabs: vec![1; tabs] };
+            TreeShape {
+                groups: vec![false],
+                projects: vec![
+                    ProjectShape { group: None, collapsed: false, workspaces: vec![workspace(1)] },
+                    ProjectShape { group: Some(0), collapsed: false, workspaces: vec![workspace(2), workspace(1)] },
+                    ProjectShape { group: Some(0), collapsed: true, workspaces: vec![workspace(1)] },
+                ],
+            }
+        }
+
+        fn drop_on(dragged: TreeRow, under: TreeRow) -> Option<Landing> {
+            let r = tree_row(LIST, &shape(), 0, under);
+            tree_drop(LIST, &shape(), 0, dragged, Position::new(r.x + 8, r.y))
+        }
+
+        fn project(group: Option<usize>, before: Option<usize>) -> Spot {
+            Spot::Project { group, before }
+        }
+
+        #[rstest]
+        #[case::onto_a_tab_of_a_project_above(TreeRow::Project(2), TreeRow::Tab(1, 0, 0), Some((7, project(Some(0), Some(1)))))]
+        #[case::after_the_whole_project_below(TreeRow::Project(0), TreeRow::Tab(1, 1, 0), Some((16, project(Some(0), Some(2)))))]
+        #[case::to_the_end_of_the_group(TreeRow::Project(1), TreeRow::Project(2), Some((17, project(Some(0), None))))]
+        #[case::out_of_its_group(TreeRow::Project(1), TreeRow::Tab(0, 0, 0), Some((0, project(None, Some(0)))))]
+        #[case::into_a_group_from_its_header(TreeRow::Project(0), TreeRow::Group(0), Some((7, project(Some(0), Some(1)))))]
+        #[case::not_into_itself(TreeRow::Project(1), TreeRow::Tab(1, 0, 0), None)]
+        fn a_project_lands_beside_whole_projects(
+            #[case] dragged: TreeRow,
+            #[case] under: TreeRow,
+            #[case] expected: Option<(usize, Spot)>,
+        ) {
+            assert_eq!(drop_on(dragged, under), expected.map(|(at, spot)| Landing { at, spot }));
+        }
+
+        #[rstest]
+        #[case::before_a_workspace_above(TreeRow::Workspace(1, 1), TreeRow::Tab(1, 0, 1), Some((8, Spot::Workspace(0))))]
+        #[case::after_a_workspace_below(TreeRow::Workspace(1, 0), TreeRow::Tab(1, 1, 0), Some((15, Spot::Workspace(2))))]
+        #[case::kept_in_its_project_above(TreeRow::Workspace(1, 1), TreeRow::Tab(0, 0, 0), Some((8, Spot::Workspace(0))))]
+        #[case::kept_in_its_project_below(TreeRow::Workspace(1, 0), TreeRow::Project(2), Some((15, Spot::Workspace(2))))]
+        fn a_workspace_stays_in_its_project(
+            #[case] dragged: TreeRow,
+            #[case] under: TreeRow,
+            #[case] expected: Option<(usize, Spot)>,
+        ) {
+            assert_eq!(drop_on(dragged, under), expected.map(|(at, spot)| Landing { at, spot }));
+        }
+
+        #[rstest]
+        #[case::down_one(TreeRow::Tab(1, 0, 0), TreeRow::Tab(1, 0, 1), Some((11, Spot::Tab(2))))]
+        #[case::onto_its_workspace(TreeRow::Tab(1, 0, 1), TreeRow::Workspace(1, 0), Some((9, Spot::Tab(0))))]
+        #[case::kept_in_its_workspace(TreeRow::Tab(1, 0, 0), TreeRow::Tab(1, 1, 0), Some((11, Spot::Tab(2))))]
+        fn a_tab_stays_in_its_workspace(
+            #[case] dragged: TreeRow,
+            #[case] under: TreeRow,
+            #[case] expected: Option<(usize, Spot)>,
+        ) {
+            assert_eq!(drop_on(dragged, under), expected.map(|(at, spot)| Landing { at, spot }));
+        }
+
+        #[test]
+        fn a_project_dropped_above_the_list_lands_before_the_project_after_its_own_rows() {
+            let short = Rect { height: 8, ..LIST };
+            let landing = tree_drop(short, &shape(), 7, TreeRow::Project(1), Position::new(8, short.y - 1));
+            assert_eq!(landing, Some(Landing { at: 7, spot: project(Some(0), Some(2)) }));
+        }
+
+        #[test]
+        fn a_group_moves_with_everything_in_it() {
+            assert_eq!(
+                drop_on(TreeRow::Group(0), TreeRow::Tab(0, 0, 0)),
+                Some(Landing { at: 6, spot: Spot::Group(0) })
+            );
         }
     }
 

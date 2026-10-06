@@ -589,14 +589,23 @@ mod tests {
                 active: 0,
                 layout: None,
             }];
-            let workspace =
-                WorkspaceState { path: dir.to_path_buf(), name: None, worktree: false, tabs, active: 0, base: None };
+            let path = dir.to_path_buf();
+            let workspace = WorkspaceState {
+                path: path.clone(),
+                name: None,
+                worktree: false,
+                tabs,
+                active: 0,
+                base: None,
+                collapsed: false,
+            };
             let project = ProjectState {
-                path: dir.to_path_buf(),
+                path,
                 name: None,
                 group: None,
                 workspaces: vec![workspace],
                 active: 0,
+                collapsed: false,
             };
             State { version: state::VERSION, projects: vec![project], ..State::default() }
         }
