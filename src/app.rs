@@ -70,11 +70,13 @@ pub enum AppEvent {
     },
     IssueRead {
         source: Source,
+        epoch: u64,
         key: String,
         result: Result<Detail>,
     },
     TokenChecked {
         source: Source,
+        epoch: u64,
         token: Secret,
         result: Result<Account>,
     },
@@ -1119,12 +1121,22 @@ impl App {
                     self.issues_loaded(project, source, &query, result);
                 }
             }
-            AppEvent::IssueRead { source, key, result } => {
-                if let Some(Overlay::Issues(b)) = &mut self.overlay {
+            AppEvent::IssueRead { source, epoch, key, result } => {
+                let current = epoch == self.epoch(source);
+                if let Some(Overlay::Issues(b)) = &mut self.overlay
+                    && current
+                {
                     b.read_done(source, &key, result.map_err(|e| e.to_string()));
                 }
             }
-            AppEvent::TokenChecked { source, token, result } => self.token_checked(source, &token, result, area)?,
+            AppEvent::TokenChecked { source, epoch, token, result } => {
+                let result = if epoch == self.epoch(source) {
+                    result
+                } else {
+                    Err(crate::error::Error::Api(format!("the {} settings changed during the check", source.name())))
+                };
+                self.token_checked(source, &token, result, area)?;
+            }
             AppEvent::PeopleLoaded { project, source, epoch, result } => {
                 if epoch == self.epoch(source) {
                     self.people_loaded(project, source, result);
@@ -2259,7 +2271,7 @@ impl App {
             }
             return;
         };
-        let tx = self.tx.clone();
+        let (tx, epoch) = (self.tx.clone(), self.epoch(issue.source));
         std::thread::spawn(move || {
             let result = client.read(&issue);
             if let Ok(detail) = &result {
@@ -2267,7 +2279,7 @@ impl App {
                     markdown::warm(body);
                 });
             }
-            let _ = tx.send(AppEvent::IssueRead { source: issue.source, key: issue.key, result });
+            let _ = tx.send(AppEvent::IssueRead { source: issue.source, epoch, key: issue.key, result });
         });
     }
 
@@ -2314,16 +2326,17 @@ impl App {
             Source::Jira => {
                 let Some(api) = self.jira(token.0.clone()) else {
                     let error = Err(crate::error::Error::Api("set the Jira site and email first".into()));
-                    let _ = self.tx.send(AppEvent::TokenChecked { source, token, result: error });
+                    let epoch = self.epoch(source);
+                    let _ = self.tx.send(AppEvent::TokenChecked { source, epoch, token, result: error });
                     return;
                 };
                 Client::Jira(api)
             }
         };
-        let tx = self.tx.clone();
+        let (tx, epoch) = (self.tx.clone(), self.epoch(source));
         std::thread::spawn(move || {
             let result = client.whoami();
-            let _ = tx.send(AppEvent::TokenChecked { source, token, result });
+            let _ = tx.send(AppEvent::TokenChecked { source, epoch, token, result });
         });
     }
 
@@ -8580,6 +8593,17 @@ rm -f "$1/sessions/$$.json"
                 enter(s);
             }
 
+            fn answer(s: &mut Setup, wanted: impl Fn(&AppEvent) -> bool) {
+                loop {
+                    let event = s.rx.recv_timeout(Duration::from_secs(10)).expect("the answer arrives");
+                    let found = wanted(&event);
+                    s.app.handle_event(event, AREA).expect("handle event");
+                    if found {
+                        return;
+                    }
+                }
+            }
+
             fn saved_config(s: &Setup) -> Config {
                 config::load(&s.config.path().join("config.json"))
             }
@@ -8638,16 +8662,23 @@ rm -f "$1/sessions/$$.json"
                 let key = s.app.cache_key(Source::Jira, browser(&s.app).project, &browser(&s.app).query(Source::Jira));
 
                 s.app.set_config(Config { jira_site: "other.atlassian.net".into(), ..s.app.config.clone() });
-                loop {
-                    let event = s.rx.recv_timeout(Duration::from_secs(10)).expect("the old list arrives");
-                    let old = matches!(event, AppEvent::IssuesLoaded { source: Source::Jira, .. });
-                    s.app.handle_event(event, AREA).expect("handle event");
-                    if old {
-                        break;
-                    }
-                }
+                answer(&mut s, |e| matches!(e, AppEvent::IssuesLoaded { source: Source::Jira, .. }));
 
                 assert_eq!((s.app.accounts.get(&Source::Jira), s.app.issue_cache.get(&key)), (None, None));
+            }
+
+            #[test]
+            fn a_token_checked_against_the_old_email_is_not_saved() {
+                let mut s = setup(false, "echo '[]'");
+                let _server = jira(&mut s);
+                s.app.config.jira_site = "acme.atlassian.net".into();
+                s.app.config.jira_email = "ana@acme.dev".into();
+
+                s.app.check_token(Source::Jira, Secret("t0k".into()));
+                s.app.set_config(Config { jira_email: "bo@acme.dev".into(), ..s.app.config.clone() });
+                answer(&mut s, |e| matches!(e, AppEvent::TokenChecked { .. }));
+
+                assert_eq!(secrets::read(&secrets_file(&s), "jira_api_token"), None);
             }
 
             #[test]
