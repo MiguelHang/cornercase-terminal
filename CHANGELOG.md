@@ -4,8 +4,8 @@ Every pull request that changes the app adds a section here for its new version.
 
 ## 0.9.1
 
-- In the compact layout (below 90 columns, as on a phone over SSH), every project, workspace and tab row now shows its `×` all the time, dimmed, instead of only on hover, which touch screens don't have.
-- Because it is easy to tap by accident there, closing a tab or a workspace in the compact layout asks first, as closing a project always does. The wide layout still closes them at once.
+- In the compact layout (below 90 columns, as on a phone over SSH), every group, project, workspace and tab row now shows its `×` all the time, dimmed, instead of only on hover, which touch screens don't have.
+- Because it is easy to tap by accident there, closing a tab or a workspace in the compact layout asks first, as closing a project always does. The wide layout is unchanged.
 
 ## 0.9.0
 

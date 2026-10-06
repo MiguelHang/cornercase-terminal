@@ -801,6 +801,7 @@ export class App {
       this.dirty();
       return;
     }
+    for (const t of ws.tabs) for (const pane of t.panes) pane.shell.fg?.dispose?.();
     if (project.workspaces.length === 1) {
       ws.tabs = [];
       this.dirty();
