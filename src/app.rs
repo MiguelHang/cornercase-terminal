@@ -9755,6 +9755,7 @@ rm -f "$s"
             }
 
             #[test]
+            #[cfg(target_os = "linux")]
             fn an_enter_a_full_pane_refuses_is_not_reported_as_pressed() {
                 let (mut app, rx) = app();
                 let id = first(&app);

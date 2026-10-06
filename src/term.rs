@@ -375,15 +375,28 @@ mod tests {
     mod writing {
         use super::*;
 
+        struct Stuck(Receiver<()>);
+
+        impl Write for Stuck {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                let _ = self.0.recv();
+                Err(std::io::Error::other("released"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
         #[test]
-        fn a_program_that_stops_reading_gets_no_more_than_its_queue() {
-            let (mut term, _rx) = spawn_sh();
-            term.write(b"stty -echo; sleep 30\r");
-            wait_until("sleep runs", || term.program(&Config::default()).as_deref() == Some("sleep"));
+        fn a_terminal_that_stops_taking_input_gets_no_more_than_its_queue() {
+            let (release, stuck) = mpsc::channel();
+            let writer = spawn_writer(Box::new(Stuck(stuck)));
 
-            let queued = term.write(&vec![b'x'; MAX_QUEUED + 1024 * 1024]);
+            let taken = [write_to(&writer, &vec![b'x'; MAX_QUEUED]), write_to(&writer, b"y")];
+            drop(release);
 
-            assert_eq!((queued, term.write(b"y")), (true, false));
+            assert_eq!(taken, [true, false]);
         }
 
         #[test]
