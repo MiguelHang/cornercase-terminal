@@ -4,7 +4,7 @@ Every pull request that changes the app adds a section here for its new version.
 
 ## 0.8.1
 
-- A bug in cornercase no longer takes your shells and agents down with it. Until now, when the server hit a bug (a panic), it stopped, and every terminal and coding agent running in it went too. Now cornercase drops only what it was doing at that moment (a dialog or menu you had open may close), says `cornercase hit a bug, see server.log` for a few seconds and carries on.
+- Most bugs in cornercase no longer take your shells and agents down with them. Until now, when the server hit a bug (a panic), it stopped, and every terminal and coding agent running in it went too. Now cornercase drops only what it was doing at that moment (a dialog or menu you had open may close), says `cornercase hit a bug, see server.log` for a few seconds and carries on.
 - `server.log` gets where the bug happened, with a backtrace. Please add it when you [open an issue](https://github.com/usecornercase/cornercase-terminal/issues).
 - A dialog waiting for something running in the background (creating or removing a worktree, installing an update, checking a token, starting an issue) no longer stays busy forever when that hits a bug: it shows the error, and you can close it or try again.
 
