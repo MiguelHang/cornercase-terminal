@@ -4806,7 +4806,10 @@ mod tests {
             let failed = UsageSection {
                 title: "Codex".into(),
                 status: String::new(),
-                error: Some("usage unavailable: could not run /opt/codex/bin/codex: No such file or directory (os error 2)".into()),
+                error: Some(
+                    "usage unavailable: could not run /opt/codex/bin/codex: No such file or directory (os error 2)"
+                        .into(),
+                ),
                 windows: Vec::new(),
                 ..codex_usage()
             };
