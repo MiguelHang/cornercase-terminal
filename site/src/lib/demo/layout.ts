@@ -86,7 +86,7 @@ export const SIDEBARS: [Sidebar, string][] = [
   ['workspaces_on_top', 'one column, projects below workspaces'],
 ];
 export const MIN_STACK_SECTION = 5;
-const STACK_FOOTER = 5;
+const STACK_FOOTER = 6;
 
 export function changesWidth(w: Widths, total: number): number {
   const max = Math.max(0, total - (PANE_PADDING + MIN_PANE_WIDTH + 2 * MIN_COLUMN_WIDTH));
@@ -160,6 +160,7 @@ export interface Areas {
   changes: Rect;
   changesBorder: Rect;
   changesButton: Rect;
+  todoButton: Rect;
 }
 
 function column(r: Rect, lead: number): [Rect, Rect, Rect, Rect, Rect, Rect] {
@@ -196,7 +197,7 @@ function wide(cols: number, rows: number, widths: Widths): Areas {
   const sidebar = rect(0, HEADER_HEIGHT, projects, Math.max(0, rows - HEADER_HEIGHT));
   const [title, list, separator, settings, usage, quit] = column(rect(0, HEADER_HEIGHT, projects - 1, sidebar.h), 1);
   const wsColumn = rect(projects, 0, workspaces, rows);
-  const [workspacesTitle, workspacesList, workspacesSeparator, issues] = column(rect(projects, HEADER_HEIGHT, workspaces - 1, sidebar.h), 1);
+  const [workspacesTitle, workspacesList, workspacesSeparator, issues, todo] = column(rect(projects, HEADER_HEIGHT, workspaces - 1, sidebar.h), 1);
   return {
     compact: false,
     pitch: 1,
@@ -224,8 +225,12 @@ function wide(cols: number, rows: number, widths: Widths): Areas {
     changes: EMPTY,
     changesBorder: EMPTY,
     changesButton: EMPTY,
+    todoButton: todoButton(todo),
   };
 }
+
+export const TODO_LABEL = 'todo';
+const todoButton = (row: Rect): Rect => intersect(rect(right(row) - TODO_LABEL.length - 3, row.y, TODO_LABEL.length + 2, 1), row);
 
 export const stackedWidth = (w: Widths, total: number): number =>
   Math.max(MIN_COLUMN_WIDTH, Math.min(w.projects, Math.max(0, total - (PANE_PADDING + MIN_PANE_WIDTH))));
@@ -273,9 +278,9 @@ function stacked(cols: number, rows: number, widths: Widths, sidebar: Sidebar): 
     title,
     list,
     separator: rect(0, footer, inner, 1),
-    settings: rect(0, footer + 2, inner, 1),
-    usage: rect(0, footer + 3, inner, 1),
-    quit: rect(0, footer + 4, inner, 1),
+    settings: rect(0, footer + 3, inner, 1),
+    usage: rect(0, footer + 4, inner, 1),
+    quit: rect(0, footer + 5, inner, 1),
     workspaces: { ...workspaces, w: width },
     workspacesTitle,
     workspacesList,
@@ -289,6 +294,7 @@ function stacked(cols: number, rows: number, widths: Widths, sidebar: Sidebar): 
     changes: EMPTY,
     changesBorder: EMPTY,
     changesButton: EMPTY,
+    todoButton: todoButton(rect(0, footer + 2, inner, 1)),
   };
 }
 
@@ -330,7 +336,8 @@ function compact(cols: number, rows: number, changes: boolean): Areas {
     stackBorder: EMPTY,
     changes: changes ? below : EMPTY,
     changesBorder: EMPTY,
-    changesButton: rect(Math.max(0, cols - searchWidth - COMPACT_BUTTON_WIDTH), 0, Math.min(COMPACT_BUTTON_WIDTH, Math.max(0, cols - searchWidth)), pitch),
+    changesButton: rect(Math.max(0, cols - searchWidth - 2 * COMPACT_BUTTON_WIDTH), 0, Math.min(COMPACT_BUTTON_WIDTH, Math.max(0, cols - searchWidth - COMPACT_BUTTON_WIDTH)), pitch),
+    todoButton: rect(Math.max(0, cols - searchWidth - COMPACT_BUTTON_WIDTH), 0, Math.min(COMPACT_BUTTON_WIDTH, Math.max(0, cols - searchWidth)), pitch),
   };
 }
 

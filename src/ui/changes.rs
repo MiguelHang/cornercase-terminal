@@ -7,6 +7,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 
+use super::{action_style, dim, draw_close, hovered_at as hovered, put};
 use crate::changes::diff::{Diff, File, Kind, Line, Segments, Status};
 use crate::changes::{GapLine, Mode, Tints};
 
@@ -310,21 +311,6 @@ pub fn hit(area: Rect, view: &View, pos: Position) -> Option<Hit> {
     }
 }
 
-fn dim() -> Style {
-    Style::default().fg(Color::DarkGray)
-}
-
-fn hovered(hover: Option<Position>, r: Rect) -> bool {
-    hover.is_some_and(|p| r.contains(p))
-}
-
-fn put(buf: &mut Buffer, x: u16, y: u16, text: &str, style: Style, end: u16) -> u16 {
-    if x >= end {
-        return x;
-    }
-    buf.set_stringn(x, y, text, usize::from(end - x), style).0
-}
-
 fn fill(buf: &mut Buffer, r: Rect, bg: Color) {
     buf.set_style(r, Style::default().bg(bg));
 }
@@ -391,9 +377,7 @@ fn draw_tabs(buf: &mut Buffer, area: Rect, view: &View, hover: Option<Position>)
     let r = filter_button(area);
     let style = if hovered(hover, r) || view.filter.is_some() { Style::default().fg(Color::Cyan) } else { dim() };
     put(buf, r.x + 1, r.y, FILTER_ICON, style, r.right());
-    let r = close(area);
-    let style = if hovered(hover, r) { Style::default().fg(Color::Red).add_modifier(Modifier::BOLD) } else { dim() };
-    put(buf, r.x + 1, r.y, "×", style, r.right());
+    draw_close(buf, close(area), hover);
 }
 
 fn draw_field(
@@ -532,12 +516,7 @@ fn draw_row(
             put(buf, x, r.y, &"┄".repeat(rest), dim(), end);
             if hovered_hunk == Some((i, h)) {
                 for (action, a) in actions(r) {
-                    let style = if hovered(hover, a) {
-                        Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::Cyan)
-                    };
-                    put(buf, a.x, a.y, &format!(" {} ", action.label()), style, a.right());
+                    put(buf, a.x, a.y, &format!(" {} ", action.label()), action_style(hovered(hover, a)), a.right());
                 }
             }
         }

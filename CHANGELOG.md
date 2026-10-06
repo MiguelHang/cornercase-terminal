@@ -2,6 +2,12 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.8.0
+
+- A TODO list: click **`todo`** under `changes` (or `☐` in the compact bar) to open it in the column right of your panes. Add items with **`+ new todo`**, click an item's text to edit it (with a cursor you move with the arrows), click `[ ]` to check it off and drag items to reorder them. Done items sink to the bottom, struck through, and **`clear done`** removes them.
+- Deleting asks nothing: the message that says what went has an **`undo`** button for a few seconds.
+- The list is the same in every project and is kept in `todos.json` next to your session.
+
 ## 0.7.2
 
 - A tab no longer gets stuck as `?` after you close it, or after its shell exits, while a process it started keeps running in the background. It happened when a program detached itself from the shell, such as Neovim's server outliving its window when the tab closed under it, and the tab could not be closed again. Now the tab goes as soon as its shell ends, as in tmux.
