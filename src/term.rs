@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::thread;
+use std::time::Instant;
 
 use parking_lot::Mutex;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -12,6 +13,7 @@ use crate::agents;
 use crate::app::AppEvent;
 use crate::config::Config;
 use crate::context;
+use crate::control;
 use crate::emulator::Emulator;
 use crate::error::{Error, Result};
 use crate::host_theme::HostTheme;
@@ -25,6 +27,8 @@ const INTERPRETERS: [&str; 6] = ["node", "bun", "deno", "python", "python3", "ru
 const NODE_MAIN_THREAD: &str = "node-MainThread";
 const SCRIPT_EXTENSIONS: [&str; 9] = ["js", "mjs", "cjs", "ts", "mts", "cts", "py", "rb", "sh"];
 const NOT_A_SCRIPT: [&str; 6] = ["-e", "--eval", "-p", "--print", "-c", "-m"];
+pub const PASTE_START: &str = "\x1b[200~";
+pub const PASTE_END: &str = "\x1b[201~";
 
 type Writer = Arc<Mutex<Box<dyn Write + Send>>>;
 
@@ -34,6 +38,9 @@ pub struct Term {
     pub agent: activity::Pane,
     pub context: context::Pane,
     pub memory: memory::Pane,
+    pub output_at: Instant,
+    pub input_at: Option<Instant>,
+    pub submitted: Option<Instant>,
     master: Box<dyn MasterPty + Send>,
     writer: Writer,
     child: Box<dyn Child + Send + Sync>,
@@ -64,6 +71,7 @@ impl Term {
         cmd.args(args);
         cmd.env("TERM", "xterm-256color");
         cmd.env(protocol::NESTED_ENV, "1");
+        cmd.env(control::PANE_ENV, id.to_string());
         for key in activity::CLAUDE_SESSION_ENV {
             cmd.env_remove(key);
         }
@@ -93,6 +101,9 @@ impl Term {
             agent: activity::Pane::default(),
             context: context::Pane::default(),
             memory: memory::Pane::default(),
+            output_at: Instant::now(),
+            input_at: None,
+            submitted: None,
             master: pair.master,
             writer,
             child,
@@ -101,11 +112,21 @@ impl Term {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
+        self.output_at = Instant::now();
         self.emulator.feed(bytes);
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
+        self.input_at = Some(Instant::now());
         write_to(&self.writer, bytes);
+    }
+
+    pub fn paste(&mut self, text: &str) {
+        if self.emulator.bracketed_paste() {
+            self.write(format!("{PASTE_START}{text}{PASTE_END}").as_bytes());
+        } else {
+            self.write(text.as_bytes());
+        }
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {

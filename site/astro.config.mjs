@@ -61,6 +61,7 @@ export default defineConfig({
             { label: 'Changes panel', slug: 'docs/guides/changes' },
             { label: 'TODO list', slug: 'docs/guides/todo' },
             { label: 'Issues and agents', slug: 'docs/guides/issues-and-agents' },
+            { label: 'Scripts and agents', slug: 'docs/guides/scripts-and-agents' },
             { label: 'Search', slug: 'docs/guides/search' },
             { label: 'Sessions and the server', slug: 'docs/guides/sessions' },
             { label: 'Small terminals', slug: 'docs/guides/small-terminals' },

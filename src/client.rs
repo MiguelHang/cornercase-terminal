@@ -259,6 +259,7 @@ fn receive(mut stream: UnixStream) -> Result<Ending> {
             Ok(Some(ServerMessage::Rejected(reason))) => return Err(Error::Rejected(reason)),
             Err(e) if e.kind() == io::ErrorKind::InvalidData => return Err(Error::Rejected(INCOMPATIBLE.into())),
             Ok(Some(ServerMessage::Restart(_))) => return Ok(Ending::Restart),
+            Ok(Some(ServerMessage::Response(_))) => {}
             Ok(Some(ServerMessage::Detached | ServerMessage::Shutdown) | None) | Err(_) => return Ok(Ending::Detached),
         }
     }

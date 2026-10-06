@@ -19,7 +19,7 @@ cornercase is a single Rust binary that plays two roles: a **server** that owns 
                                     your shells, editors and agents
 ```
 
-- `src/main.rs` picks the role from the first argument: none for the client, `server`, or `kill-server`; `update` installs the latest release and restarts the server; `--version` only prints the version.
+- `src/main.rs` hands the arguments to `cli.rs`, which parses them with `clap`: none for the client, `server`, or `kill-server`; `update` installs the latest release and restarts the server; `--version` only prints the version; the [commands for scripts and agents](../../guides/scripts-and-agents/) send one request to the running server and print its answer.
 - The **client** (`client.rs`) starts the server if needed, queries the outer terminal's colours and name, sets up raw mode, mouse capture, bracketed paste and the kitty keyboard flags, sends a `Hello`, then has two jobs: write every frame it receives to stdout, and send every crossterm event it reads to the server.
 - The **server** (`server.rs`) owns the `App`, every PTY and every emulator. It renders a ratatui frame for each client and sends the bytes.
 
@@ -27,7 +27,7 @@ cornercase is a single Rust binary that plays two roles: a **server** that owns 
 
 The accept thread, one reader thread per client, the signal thread and a forwarder for PTY output all send `ServerEvent`s down one `mpsc` channel. Each turn of the loop:
 
-1. drives pending agent launches and, at most once a second, looks for new git worktrees;
+1. drives pending agent launches, answers the waits of the commands for scripts whose condition holds and, at most once a second, looks for new git worktrees;
 2. draws one frame per client;
 3. lets the session `Saver` decide whether to write the session to disk;
 4. waits for an event or a 500 ms tick, then drains everything queued, feeding input and PTY output to the `App`.
@@ -41,6 +41,7 @@ Each client has its own writer thread, so a slow client never blocks the loop. A
 - `Hello` carries a protocol version and a build id (the executable's modification time). A server rejects a client from another build with `ServerMessage::Rejected`.
 - After an in-app update, or when `cornercase update` sends `ClientMessage::Restart`, the server saves the session and sends every client `ServerMessage::Restart`; each client waits for the old server to exit and runs its own executable (which the update replaced), and that starts a new server. A server from before `Restart` cannot decode it and answers `Rejected`, so `cornercase update` falls back to `KillServer`.
 - `ClientMessage::KillServer` and `ServerMessage::Rejected` must stay the first variants of their enums, so that any two builds can still tell each other to stop. `protocol::tests::compatibility` guards this.
+- The commands for scripts send `ClientMessage::Request` and get one `ServerMessage::Response`, both carrying JSON (`control.rs`) instead of postcard, so a command and a server from different releases still understand each other: unknown fields are ignored, and an unknown command is answered with an error that names the server's version. They skip the build check of `Hello`, and a server from before them answers `Rejected`. The server handles a request on its loop like input, but it never counts as a use, so it never changes the shared size. Waits stay in `App` (`app/control.rs`) as pending requests, checked on every turn of the loop, and are dropped when their client goes.
 - One server per socket is enforced with `flock` on `server.lock`. The server calls `setsid` and ignores `SIGHUP`.
 
 ## Rendering
@@ -75,11 +76,13 @@ Keys are encoded in `keys.rs`: Ghostty's encoder for special keys, and for every
 
 | Module | Responsibility |
 | --- | --- |
-| `main.rs` | Client, `server`, `kill-server`, `update` or `--version`, from the arguments (the only place using `anyhow`). |
+| `main.rs` | Hands the arguments to `cli.rs` (the only place using `anyhow`). |
+| `cli.rs` | The `clap` definitions of every command, and the commands for scripts: sending a request, printing its answer. |
+| `control.rs` | The JSON of requests and answers, shared by the commands and the server. |
 | `client.rs` | Terminal setup and teardown, colour query, starting the server, forwarding events, writing frames; `kill-server` and `update`. |
 | `server.rs` | The daemon: owns `App` and every terminal, accepts clients, draws a frame per client. |
 | `protocol.rs` | Messages, framing, socket and lock paths, build id. |
-| `app.rs` | Application state; turns events into actions; builds the `View`. |
+| `app.rs` | Application state; turns events into actions; builds the `View`. `app/control.rs` answers the commands for scripts and keeps their waits. |
 | `ui.rs` | Layout, hit testing and drawing from a plain `View`. |
 | `project.rs` | Project › workspace › tab › panes, labels, removal. |
 | `split.rs` | A tab's split tree: rects, dividers, splitting, removing, ratios. |

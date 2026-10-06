@@ -74,6 +74,19 @@ The same goes for "the running cornercase server is incompatible with this build
 
 You ran `cornercase` from a pane of cornercase itself, where `CORNERCASE=1` is set. Open it from another terminal window instead.
 
+### "no cornercase server is running"
+
+The [commands for scripts and agents](../../guides/scripts-and-agents/) talk to a running server and never start one. Run `cornercase` first. If cornercase is running, check that the command uses the same socket: a different `CORNERCASE_SOCKET`, `XDG_RUNTIME_DIR` or `TMPDIR` points it at another server.
+
+### "the running cornercase server is too old for `cornercase …`"
+
+The server started before you updated to a version with that command. Save your work in the panes, then restart it:
+
+```sh
+cornercase kill-server
+cornercase
+```
+
 ### "failed to start the cornercase server"
 
 The server didn't come up within five seconds. The message names its log file; open it to see why. If you use `CORNERCASE_SOCKET`, check that the folder can be created and that the path is short: Unix socket paths are limited to about 100 bytes.

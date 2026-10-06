@@ -1,0 +1,1029 @@
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use crossterm::event::KeyCode;
+use ratatui::layout::Rect;
+use regex::Regex;
+use serde::Serialize;
+use serde_json::Value;
+
+use super::{App, Target, Toast};
+use crate::activity::Status;
+use crate::agents;
+use crate::control::{
+    self, Command, Done, GroupInfo, Ids, Item, PaneInfo, ProjectInfo, Report, Request, Response, TabInfo, TodoItem,
+    TodoList, Until, WorkspaceInfo,
+};
+use crate::error;
+use crate::git;
+use crate::keys;
+use crate::launch::{self, Launch};
+use crate::notify::{self, Notification};
+use crate::project::{Project, Tab, Workspace};
+use crate::search::Goto;
+use crate::split::{self, Dir};
+use crate::term::Term;
+use crate::update;
+
+const STARTS_WITHIN: Duration = Duration::from_secs(10);
+const SHELL_SETTLES: Duration = Duration::from_millis(300);
+const SOONEST: Duration = Duration::from_millis(10);
+const NO_SIZE: &str = "this cornercase server has not opened a window yet, so a new terminal would have no size; \
+    run `cornercase` once first";
+const NO_PROJECT: &str = "no project is open; open one with `cornercase open PATH`";
+const NO_PANE: &str = "no pane is open here; pass --pane or --tab (`cornercase status` lists them)";
+const NO_AGENT: &str = "say which agent to start, such as `cornercase start claude`: settings → agents is on auto \
+    and no agent runs here";
+
+type Reply = Result<Value, String>;
+type Handled = Result<Option<Value>, String>;
+
+#[derive(Default)]
+pub(super) struct Requests {
+    pending: Vec<Pending>,
+    answers: Vec<(u64, String)>,
+    launched: Vec<(u64, bool)>,
+    next: u64,
+}
+
+impl Requests {
+    pub(super) fn launched(&mut self, key: u64, started: bool) {
+        self.launched.push((key, started));
+    }
+
+    fn key(&mut self) -> u64 {
+        self.next += 1;
+        self.next
+    }
+}
+
+struct Pending {
+    client: Option<u64>,
+    key: u64,
+    timeout: Option<(Instant, f64)>,
+    done: Done,
+    stage: Stage,
+}
+
+enum Stage {
+    Worktree(Then),
+    Removing,
+    Launch(Option<Condition>),
+    Watch(Watch),
+}
+
+struct Then {
+    start: Option<(launch::Spec, Option<String>)>,
+    wait: bool,
+    focus: bool,
+}
+
+struct Watch {
+    pane: u64,
+    until: Condition,
+    since: Option<Instant>,
+    checked: Option<Instant>,
+}
+
+enum Condition {
+    Stops,
+    Idle,
+    Working,
+    Waiting,
+    Shell,
+    Text(Regex),
+    Quiet(Duration),
+}
+
+impl Condition {
+    fn of(until: Until) -> Result<Self, String> {
+        Ok(match until {
+            Until::Stops => Self::Stops,
+            Until::Idle => Self::Idle,
+            Until::Working => Self::Working,
+            Until::Waiting => Self::Waiting,
+            Until::Shell => Self::Shell,
+            Until::Text(pattern) => Self::Text(
+                Regex::new(&pattern).map_err(|e| format!("`{pattern}` is not a valid regular expression: {e}"))?,
+            ),
+            Until::Quiet(seconds) => Self::Quiet(duration(seconds, "--quiet")?),
+        })
+    }
+
+    fn needs_agent(&self) -> bool {
+        matches!(self, Self::Stops | Self::Idle | Self::Working | Self::Waiting)
+    }
+
+    fn ends_on_idle(&self) -> bool {
+        matches!(self, Self::Stops | Self::Idle)
+    }
+
+    fn holds(&self, status: Status) -> bool {
+        match self {
+            Self::Stops => status != Status::Working,
+            Self::Idle => matches!(status, Status::Idle | Status::Done),
+            Self::Working => status == Status::Working,
+            Self::Waiting => status == Status::Waiting,
+            Self::Shell | Self::Text(_) | Self::Quiet(_) => false,
+        }
+    }
+}
+
+enum Verdict {
+    Pending,
+    Ended(&'static str, Option<String>),
+    Failed(String),
+}
+
+#[derive(Default)]
+struct Here {
+    project: Option<usize>,
+    workspace: Option<usize>,
+    tab: Option<usize>,
+    pane: Option<u64>,
+}
+
+fn json(value: &impl Serialize) -> Value {
+    serde_json::to_value(value).unwrap_or(Value::Null)
+}
+
+fn sized(area: Option<Rect>) -> Result<Rect, String> {
+    area.ok_or_else(|| NO_SIZE.to_string())
+}
+
+fn none(kind: &str, id: u64) -> String {
+    format!("there is no {kind} {id}; `cornercase status` lists them")
+}
+
+fn duration(seconds: f64, what: &str) -> Result<Duration, String> {
+    Duration::try_from_secs_f64(seconds)
+        .ok()
+        .filter(|d| !d.is_zero())
+        .ok_or_else(|| format!("{what} takes a positive number of seconds"))
+}
+
+fn deadline(timeout: Option<f64>, now: Instant) -> Result<Option<(Instant, f64)>, String> {
+    timeout.map(|seconds| duration(seconds, "--timeout").map(|d| (now + d, seconds))).transpose()
+}
+
+fn name_of(name: Option<String>) -> Option<String> {
+    let name: String = name?.chars().filter(|c| !c.is_control()).collect();
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+fn pane_ids(pane: u64) -> Done {
+    Done { ids: Ids { pane: Some(pane), ..Ids::default() }, ..Done::default() }
+}
+
+fn parse(text: &str) -> Result<Request, String> {
+    let value: Value = serde_json::from_str(text).map_err(|e| format!("the request is not JSON: {e}"))?;
+    let name = control::command_name(&value).unwrap_or_default().to_string();
+    let server = update::CURRENT;
+    if !Command::NAMES.contains(&name.as_str()) {
+        return Err(format!(
+            "the running cornercase server ({server}) has no `{name}` command; update cornercase and restart the server"
+        ));
+    }
+    serde_json::from_value(value)
+        .map_err(|e| format!("the running cornercase server ({server}) cannot read this `{name}` request: {e}"))
+}
+
+impl App {
+    pub fn request(&mut self, client: u64, text: &str, area: Option<Rect>, now: Instant) {
+        match parse(text).and_then(|request| self.handle_request(client, request, area, now)) {
+            Ok(Some(value)) => self.answer(Some(client), Ok(value)),
+            Ok(None) => {}
+            Err(message) => self.answer(Some(client), Err(message)),
+        }
+    }
+
+    pub fn take_answers(&mut self) -> Vec<(u64, String)> {
+        std::mem::take(&mut self.requests.answers)
+    }
+
+    pub fn forget(&mut self, client: u64) {
+        for pending in self.requests.pending.iter_mut().filter(|p| p.client == Some(client)) {
+            pending.client = None;
+        }
+        self.requests.pending.retain(|p| p.client.is_some() || !matches!(p.stage, Stage::Watch(_)));
+    }
+
+    fn answer(&mut self, client: Option<u64>, reply: Reply) {
+        let Some(client) = client else { return };
+        let response = match reply {
+            Ok(value) => Response::Ok(value),
+            Err(message) => Response::Error(message),
+        };
+        if let Ok(text) = serde_json::to_string(&response) {
+            self.requests.answers.push((client, text));
+        }
+    }
+
+    fn handle_request(&mut self, client: u64, request: Request, area: Option<Rect>, now: Instant) -> Handled {
+        let caller = request.caller;
+        match request.command {
+            Command::Status(_) => Ok(Some(json(&self.report(caller)))),
+            Command::Open(open) => self.open_request(&open, area),
+            Command::NewWorkspace(new) => self.new_workspace_request(client, caller, new, area),
+            Command::NewTab(new) => self.new_tab_request(client, caller, new, area, now),
+            Command::Split(split) => self.split_request(client, caller, split, area, now),
+            Command::Start(start) => self.start_request(client, caller, start, area, now),
+            Command::Send(send) => self.send_request(client, caller, send, now),
+            Command::Keys(keys) => self.keys_request(caller, &keys, now),
+            Command::Read(read) => self.read_request(caller, &read),
+            Command::Wait(wait) => self.wait_request(client, caller, wait, now),
+            Command::Close(close) => self.close_request(client, &close),
+            Command::Rename(rename) => self.rename_request(caller, rename),
+            Command::Focus(focus) => self.show(focus.item).map(|()| Some(json(&Done::default()))),
+            Command::Notify(notify) => self.notify_request(&notify.text),
+            Command::Todo(todo) => self.todo_request(todo),
+        }
+    }
+
+    fn launch_within(
+        &mut self,
+        client: u64,
+        done: Done,
+        launch: Option<Launch>,
+        then: Option<Condition>,
+        timeout: Option<(Instant, f64)>,
+    ) -> Option<Value> {
+        let Some(mut launch) = launch else { return Some(json(&done)) };
+        let key = self.requests.key();
+        launch.key = Some(key);
+        self.launches.push(launch);
+        self.requests.pending.push(Pending { client: Some(client), key, timeout, done, stage: Stage::Launch(then) });
+        None
+    }
+
+    pub(super) fn check_requests(&mut self, now: Instant) {
+        let launched = std::mem::take(&mut self.requests.launched);
+        let mut kept = Vec::new();
+        for mut pending in std::mem::take(&mut self.requests.pending) {
+            match self.advance(&mut pending, &launched, now) {
+                None => kept.push(pending),
+                Some(reply) => {
+                    self.answer(pending.client, reply);
+                    if matches!(pending.stage, Stage::Worktree(_)) {
+                        kept.push(Pending { client: None, timeout: None, ..pending });
+                    }
+                }
+            }
+        }
+        kept.append(&mut self.requests.pending);
+        self.requests.pending = kept;
+    }
+
+    fn advance(&self, pending: &mut Pending, launched: &[(u64, bool)], now: Instant) -> Option<Reply> {
+        let pane = pending.done.ids.pane.unwrap_or_default();
+        if let Stage::Launch(wait) = &mut pending.stage
+            && let Some(&(_, started)) = launched.iter().find(|(key, _)| *key == pending.key)
+        {
+            if !started {
+                return Some(Err(self.not_started(pane)));
+            }
+            match wait.take() {
+                Some(until) if pending.client.is_some() => pending.stage = Stage::Watch(self.watch(pane, until, now)),
+                _ => return Some(Ok(json(&pending.done))),
+            }
+        }
+        if let Stage::Watch(watch) = &mut pending.stage {
+            match self.verdict(watch, now) {
+                Verdict::Pending => {}
+                Verdict::Ended(ended, line) => {
+                    pending.done.ended = Some(ended.to_string());
+                    pending.done.line = line;
+                    return Some(Ok(json(&pending.done)));
+                }
+                Verdict::Failed(message) => return Some(Err(message)),
+            }
+        }
+        let (at, seconds) = pending.timeout.filter(|_| pending.client.is_some())?;
+        (now >= at).then(|| Err(format!("timed out after {seconds}s: {}", self.waiting_on(&pending.stage, pane))))
+    }
+
+    fn not_started(&self, pane: u64) -> String {
+        if self.pane_by(pane).is_none() {
+            format!("pane {pane} closed before it was ready")
+        } else {
+            format!("the agent did not start in pane {pane}; `cornercase read --pane {pane}` shows what the shell said")
+        }
+    }
+
+    fn waiting_on(&self, stage: &Stage, pane: u64) -> String {
+        let watch = match stage {
+            Stage::Worktree(_) => return "git is still creating the worktree".into(),
+            Stage::Removing => return "git is still removing the worktree".into(),
+            Stage::Launch(_) => return format!("pane {pane} is still starting"),
+            Stage::Watch(watch) => watch,
+        };
+        let pane = watch.pane;
+        let Some(term) = self.pane_by(pane) else { return format!("pane {pane} closed") };
+        match &watch.until {
+            Condition::Text(re) => format!("no line on the screen of pane {pane} matches `{re}`"),
+            Condition::Quiet(_) => format!("pane {pane} kept writing"),
+            Condition::Shell => {
+                format!("pane {pane} still runs {}", term.program(&self.config).unwrap_or_else(|| "a program".into()))
+            }
+            _ => format!("the agent in pane {pane} is {}", term.agent.status().map_or("starting", Status::name)),
+        }
+    }
+
+    fn verdict(&self, watch: &mut Watch, now: Instant) -> Verdict {
+        let pane = watch.pane;
+        let Some(term) = self.pane_by(pane) else { return Verdict::Failed(format!("pane {pane} closed")) };
+        let quiet = now.saturating_duration_since(term.output_at);
+        match &watch.until {
+            Condition::Shell
+                if term.shell_in_foreground()
+                    && term.input_at.is_none_or(|at| term.output_at > at)
+                    && quiet >= SHELL_SETTLES =>
+            {
+                return Verdict::Ended("shell", None);
+            }
+            Condition::Quiet(enough) if quiet >= *enough => return Verdict::Ended("quiet", None),
+            Condition::Text(re) if watch.checked.is_none_or(|at| term.output_at >= at) => {
+                watch.checked = Some(now);
+                let screen = term.emulator.screen_text().unwrap_or_default();
+                if let Some(line) = screen.lines().find(|line| re.is_match(line)) {
+                    return Verdict::Ended("text", Some(line.to_string()));
+                }
+                return Verdict::Pending;
+            }
+            Condition::Shell | Condition::Quiet(_) | Condition::Text(_) => return Verdict::Pending,
+            Condition::Stops | Condition::Idle | Condition::Working | Condition::Waiting => {}
+        }
+        let Some(status) = term.agent.status() else {
+            if self.runs_agent(term) {
+                return Verdict::Pending;
+            }
+            return Verdict::Failed(format!("the agent in pane {pane} exited"));
+        };
+        if let Some(since) = watch.since {
+            if term.agent.reacted(since) {
+                watch.since = None;
+            } else if now >= since + STARTS_WITHIN {
+                return Verdict::Failed(format!(
+                    "the agent in pane {pane} did not start working within {}s of the Enter: it may have finished \
+                     at once, or not got the text; `cornercase read --pane {pane}` shows where it is",
+                    STARTS_WITHIN.as_secs()
+                ));
+            } else {
+                return Verdict::Pending;
+            }
+        }
+        if watch.until.holds(status) { Verdict::Ended(status.name(), None) } else { Verdict::Pending }
+    }
+
+    pub(super) fn next_request(&self, now: Instant) -> Option<Duration> {
+        let due = self.requests.pending.iter().flat_map(|pending| {
+            let deadline = pending.timeout.filter(|_| pending.client.is_some()).map(|(at, _)| at);
+            let (quiet, start_by) = match &pending.stage {
+                Stage::Watch(watch) => {
+                    let settles = match watch.until {
+                        Condition::Quiet(quiet) => Some(quiet),
+                        Condition::Shell => Some(SHELL_SETTLES),
+                        _ => None,
+                    };
+                    let quiet = settles.zip(self.pane_by(watch.pane)).map(|(quiet, term)| term.output_at + quiet);
+                    (quiet, watch.since.map(|since| since + STARTS_WITHIN))
+                }
+                _ => (None, None),
+            };
+            [deadline, quiet, start_by].into_iter().flatten()
+        });
+        due.filter(|at| *at > now).min().map(|at| at.saturating_duration_since(now).max(SOONEST))
+    }
+
+    fn pane_by(&self, id: u64) -> Option<&Term> {
+        self.projects.iter().flat_map(|p| &p.workspaces).flat_map(Workspace::terms).find(|t| t.id == id)
+    }
+
+    fn pane_by_mut(&mut self, id: u64) -> Option<&mut Term> {
+        self.projects.iter_mut().flat_map(Project::terms_mut).find(|t| t.id == id)
+    }
+
+    fn watch(&self, pane: u64, until: Condition, now: Instant) -> Watch {
+        let submitted = self.pane_by(pane).and_then(|term| term.submitted);
+        let recent = submitted.filter(|at| now.saturating_duration_since(*at) < STARTS_WITHIN);
+        Watch { pane, since: recent.filter(|_| until.ends_on_idle()), until, checked: None }
+    }
+
+    fn runs_agent(&self, term: &Term) -> bool {
+        term.agent.status().is_some() || agents::detect(&self.config, &term.foreground_args()).is_some()
+    }
+
+    fn locate(&self, pane: u64) -> Option<(usize, usize, usize)> {
+        self.find_tab(|tab| tab.panes.iter().any(|t| t.id == pane))
+    }
+
+    fn locate_tab(&self, id: u64) -> Option<(usize, usize, usize)> {
+        self.find_tab(|tab| tab.id == id)
+    }
+
+    fn find_tab(&self, found: impl Fn(&Tab) -> bool) -> Option<(usize, usize, usize)> {
+        self.projects.iter().enumerate().find_map(|(p, project)| {
+            project
+                .workspaces
+                .iter()
+                .enumerate()
+                .find_map(|(w, workspace)| workspace.tabs.iter().position(&found).map(|t| (p, w, t)))
+        })
+    }
+
+    fn here(&self, caller: Option<u64>) -> Here {
+        if let Some(pane) = caller
+            && let Some((p, w, t)) = self.locate(pane)
+        {
+            return Here { project: Some(p), workspace: Some(w), tab: Some(t), pane: Some(pane) };
+        }
+        let Some(project) = self.project() else { return Here::default() };
+        let workspace = project.workspace();
+        let tab = workspace.and_then(Workspace::tab);
+        Here {
+            project: Some(self.active),
+            workspace: workspace.map(|_| project.active),
+            tab: workspace.filter(|_| tab.is_some()).map(|w| w.active),
+            pane: tab.and_then(Tab::pane).map(|t| t.id),
+        }
+    }
+
+    fn ids(&self, p: usize, w: Option<usize>, t: Option<usize>) -> Ids {
+        let project = &self.projects[p];
+        let workspace = w.and_then(|w| project.workspaces.get(w));
+        let tab = workspace.zip(t).and_then(|(workspace, t)| workspace.tabs.get(t));
+        Ids {
+            project: Some(project.id),
+            workspace: workspace.map(|w| w.id),
+            tab: tab.map(|t| t.id),
+            pane: tab.and_then(Tab::pane).map(|t| t.id),
+        }
+    }
+
+    fn shown_ids(&self, p: usize) -> Ids {
+        let project = &self.projects[p];
+        let w = project.workspace().map(|_| project.active);
+        self.ids(p, w, project.workspace().map(|w| w.active))
+    }
+
+    fn here_workspace(&mut self, caller: Option<u64>) -> Result<(usize, usize), String> {
+        let here = self.here(caller);
+        let p = here.project.ok_or(NO_PROJECT)?;
+        Ok((p, here.workspace.unwrap_or_else(|| self.ensure_workspace(p))))
+    }
+
+    fn target(&self, caller: Option<u64>, pane: Option<u64>, tab: Option<u64>) -> Result<u64, String> {
+        if let Some(id) = pane {
+            return self.locate(id).map(|_| id).ok_or_else(|| none("pane", id));
+        }
+        if let Some(id) = tab {
+            let (p, w, t) = self.locate_tab(id).ok_or_else(|| none("tab", id))?;
+            let tab = &self.projects[p].workspaces[w].tabs[t];
+            let agent = std::iter::once(tab.active)
+                .chain(0..tab.panes.len())
+                .filter_map(|i| tab.panes.get(i))
+                .find(|term| self.runs_agent(term));
+            return agent.or_else(|| tab.pane()).map(|t| t.id).ok_or_else(|| format!("tab {id} has no pane"));
+        }
+        self.here(caller).pane.ok_or_else(|| NO_PANE.to_string())
+    }
+
+    fn show(&mut self, item: Item) -> Result<(), String> {
+        let place = |app: &Self, p: usize, w: Option<usize>, t: Option<usize>| {
+            let Ids { project, workspace, tab, .. } = app.ids(p, w, t);
+            Goto::Place { project: project.unwrap_or_default(), workspace, tab }
+        };
+        let goto = match item {
+            Item::Group(id) => {
+                self.group_index(id).ok_or_else(|| none("group", id))?;
+                Goto::Group(id)
+            }
+            Item::Project(id) => {
+                let p = self.project_index(id).ok_or_else(|| none("project", id))?;
+                place(self, p, None, None)
+            }
+            Item::Workspace(id) => {
+                let (p, w) = self.workspace_position(id).ok_or_else(|| none("workspace", id))?;
+                place(self, p, Some(w), None)
+            }
+            Item::Tab(id) => {
+                let (p, w, t) = self.locate_tab(id).ok_or_else(|| none("tab", id))?;
+                place(self, p, Some(w), Some(t))
+            }
+            Item::Pane(id) => {
+                let (p, w, t) = self.locate(id).ok_or_else(|| none("pane", id))?;
+                self.projects[p].workspaces[w].tabs[t].focus(id);
+                place(self, p, Some(w), Some(t))
+            }
+        };
+        self.goto(goto);
+        Ok(())
+    }
+
+    fn report(&self, caller: Option<u64>) -> Report {
+        let caller = caller.filter(|id| self.locate(*id).is_some());
+        let tab_info = |t: usize, tab: &Tab, active: usize| TabInfo {
+            id: tab.id,
+            name: tab.label(&self.config),
+            status: tab.status().map(|s| s.name().to_string()),
+            active: t == active,
+            panes: tab
+                .panes
+                .iter()
+                .enumerate()
+                .map(|(i, term)| self.pane_info(term, i == tab.active, caller))
+                .collect(),
+        };
+        let workspace_info = |w: usize, ws: &Workspace, active: usize| WorkspaceInfo {
+            id: ws.id,
+            name: ws.label(),
+            path: ws.path.clone(),
+            branch: git::branch(&ws.path),
+            worktree: ws.worktree,
+            behind: ws.behind,
+            active: w == active,
+            tabs: ws.tabs.iter().enumerate().map(|(t, tab)| tab_info(t, tab, ws.active)).collect(),
+        };
+        let projects = self.projects.iter().enumerate().filter(|(_, p)| !p.closing).map(|(p, project)| ProjectInfo {
+            id: project.id,
+            name: self.project_label(project),
+            path: project.path.clone(),
+            group: project.group,
+            active: p == self.active,
+            workspaces: project
+                .workspaces
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| !w.closing)
+                .map(|(w, ws)| workspace_info(w, ws, project.active))
+                .collect(),
+        });
+        let groups = self.groups.iter().map(|g| GroupInfo {
+            id: g.id,
+            name: g.entry.name.clone(),
+            collapsed: g.entry.collapsed,
+        });
+        Report {
+            version: update::CURRENT.to_string(),
+            caller,
+            shown: self.project().map(|_| self.shown_ids(self.active)).unwrap_or_default(),
+            groups: groups.collect(),
+            projects: projects.collect(),
+        }
+    }
+
+    fn pane_info(&self, term: &Term, active: bool, caller: Option<u64>) -> PaneInfo {
+        let context = term.context.context();
+        PaneInfo {
+            id: term.id,
+            path: term.cwd(),
+            program: term.program(&self.config),
+            agent: term.agent.agent().map(str::to_string),
+            status: term.agent.status().map(|s| s.name().to_string()),
+            model: context.map(|c| c.model.clone()),
+            context: context.and_then(|c| c.percent),
+            active,
+            caller: caller == Some(term.id),
+        }
+    }
+
+    fn open_request(&mut self, open: &control::Open, area: Option<Rect>) -> Handled {
+        let path = open.path.canonicalize().map_err(|e| format!("cannot open `{}`: {e}", open.path.display()))?;
+        if !path.is_dir() {
+            return Err(format!("`{}` is not a folder", path.display()));
+        }
+        let p = match self.projects.iter().position(|p| p.path == path) {
+            Some(p) => p,
+            None => self.add_project(path, sized(area)?).map_err(|e| e.to_string())?,
+        };
+        let ids = self.shown_ids(p);
+        if open.focus {
+            self.show(Item::Project(self.projects[p].id))?;
+        }
+        Ok(Some(json(&Done { ids, ..Done::default() })))
+    }
+
+    fn new_workspace_request(
+        &mut self,
+        client: u64,
+        caller: Option<u64>,
+        new: control::NewWorkspace,
+        area: Option<Rect>,
+    ) -> Handled {
+        let area = sized(area)?;
+        let name = name_of(Some(new.name)).ok_or("the workspace needs a name")?;
+        let p = match new.project {
+            Some(id) => self.project_index(id).ok_or_else(|| none("project", id))?,
+            None => self.here(caller).project.ok_or(NO_PROJECT)?,
+        };
+        if new.worktree {
+            if let Some(open) = self.workspace_on(p, &name) {
+                return Err(format!("branch {name} is already open in workspace {open}"));
+            }
+            let then = Then { start: None, wait: false, focus: new.focus };
+            return self.create_worktree(client, p, &name, then, None).map(|()| None);
+        }
+        let path = self.projects[p].path.clone();
+        let workspace = self.new_workspace(area, path, Some(name), false).map_err(|e| e.to_string())?;
+        self.projects[p].workspaces.push(workspace);
+        let w = self.projects[p].workspaces.len() - 1;
+        let ids = self.ids(p, Some(w), Some(0));
+        if new.focus {
+            self.show(Item::Tab(ids.tab.unwrap_or_default()))?;
+        }
+        Ok(Some(json(&Done { ids, ..Done::default() })))
+    }
+
+    fn workspace_on(&self, p: usize, branch: &str) -> Option<u64> {
+        let workspaces = self.projects[p].workspaces.iter().filter(|w| !w.closing);
+        workspaces.into_iter().find(|w| git::branch(&w.path).as_deref() == Some(branch)).map(|w| w.id)
+    }
+
+    fn create_worktree(
+        &mut self,
+        client: u64,
+        p: usize,
+        branch: &str,
+        then: Then,
+        timeout: Option<(Instant, f64)>,
+    ) -> Result<(), String> {
+        let project = &self.projects[p];
+        if !git::is_repo_root(&project.path) {
+            return Err(format!("project {} is not the root of a git repository, so it has no worktrees", project.id));
+        }
+        let key = self.requests.key();
+        self.spawn_worktree(p, branch.to_string(), None, Some(key));
+        let stage = Stage::Worktree(then);
+        self.requests.pending.push(Pending { client: Some(client), key, timeout, done: Done::default(), stage });
+        Ok(())
+    }
+
+    pub(super) fn worktree_ready(&mut self, key: u64, project: u64, result: error::Result<PathBuf>, area: Rect) {
+        let found = self.requests.pending.iter().position(|p| p.key == key && matches!(p.stage, Stage::Worktree(_)));
+        let Some(i) = found else { return };
+        let mut pending = self.requests.pending.remove(i);
+        let Stage::Worktree(then) = std::mem::replace(&mut pending.stage, Stage::Launch(None)) else { return };
+        match self.open_worktree(project, result, then, area, &mut pending) {
+            Ok(true) => self.requests.pending.push(pending),
+            Ok(false) => self.answer(pending.client, Ok(json(&pending.done))),
+            Err(message) => self.answer(pending.client, Err(message)),
+        }
+    }
+
+    fn open_worktree(
+        &mut self,
+        project: u64,
+        result: error::Result<PathBuf>,
+        then: Then,
+        area: Rect,
+        pending: &mut Pending,
+    ) -> Result<bool, String> {
+        let path = result.map_err(|e| e.to_string())?;
+        let path = path.canonicalize().unwrap_or(path);
+        let p = self.project_index(project).ok_or_else(|| format!("project {project} closed"))?;
+        let w = if let Some(w) = self.projects[p].workspaces.iter().position(|w| w.path == path) {
+            w
+        } else {
+            let id = self.take_id();
+            self.projects[p].workspaces.push(Workspace::new(id, path, None, true));
+            self.projects[p].workspaces.len() - 1
+        };
+        let launch = match then.start {
+            Some((spec, name)) => {
+                let t = self.push_tab(p, w, area, name).map_err(|e| e.to_string())?;
+                Some((spec, t))
+            }
+            None if self.projects[p].workspaces[w].tabs.is_empty() => {
+                self.push_tab(p, w, area, None).map_err(|e| e.to_string())?;
+                None
+            }
+            None => None,
+        };
+        let t = launch.as_ref().map_or(self.projects[p].workspaces[w].active, |(_, t)| *t);
+        pending.done.ids = self.ids(p, Some(w), Some(t));
+        let pane = pending.done.ids.pane.unwrap_or_default();
+        if then.focus {
+            self.show(Item::Pane(pane))?;
+        }
+        let Some((spec, _)) = launch else { return Ok(false) };
+        let wait = then.wait.then_some(Condition::Stops);
+        let mut launch = Launch::new(pane, spec, Instant::now());
+        launch.key = Some(pending.key);
+        self.launches.push(launch);
+        pending.stage = Stage::Launch(wait);
+        Ok(true)
+    }
+
+    fn new_tab_request(
+        &mut self,
+        client: u64,
+        caller: Option<u64>,
+        new: control::NewTab,
+        area: Option<Rect>,
+        now: Instant,
+    ) -> Handled {
+        let area = sized(area)?;
+        let (p, w) = match new.workspace {
+            Some(id) => self.workspace_position(id).ok_or_else(|| none("workspace", id))?,
+            None => self.here_workspace(caller)?,
+        };
+        let t = self.push_tab(p, w, area, name_of(new.name)).map_err(|e| e.to_string())?;
+        let ids = self.ids(p, Some(w), Some(t));
+        let pane = ids.pane.unwrap_or_default();
+        if new.focus {
+            self.show(Item::Pane(pane))?;
+        }
+        let launch = new.command.map(|command| Launch::command(pane, command, now));
+        Ok(self.launch_within(client, Done { ids, ..Done::default() }, launch, None, None))
+    }
+
+    fn split_request(
+        &mut self,
+        client: u64,
+        caller: Option<u64>,
+        split: control::Split,
+        area: Option<Rect>,
+        now: Instant,
+    ) -> Handled {
+        let area = sized(area)?;
+        let pane = self.target(caller, split.pane, None)?;
+        let (p, w, t) = self.locate(pane).ok_or_else(|| none("pane", pane))?;
+        let (dir, way) = if split.down { (Dir::Down, "down") } else { (Dir::Right, "right") };
+        let rect = self.projects[p].workspaces[w].tabs[t].layout.pane(self.layout(area).pane, pane);
+        if !rect.is_some_and(|r| split::fits(r, dir)) {
+            return Err(format!("pane {pane} is too small to split {way}"));
+        }
+        let new =
+            self.split_pane(pane, dir, area, false).map_err(|e| e.to_string())?.ok_or_else(|| none("pane", pane))?;
+        let ids = Ids { pane: Some(new), ..self.ids(p, Some(w), Some(t)) };
+        if split.focus {
+            self.show(Item::Pane(new))?;
+        }
+        let launch = split.command.map(|command| Launch::command(new, command, now));
+        Ok(self.launch_within(client, Done { ids, ..Done::default() }, launch, None, None))
+    }
+
+    fn start_request(
+        &mut self,
+        client: u64,
+        caller: Option<u64>,
+        start: control::Start,
+        area: Option<Rect>,
+        now: Instant,
+    ) -> Handled {
+        let area = sized(area)?;
+        let timeout = deadline(start.timeout, now)?;
+        let kind = self.agent_kind(caller, start.agent)?;
+        let prompt = start.prompt.filter(|p| !p.trim().is_empty());
+        let spec = launch::Spec { command: agents::command_line(&self.config, &kind), prompt, submit: true };
+        let name = name_of(start.name);
+        let (p, w) = if let Some(id) = start.workspace {
+            self.workspace_position(id).ok_or_else(|| none("workspace", id))?
+        } else if let Some(branch) = start.worktree.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+            let p = self.here(caller).project.ok_or(NO_PROJECT)?;
+            let open = self.workspace_on(p, branch).and_then(|id| self.workspace_position(id));
+            let Some(found) = open else {
+                let then = Then { start: Some((spec, name)), wait: start.wait, focus: start.focus };
+                return self.create_worktree(client, p, branch, then, timeout).map(|()| None);
+            };
+            found
+        } else {
+            self.here_workspace(caller)?
+        };
+        let t = self.push_tab(p, w, area, name).map_err(|e| e.to_string())?;
+        let ids = self.ids(p, Some(w), Some(t));
+        let pane = ids.pane.unwrap_or_default();
+        if start.focus {
+            self.show(Item::Pane(pane))?;
+        }
+        let wait = start.wait.then_some(Condition::Stops);
+        let launch = Some(Launch::new(pane, spec, now));
+        Ok(self.launch_within(client, Done { ids, ..Done::default() }, launch, wait, timeout))
+    }
+
+    fn agent_kind(&self, caller: Option<u64>, agent: Option<String>) -> Result<String, String> {
+        let kinds = agents::kinds(&self.config);
+        if let Some(agent) = agent {
+            return if kinds.contains(&agent) {
+                Ok(agent)
+            } else {
+                Err(format!(
+                    "unknown agent `{agent}`; cornercase knows {}, and more can be added with agent_commands in \
+                     config.json",
+                    kinds.join(", ")
+                ))
+            };
+        }
+        let running = self.here(caller).pane.and_then(|id| self.pane_by(id));
+        let running = running.and_then(|term| agents::detect(&self.config, &term.foreground_args()));
+        agents::resolve(&self.config, None, running.as_deref()).ok_or_else(|| NO_AGENT.to_string())
+    }
+
+    fn send_request(&mut self, client: u64, caller: Option<u64>, send: control::SendText, now: Instant) -> Handled {
+        let pane = self.target(caller, send.pane, send.tab)?;
+        let timeout = deadline(send.timeout, now)?;
+        let term = self.pane_by(pane).ok_or_else(|| none("pane", pane))?;
+        if term.agent.status() == Some(Status::Waiting) {
+            return Err(format!(
+                "the agent in pane {pane} is waiting for an answer to a question or a permission prompt, and what \
+                 you send would answer it; ask the user, then answer with `cornercase keys`"
+            ));
+        }
+        if send.wait {
+            self.can_wait(caller, pane, &Condition::Stops)?;
+        }
+        let text = send.text.filter(|t| !t.is_empty());
+        if text.is_none() && !send.enter {
+            return Err("nothing to send: give a text, - to read it from stdin, or --enter".into());
+        }
+        if let Some(text) = &text
+            && let Some(term) = self.pane_by_mut(pane)
+        {
+            term.paste(text);
+        }
+        if !send.enter {
+            return Ok(Some(json(&pane_ids(pane))));
+        }
+        let wait = send.wait.then_some(Condition::Stops);
+        Ok(self.launch_within(client, pane_ids(pane), Some(Launch::enter(pane, now)), wait, timeout))
+    }
+
+    fn can_wait(&self, caller: Option<u64>, pane: u64, until: &Condition) -> Result<(), String> {
+        let term = self.pane_by(pane).ok_or_else(|| none("pane", pane))?;
+        if until.needs_agent() && !self.runs_agent(term) {
+            return Err(format!(
+                "pane {pane} runs no agent, so there is nothing to wait for; wait with --until shell, --text or \
+                 --quiet instead"
+            ));
+        }
+        if caller == Some(pane) && (until.needs_agent() || matches!(until, Condition::Shell)) {
+            return Err(format!(
+                "pane {pane} is the one running this command, so it would wait for itself; pass --pane"
+            ));
+        }
+        Ok(())
+    }
+
+    fn keys_request(&mut self, caller: Option<u64>, keys: &control::Keys, now: Instant) -> Handled {
+        let pane = self.target(caller, keys.pane, keys.tab)?;
+        let events = keys
+            .keys
+            .iter()
+            .map(|name| keys::named(name).ok_or_else(|| format!("unknown key `{name}`")))
+            .collect::<Result<Vec<_>, _>>()?;
+        if events.is_empty() {
+            return Err("no keys given".into());
+        }
+        let term = self.pane_by_mut(pane).ok_or_else(|| none("pane", pane))?;
+        if events.iter().any(|key| key.code == KeyCode::Enter) {
+            term.submitted = Some(now);
+        }
+        let bytes: Vec<u8> = events.into_iter().flat_map(|key| term.emulator.encode_key(key)).collect();
+        term.write(&bytes);
+        Ok(Some(json(&pane_ids(pane))))
+    }
+
+    fn read_request(&self, caller: Option<u64>, read: &control::Read) -> Handled {
+        let pane = self.target(caller, read.pane, read.tab)?;
+        let term = self.pane_by(pane).ok_or_else(|| none("pane", pane))?;
+        let text = match read.lines {
+            Some(lines) => term.emulator.last_lines(lines),
+            None => term.emulator.screen_text(),
+        };
+        let text = text.map_err(|e| format!("cannot read pane {pane}: {e}"))?;
+        Ok(Some(json(&Done { text: Some(text), ..pane_ids(pane) })))
+    }
+
+    fn wait_request(&mut self, client: u64, caller: Option<u64>, wait: control::Wait, now: Instant) -> Handled {
+        let pane = self.target(caller, wait.pane, wait.tab)?;
+        let timeout = deadline(wait.timeout, now)?;
+        let until = Condition::of(wait.until)?;
+        self.can_wait(caller, pane, &until)?;
+        let key = self.requests.key();
+        let watch = self.watch(pane, until, now);
+        let pending = Pending { client: Some(client), key, timeout, done: pane_ids(pane), stage: Stage::Watch(watch) };
+        self.requests.pending.push(pending);
+        Ok(None)
+    }
+
+    fn close_request(&mut self, client: u64, close: &control::Close) -> Handled {
+        match close.item {
+            Item::Pane(id) => self.pane_by_mut(id).ok_or_else(|| none("pane", id))?.kill(),
+            Item::Tab(id) => {
+                let (p, w, t) = self.locate_tab(id).ok_or_else(|| none("tab", id))?;
+                self.projects[p].workspaces[w].tabs[t].panes.iter_mut().for_each(Term::kill);
+            }
+            Item::Workspace(id) => {
+                let (p, w) = self.workspace_position(id).ok_or_else(|| none("workspace", id))?;
+                if close.remove_worktree {
+                    if !self.projects[p].workspaces[w].worktree {
+                        return Err(format!("workspace {id} is not a git worktree"));
+                    }
+                    let key = self.requests.key();
+                    self.spawn_removal(p, w, close.force, Some(key));
+                    let pending = Pending {
+                        client: Some(client),
+                        key,
+                        timeout: None,
+                        done: Done::default(),
+                        stage: Stage::Removing,
+                    };
+                    self.requests.pending.push(pending);
+                    return Ok(None);
+                }
+                let workspace = &mut self.projects[p].workspaces[w];
+                if workspace.worktree {
+                    workspace.kill();
+                } else {
+                    self.drop_workspace(self.projects[p].id, id);
+                }
+            }
+            Item::Project(id) => {
+                self.project_index(id).ok_or_else(|| none("project", id))?;
+                self.close_project(id);
+            }
+            Item::Group(id) => return Err(format!("group {id} cannot be closed; close its projects")),
+        }
+        Ok(Some(json(&Done::default())))
+    }
+
+    pub(super) fn worktree_gone(&mut self, key: u64, project: u64, workspace: u64, result: error::Result<()>) {
+        if result.is_ok() {
+            self.drop_workspace(project, workspace);
+        }
+        let Some(i) = self.requests.pending.iter().position(|p| p.key == key) else { return };
+        let pending = self.requests.pending.remove(i);
+        self.answer(pending.client, result.map(|()| json(&Done::default())).map_err(|e| e.to_string()));
+    }
+
+    fn rename_request(&mut self, caller: Option<u64>, rename: control::Rename) -> Handled {
+        let target = match rename.item {
+            Some(Item::Group(id)) => {
+                self.group_index(id).ok_or_else(|| none("group", id))?;
+                Target::Group(id)
+            }
+            Some(Item::Project(id)) => {
+                self.project_index(id).ok_or_else(|| none("project", id))?;
+                Target::Project(id)
+            }
+            Some(Item::Workspace(id)) => {
+                let (p, _) = self.workspace_position(id).ok_or_else(|| none("workspace", id))?;
+                Target::Workspace(self.projects[p].id, id)
+            }
+            Some(Item::Tab(id)) => self.tab_target(self.locate_tab(id)).ok_or_else(|| none("tab", id))?,
+            Some(Item::Pane(id)) => self.tab_target(self.locate(id)).ok_or_else(|| none("pane", id))?,
+            None => {
+                let here = self.here(caller);
+                let found = here.project.zip(here.workspace).zip(here.tab).map(|((p, w), t)| (p, w, t));
+                self.tab_target(found).ok_or("no tab is open here; pass --tab")?
+            }
+        };
+        let name = name_of(Some(rename.name));
+        if matches!(target, Target::Group(_)) && name.is_none() {
+            return Err("a group needs a name".into());
+        }
+        self.rename(target, name);
+        Ok(Some(json(&Done::default())))
+    }
+
+    fn tab_target(&self, found: Option<(usize, usize, usize)>) -> Option<Target> {
+        let (p, w, t) = found?;
+        let project = &self.projects[p];
+        let workspace = &project.workspaces[w];
+        Some(Target::Tab(project.id, workspace.id, workspace.tabs[t].id))
+    }
+
+    fn notify_request(&mut self, text: &str) -> Handled {
+        let message = notify::clean(text).trim().to_string();
+        if message.is_empty() {
+            return Err("the notification needs a text".into());
+        }
+        self.notifications.extend(Notification::new(&message, &self.config.desktop_notifications));
+        self.toast = Some(Toast::new(message, None));
+        Ok(Some(json(&Done::default())))
+    }
+
+    fn todo_request(&mut self, todo: control::Todo) -> Handled {
+        let done = match todo {
+            control::Todo::Add(text) => {
+                Done { todo: Some(self.todos.add(&text).ok_or("the todo needs a text")?), ..Done::default() }
+            }
+            control::Todo::List => {
+                let todos =
+                    self.todos.items().iter().map(|i| TodoItem { id: i.id, text: i.text.clone(), done: i.done });
+                return Ok(Some(json(&TodoList { todos: todos.collect() })));
+            }
+            control::Todo::Done(id) => {
+                self.todos.item(id).ok_or_else(|| none("todo", id))?;
+                self.todos.toggle(id);
+                Done::default()
+            }
+            control::Todo::Rm(id) => {
+                self.todos.remove(id).ok_or_else(|| none("todo", id))?;
+                Done::default()
+            }
+        };
+        Ok(Some(json(&done)))
+    }
+}

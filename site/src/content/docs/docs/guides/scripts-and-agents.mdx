@@ -1,0 +1,222 @@
+---
+title: Scripts and agents
+description: Drive a running cornercase from scripts, git hooks and coding agents — open tabs, type into panes, start agents in their own worktrees, wait for them and read what they wrote.
+---
+
+Besides opening the window, the `cornercase` command drives the server that is already running. A script can open a tab and run the tests in it, a git hook can leave a note, and a coding agent in one tab can start others in their own worktrees, wait until they finish or need an answer, read what they wrote and send them the next step.
+
+```sh
+pane=$(cornercase new-tab --name tests -- cargo test)
+cornercase wait --pane "$pane" --until shell --timeout 900
+cornercase read --pane "$pane" --lines 40
+```
+
+These commands never start a server. Without one, they say `no cornercase server is running` and exit with status 1.
+
+## Ids and where commands act
+
+`cornercase status` lists every project, workspace, tab and pane with its id:
+
+```text
+project 1  shop  ~/src/shop  (shown)
+  workspace 2  default  ~/src/shop  branch main  (shown)
+    tab 3  claude  working  (shown)
+      pane 4  claude  working  Opus 5.5 · 23%  ~/src/shop  (shown)
+    tab 6  zsh
+      pane 5  zsh  ~/src/shop  (you)
+  workspace 7  fix/login  ~/.cornercase/worktrees/shop/fix-login  branch fix/login  worktree
+group 9  work  collapsed
+  project 10  api  ~/src/api
+```
+
+- Ids come from one counter and last as long as the server runs: after a restart, the same tabs get new ids. Take them from `status`, or from what a command printed.
+- Every pane's shell has `CORNERCASE_PANE` set to its id. Inside a pane, commands act on that pane, its tab, workspace and project unless you name another one; `(you)` marks it in `status`. Run from anywhere else, they act on what the window shows, marked `(shown)`.
+- The pane is what `send`, `keys`, `read` and `wait` work on. Where they take `--tab ID`, it stands for the tab's agent pane, or its active pane when no agent runs in it.
+- **Nothing changes what the window shows** except `focus` and the `--focus` option. Whoever is looking at the window keeps seeing what they were looking at while a script opens tabs next to them.
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `status` | Lists groups, projects, workspaces, tabs and panes with their ids. |
+| `open PATH` | Opens a folder as a project, or finds the open one. Prints the project's id. |
+| `new-workspace NAME` | Adds a workspace to a project, or a git worktree with `--worktree`. Prints its id. |
+| `new-tab` | Opens a tab, optionally typing a command into it. Prints the pane's id. |
+| `split` | Splits a pane right, or down, optionally typing a command. Prints the new pane's id. |
+| `start [AGENT]` | Starts a coding agent in a new tab and gives it a prompt. Prints the pane's id. |
+| `send [TEXT]` | Pastes text into a pane, and presses Enter with `--enter`. |
+| `keys KEY…` | Presses keys in a pane. |
+| `read` | Prints a pane's screen, or its last lines. |
+| `wait` | Waits until an agent stops working, a program ends, a line shows up or the output stops. |
+| `close` | Closes a pane, tab, workspace or project. |
+| `rename NAME` | Renames a tab, workspace, project or group. |
+| `focus` | Shows a pane, tab, workspace or project in the window. |
+| `notify TEXT` | Shows a message in the window, with a desktop notification. |
+| `todo` | Adds to, lists, checks off and removes items of the [TODO list](../todo/). |
+| `skill` | Prints the instructions that teach coding agents these commands. |
+
+`cornercase --help` and `cornercase COMMAND --help` describe every option, with examples.
+
+### Look
+
+```sh
+cornercase status          # the tree above
+cornercase status --json   # the same, as JSON
+```
+
+Each pane shows its program and folder. A pane running Claude Code or Codex also shows what the agent is doing (`working`, `waiting` for an answer, `done` while you were elsewhere, `idle`), its model and how full its context is, as the [tab icons](../projects-workspaces-tabs/#what-your-agents-are-doing) do. A workspace shows its branch, `worktree` when it has one of its own, and the commits it is behind.
+
+### Create
+
+```sh
+cornercase open ~/src/api                       # prints the project's id
+cornercase new-workspace experiments             # a workspace in the project's folder
+cornercase new-workspace fix/login --worktree    # a git worktree on branch fix/login
+cornercase new-tab --name server -- npm run dev  # prints the new pane's id
+cornercase split --down -- tail -f server.log    # splits the pane below
+```
+
+- `open` finds a project that is already open instead of opening it twice.
+- `new-workspace` adds to the project the command runs in (`--project ID` for another one). With `--worktree`, the project must be at a repository's root, as in the [new workspace dialog](../worktrees/): the checkout goes in the worktrees folder from settings, the branch is created from `HEAD` when it does not exist, and the command returns once git has made it. Each new workspace gets one tab.
+- `new-tab` opens the tab in the workspace the command runs in (`--workspace ID` for another one). `split` splits the pane it runs in (`--pane ID` for another one), and refuses a pane too small to split.
+- After `--`, the words of a command are joined with spaces and typed at the prompt once the shell is ready, as `ssh` does with its command, so quote what the shell should read as one argument: `-- 'cargo test 2>&1 | tee test.log'`. The command returns once it is typed.
+- Each prints the new pane's, workspace's or project's id, so `pane=$(cornercase new-tab …)` needs nothing else. `--json` prints every id: `{"project": 1, "workspace": 2, "tab": 8, "pane": 9}`.
+- `--focus` also shows what was made.
+
+### Start an agent
+
+```sh
+cornercase start claude --worktree fix-login --prompt 'Fix the login form, then commit'
+cornercase start codex --prompt-file task.md --wait --timeout 1800
+git diff | cornercase start claude --prompt-file -
+```
+
+`start` does what **start** does in the [issue browser](../issues-and-agents/#the-launch): it opens a tab, types the agent's command with its arguments and mode from **settings → Agents**, answers its folder trust question when the settings allow it, and once the agent is ready pastes the prompt and presses Enter. It returns then, printing the pane's id, or fails if the agent never shows up.
+
+- **Which agent**: the one you name (`claude`, `codex`, `gemini` or any [other kind](../../reference/agents/)); without one, the default from **settings → Agents**, or, when that is *auto*, the agent running in the pane the command runs in.
+- **Where**: a new tab in the workspace the command runs in; in another workspace with `--workspace ID`; or with `--worktree BRANCH`, in the workspace on that branch, made as a new worktree when there is none.
+- `--name` names the tab, `--prompt` gives the prompt and `--prompt-file` reads it from a file, or from standard input with `-`. Without a prompt, the agent just starts.
+- `--wait` then waits like [`wait`](#wait) does, and prints how it ended on a second line.
+
+### Talk to a pane
+
+```sh
+cornercase send --pane 12 --enter 'Now add tests for it'
+cornercase send --pane 12 --enter --wait --timeout 900 - < next-step.md
+cornercase keys --pane 12 ctrl+c
+cornercase keys --pane 12 down enter
+cornercase read --pane 12
+cornercase read --pane 7 --lines 200
+```
+
+- `send` pastes the text in one go, bracketed when the program asked for it, as a paste from your terminal would be. `-` reads it from standard input. `--enter` then presses Enter once the screen settles. `--wait` then waits until the agent stops working; it fails if the agent does not start working within 10 seconds of the Enter, rather than waiting forever for an agent that never got the text.
+- `send` refuses a pane whose agent is `waiting` for an answer to a question or a permission prompt: whatever it typed would answer it. Answer such a prompt with `keys`, after deciding what the answer should be.
+- `keys` presses keys, encoded the way the program in the pane asked for: `enter`, `esc`, `tab`, `backspace`, `space`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `delete`, `insert`, `f1` to `f12`, or one character, each after any of `ctrl+`, `alt+` and `shift+` (`shift+tab`, `ctrl+c`, `alt+x`).
+- `read` prints the screen as text. `--lines N` prints the last `N` lines instead, scrollback included (a pane keeps 5,000). Lines the terminal wrapped come back as one, and empty lines at the end are left out.
+
+### Wait
+
+```sh
+cornercase wait --pane 12 --timeout 600                        # until the agent stops working
+cornercase wait --pane 12 --until waiting                      # until it needs an answer
+cornercase wait --pane 7 --until shell                         # until the program ends
+cornercase wait --pane 7 --text 'test result: (ok|FAILED)'     # until a line matches
+cornercase wait --pane 7 --quiet 5                             # until it writes nothing for 5 s
+```
+
+`wait` blocks until its condition holds, then prints how it ended:
+
+| Condition | Ends when | Prints |
+| --- | --- | --- |
+| *(none)* | the agent stops working: it is idle, done or waiting | `idle`, `done` or `waiting` |
+| `--until idle` | the agent is idle or done | `idle` or `done` |
+| `--until working` | the agent is working | `working` |
+| `--until waiting` | the agent waits for an answer to a question or a permission prompt | `waiting` |
+| `--until shell` | the program in the foreground ended and the shell is back | `shell` |
+| `--text REGEX` | a line on the screen matches, one already there included | the line |
+| `--quiet SECONDS` | the pane wrote nothing for that long | `quiet` |
+
+- The agent conditions need an agent in the pane, Claude Code or Codex, since cornercase only knows [what they are doing](../projects-workspaces-tabs/#what-your-agents-are-doing). On any other pane, wait for `shell`, a line or quiet instead.
+- After a prompt reached the agent (through `start`, `send --enter` or `keys … enter`), a wait for it to stop first waits for the agent to take the prompt, so it doesn't end at once on an agent that hasn't started yet.
+- Waits run in the server and don't slow it down. They end with their condition, their `--timeout` (none by default) or when you interrupt the command. A timeout exits with status 1 and says what the pane was doing. It doesn't prove that the agent missed what you sent: read the pane before sending it again.
+
+### Arrange
+
+```sh
+cornercase close --tab 9
+cornercase close --workspace 5 --remove-worktree
+cornercase rename 'review #42'
+cornercase rename --workspace 5 ''
+cornercase focus --pane 12
+```
+
+- `close` takes exactly one of `--pane`, `--tab`, `--workspace` or `--project` and stops its shells, as its `×` would. A project closes without asking. A worktree's workspace stays listed while its worktree is on disk; `--remove-worktree` removes the worktree too (`--force` when git refuses because of changes), and the branch is never deleted.
+- `rename` renames the tab it runs in, or the `--tab`, `--workspace`, `--project` or `--group` you name. An empty name goes back to the default one (a group always keeps a name).
+- `focus` shows a pane, tab, workspace or project, as picking it in the [search](../search/) does.
+
+### Leave notes
+
+```sh
+cornercase notify 'the release build is ready'
+cornercase todo add review the login fix    # prints the item's id
+cornercase todo list
+cornercase todo done 3                      # checks it off, or back on
+cornercase todo rm 3
+```
+
+`notify` shows a toast in the window and sends a [desktop notification](../projects-workspaces-tabs/#notifications) through the terminal of every open window, like the one for an agent that needs you.
+
+## JSON
+
+`--json` prints a command's answer as JSON. These fields are kept stable; new ones may be added.
+
+| Command | Fields |
+| --- | --- |
+| `status` | `version`, `caller` (your pane's id, or `null`), `shown` (the ids of what the window shows), `groups` (`id`, `name`, `collapsed`), `projects` (`id`, `name`, `path`, `group`, `active`, `workspaces`), each workspace (`id`, `name`, `path`, `branch`, `worktree`, `behind`, `active`, `tabs`), each tab (`id`, `name`, `status`, `active`, `panes`), each pane (`id`, `path`, `program`, `agent`, `status`, `model`, `context`, `active`, `caller`). `active` is whether it is the active one of its parent; `status` is `working`, `waiting`, `done`, `idle` or `null`. |
+| `open`, `new-workspace`, `new-tab`, `split`, `start` | `project`, `workspace`, `tab`, `pane`: the ids of what was made (for `open`, the project's shown workspace, tab and pane). |
+| `send`, `wait` | `pane`, and, once a wait ended, `ended` (`idle`, `done`, `waiting`, `working`, `shell`, `text` or `quiet`) and `line` for a `--text` match. `start --wait` adds `ended` and `line` too. |
+| `read` | `pane` and `text`. |
+| `todo list` | `todos`: `id`, `text`, `done`. |
+
+## Exit status
+
+| Status | Meaning |
+| --- | --- |
+| `0` | Done. |
+| `1` | An error or a timeout; the message says which. |
+| `2` | Wrong usage, such as an unknown option. |
+
+Some messages you may meet:
+
+| Message | Meaning |
+| --- | --- |
+| `no cornercase server is running` | Start cornercase first; these commands never start a server. |
+| `the running cornercase server is too old for cornercase …` | The server comes from a release without these commands, or without this one. Restart it: `cornercase kill-server` (it closes all its terminals), then `cornercase`. |
+| `the running cornercase server (…) has no … command` | The command is newer than the server. Restart the server so it runs the version you installed. |
+| `this cornercase server has not opened a window yet …` | A server started without a window has no size to give a new terminal, and hasn't restored your session yet. Run `cornercase` once. |
+| `the agent in pane … is waiting for an answer …` | `send` refused to type into an agent's question or permission prompt. |
+| `timed out after …` | The `--timeout` passed; the rest of the message says what the pane was doing. |
+
+## Teach your agents
+
+An agent only knows what is in its context, so it doesn't know about these commands until you tell it. cornercase ships a short set of instructions as an agent skill (a `SKILL.md` in the repository); install it for Claude Code, Codex and other agents with:
+
+```sh
+npx skills add usecornercase/cornercase-terminal --skill cornercase -g
+```
+
+Only the skill's name and description stay in the agent's context; the rest loads when a task needs it. `cornercase skill` prints the copy that matches your version; for an agent without skills, put that text in your `AGENTS.md` or `CLAUDE.md`. cornercase never installs it by itself, for the same reason it installs no hooks: it doesn't write into your agents' setup.
+
+The instructions tell agents to use the commands only when you ask them to open tabs, run something in another pane, or start and coordinate agents; to learn the syntax from `cornercase --help`; never to steal focus, run `kill-server` or close what they didn't open; not to answer another agent's permission prompt without asking you; to read a pane before sending again after a timeout; to keep their `--timeout` under their own command timeout; and to ask other agents to write long results to a file.
+
+## Environment
+
+| Variable | Use |
+| --- | --- |
+| `CORNERCASE` | `1` in every pane. The commands work there; only opening the window inside cornercase is refused. |
+| `CORNERCASE_PANE` | The id of the pane a shell runs in. The commands use it to know where they run. |
+| `CORNERCASE_SOCKET` | Which server to talk to, as for every `cornercase` command. Panes don't get it: a shell inherits the server's environment, so `cornercase` in a pane finds its own server anyway, and setting it would also move `config.json` and the session (see [Files and environment](../../reference/files-and-environment/#with-cornercase_socket)). |
+
+## Security
+
+As before, only your own user can reach the server's socket. But whoever reaches it can type into every shell, so a coding agent that can run `cornercase` can run anything in any pane, and run commands outside its own sandbox through another pane. Keep the socket out of reach of agents you sandbox: run them in a container or under another user without access to it, or don't give them a shell inside cornercase.

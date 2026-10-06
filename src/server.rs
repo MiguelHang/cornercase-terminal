@@ -269,9 +269,11 @@ impl Server {
     fn serve(&mut self, rx: &Receiver<ServerEvent>) {
         loop {
             self.app.refresh(Instant::now());
+            self.answer();
             self.draw();
             self.save();
-            let first = match rx.recv_timeout(self.app.tick().unwrap_or(TICK)) {
+            let tick = self.app.tick(Instant::now()).map_or(TICK, |tick| tick.min(TICK));
+            let first = match rx.recv_timeout(tick) {
                 Ok(ev) => Some(ev),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => return,
@@ -280,6 +282,14 @@ impl Server {
                 if self.handle(ev).is_break() {
                     return;
                 }
+            }
+        }
+    }
+
+    fn answer(&mut self) {
+        for (id, text) in self.app.take_answers() {
+            if let Some(client) = self.clients.iter().find(|c| c.id == id) {
+                client.send(ServerMessage::Response(text));
             }
         }
     }
@@ -323,6 +333,9 @@ impl Server {
             ServerEvent::Message(id, ClientMessage::Event(ev)) => self.input(id, ev),
             ServerEvent::Message(_, ClientMessage::Restart) => {
                 self.restart = Some(std::env::current_exe().unwrap_or_default());
+            }
+            ServerEvent::Message(id, ClientMessage::Request(text)) => {
+                self.app.request(id, &text, self.area, Instant::now());
             }
             ServerEvent::Incompatible(id) => self.reject(id, OTHER_BUILD),
             ServerEvent::Gone(id) => self.remove(id),
@@ -441,6 +454,7 @@ impl Server {
     }
 
     fn remove(&mut self, id: u64) {
+        self.app.forget(id);
         let before = self.clients.len();
         self.clients.retain(|c| c.id != id);
         if self.clients.len() != before {

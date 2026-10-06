@@ -18,6 +18,7 @@ cornercase is young. These are the gaps you may run into today.
 | **Agent status for Claude Code and Codex only** | Tabs show what Claude Code and Codex are doing and notify you when they need you or finish; other agents don't get an icon or a notification yet. Codex's `!` comes from its terminal title, so it is lost if you take the activity out of that title. Claude Code and Codex both show model/context lines. Agents have to run locally in the pane: through `ssh` or inside a container, cornercase can't see them. |
 | **Codex context needs an identifiable rollout** | Verified against Codex CLI 0.160.0. cornercase must be able to inspect the agent's environment and open files (`/proc` on Linux; process metadata and `/usr/sbin/lsof` on macOS). Missing or ambiguous sessions omit the line. When Codex's background app-server writes the sessions, cornercase matches them by folder, so two Codex in the same folder show no line. Missing usage/window data shows the model alone. |
 | **The context window is worked out** | Claude Code doesn't write the size of its context window anywhere, so cornercase works it out from the model and Claude's settings. After switching models with `/model`, or on an account without the 1M window, the percentage under a tab can be off; see [How full the context is](../../guides/projects-workspaces-tabs/#how-full-the-context-is). |
+| **Ids change with the server** | The ids that the [commands for scripts and agents](../../guides/scripts-and-agents/#ids-and-where-commands-act) take last as long as the server runs. After a restart the same tabs get new ids, so take them from `cornercase status` again. |
 | **Agent readiness is a guess** | cornercase decides when a shell or an agent is ready by watching its output settle. A very slow agent may get its prompt late, or not at all; see [The launch](../../guides/issues-and-agents/#the-launch). |
 
 ## On purpose
@@ -26,4 +27,4 @@ cornercase is young. These are the gaps you may run into today.
 | --- | --- |
 | **Linux and macOS only** | cornercase relies on Unix pseudo-terminals, Unix sockets and each system's process information. |
 | **No keyboard shortcuts** | Every key belongs to the program in the active pane. See the [FAQ](../faq/#why-is-everything-a-mouse-click). |
-| **No nesting** | Running `cornercase` inside one of its own panes is refused, because the inner one would fight the outer one for the mouse and the screen. |
+| **No nesting** | Running `cornercase` inside one of its own panes is refused, because the inner one would fight the outer one for the mouse and the screen. The [commands for scripts and agents](../../guides/scripts-and-agents/) work there. |
