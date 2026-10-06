@@ -82,7 +82,7 @@ impl Pane {
         if activity == Some(Activity::Working) {
             self.worked = Some(now);
         }
-        if activity != self.activity {
+        if activity.is_some() && self.activity.is_some() && activity != self.activity {
             self.moved = Some(now);
         }
         self.unseen = activity == Some(Activity::Idle) && !seen && (self.unseen || finished);
@@ -339,32 +339,28 @@ mod tests {
             assert_eq!(after(steps), expected);
         }
 
-        #[test]
-        fn it_reacted_once_it_worked_after_the_moment() {
+        fn reacted(first: Option<Activity>, between: Option<Activity>, last: Option<Activity>) -> bool {
             let mut pane = Pane::default();
             let t0 = Instant::now();
-            pane.update(Some(Activity::Idle), false, t0);
+            pane.update(first, false, t0);
             let sent = t0 + Duration::from_millis(500);
-            pane.update(Some(Activity::Idle), false, sent + Duration::from_millis(500));
-            let before = pane.reacted(sent);
-
-            pane.update(Some(Activity::Working), false, sent + Duration::from_secs(1));
-
-            assert_eq!((before, pane.reacted(sent)), (false, true));
+            pane.update(between, false, sent + Duration::from_millis(500));
+            pane.update(last, false, sent + Duration::from_secs(1));
+            pane.reacted(sent)
         }
 
-        #[test]
-        fn it_reacted_once_it_changed_after_the_moment() {
-            let mut pane = Pane::default();
-            let t0 = Instant::now();
-            pane.update(Some(Activity::Waiting), false, t0);
-            let sent = t0 + Duration::from_millis(500);
-            pane.update(Some(Activity::Waiting), false, sent + Duration::from_millis(500));
-            let before = pane.reacted(sent);
-
-            pane.update(Some(Activity::Idle), false, sent + Duration::from_secs(1));
-
-            assert_eq!((before, pane.reacted(sent)), (false, true));
+        #[rstest]
+        #[case::it_worked(Some(Activity::Idle), Some(Activity::Idle), Some(Activity::Working), true)]
+        #[case::its_question_was_answered(Some(Activity::Waiting), Some(Activity::Waiting), Some(Activity::Idle), true)]
+        #[case::it_stayed_idle(Some(Activity::Idle), Some(Activity::Idle), Some(Activity::Idle), false)]
+        #[case::it_only_lost_and_found_its_agent(Some(Activity::Idle), None, Some(Activity::Idle), false)]
+        fn reacting_is_working_or_changing_after_the_moment(
+            #[case] first: Option<Activity>,
+            #[case] between: Option<Activity>,
+            #[case] last: Option<Activity>,
+            #[case] expected: bool,
+        ) {
+            assert_eq!(reacted(first, between, last), expected);
         }
 
         #[test]

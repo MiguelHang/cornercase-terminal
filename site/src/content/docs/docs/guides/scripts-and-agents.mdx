@@ -132,12 +132,12 @@ cornercase wait --pane 7 --quiet 5                             # until it writes
 | `--until idle` | the agent is idle or done | `idle` or `done` |
 | `--until working` | the agent is working | `working` |
 | `--until waiting` | the agent waits for an answer to a question or a permission prompt | `waiting` |
-| `--until shell` | the program in the foreground ended and the shell is back | `shell` |
+| `--until shell` | the program in the foreground ended and the shell is back, quiet (a second when cornercase never saw the program run) | `shell` |
 | `--text REGEX` | a line on the screen matches, one already there included | the line |
 | `--quiet SECONDS` | the pane wrote nothing for that long | `quiet` |
 
-- The agent conditions need an agent in the pane, Claude Code or Codex, since cornercase only knows [what they are doing](../projects-workspaces-tabs/#what-your-agents-are-doing). On any other pane, wait for `shell`, a line or quiet instead.
-- After a prompt reached the agent (through `start`, `send --enter` or `keys … enter`), a wait for it to stop first waits for the agent to take the prompt, so it doesn't end at once on an agent that hasn't started yet.
+- The agent conditions need Claude Code or Codex in the pane, the agents whose state cornercase [knows](../projects-workspaces-tabs/#what-your-agents-are-doing). On any other pane, or with another agent, wait for `shell`, a line or quiet instead.
+- After a prompt reached the agent (through `start`, `send --enter` or `keys … enter`), a wait for it to stop first gives the agent up to 10 seconds to take the prompt, so it doesn't end at once on an agent that hasn't started yet. If the agent shows no change in that time, the wait fails: it may have finished at once, or never got the text, and `read` tells which. If the agent was already working when the text arrived, the wait ends when it next stops.
 - Waits run in the server and don't slow it down. They end with their condition, their `--timeout` (none by default) or when you interrupt the command. A timeout exits with status 1 and says what the pane was doing. It doesn't prove that the agent missed what you sent: read the pane before sending it again.
 
 ### Arrange
@@ -215,6 +215,7 @@ The instructions tell agents to use the commands only when you ask them to open 
 | --- | --- |
 | `CORNERCASE` | `1` in every pane. The commands work there; only opening the window inside cornercase is refused. |
 | `CORNERCASE_PANE` | The id of the pane a shell runs in. The commands use it to know where they run. |
+| `CORNERCASE_SERVER` | Which server started the shell. A server only takes `CORNERCASE_PANE` as the pane a command runs in when this is its own, since every server numbers its panes from 1. |
 | `CORNERCASE_SOCKET` | Which server to talk to, as for every `cornercase` command. Panes don't get it: a shell inherits the server's environment, so `cornercase` in a pane finds its own server anyway, and setting it would also move `config.json` and the session (see [Files and environment](../../reference/files-and-environment/#with-cornercase_socket)). |
 
 ## Security

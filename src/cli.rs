@@ -666,7 +666,9 @@ fn ask(name: &'static str, command: control::Command) -> Result<Value> {
     let mut stream = UnixStream::connect(&path).map_err(|_| Error::NoServer)?;
     protocol::check_peer(&stream, protocol::own_uid())?;
     let caller = std::env::var(control::PANE_ENV).ok().and_then(|id| id.parse().ok());
-    let request = serde_json::to_string(&Request { caller, command }).map_err(|e| Error::Control(e.to_string()))?;
+    let server = std::env::var(control::SERVER_ENV).ok();
+    let request =
+        serde_json::to_string(&Request { caller, server, command }).map_err(|e| Error::Control(e.to_string()))?;
     protocol::send(&mut stream, &ClientMessage::Request(request))?;
     loop {
         match protocol::recv::<ServerMessage>(&mut stream) {

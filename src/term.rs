@@ -25,8 +25,8 @@ const INTERPRETERS: [&str; 6] = ["node", "bun", "deno", "python", "python3", "ru
 const NODE_MAIN_THREAD: &str = "node-MainThread";
 const SCRIPT_EXTENSIONS: [&str; 9] = ["js", "mjs", "cjs", "ts", "mts", "cts", "py", "rb", "sh"];
 const NOT_A_SCRIPT: [&str; 6] = ["-e", "--eval", "-p", "--print", "-c", "-m"];
-pub const PASTE_START: &str = "\x1b[200~";
-pub const PASTE_END: &str = "\x1b[201~";
+const PASTE_START: &str = "\x1b[200~";
+const PASTE_END: &str = "\x1b[201~";
 
 type Writer = Sender<Vec<u8>>;
 
@@ -70,6 +70,7 @@ impl Term {
         cmd.env("TERM", "xterm-256color");
         cmd.env(protocol::NESTED_ENV, "1");
         cmd.env(control::PANE_ENV, id.to_string());
+        cmd.env(control::SERVER_ENV, control::server_token());
         for key in activity::CLAUDE_SESSION_ENV {
             cmd.env_remove(key);
         }
@@ -121,7 +122,7 @@ impl Term {
 
     pub fn paste(&mut self, text: &str) {
         if self.emulator.bracketed_paste() {
-            self.write(format!("{PASTE_START}{text}{PASTE_END}").as_bytes());
+            self.write(bracketed(text).as_bytes());
         } else {
             self.write(text.as_bytes());
         }
@@ -184,6 +185,10 @@ impl Drop for Term {
     fn drop(&mut self) {
         self.kill();
     }
+}
+
+pub fn bracketed(text: &str) -> String {
+    format!("{PASTE_START}{}{PASTE_END}", text.replace(PASTE_END, ""))
 }
 
 pub fn program(config: &Config, name: &str, argv: &[String]) -> String {
@@ -353,6 +358,11 @@ mod tests {
 
     mod writing {
         use super::*;
+
+        #[test]
+        fn a_paste_cannot_end_itself_early() {
+            assert_eq!(bracketed("ls\x1b[201~\rrm -rf x"), "\x1b[200~ls\rrm -rf x\x1b[201~");
+        }
 
         #[test]
         fn a_program_that_does_not_read_never_blocks_the_writer() {

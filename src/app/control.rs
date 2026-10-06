@@ -27,6 +27,8 @@ use crate::update;
 
 const STARTS_WITHIN: Duration = Duration::from_secs(10);
 const SHELL_SETTLES: Duration = Duration::from_millis(300);
+const SHELL_UNSEEN: Duration = Duration::from_secs(1);
+const TEXT_EVERY: Duration = Duration::from_millis(100);
 const SOONEST: Duration = Duration::from_millis(10);
 const NO_SIZE: &str = "this cornercase server has not opened a window yet, so a new terminal would have no size; \
     run `cornercase` once first";
@@ -83,6 +85,19 @@ struct Watch {
     until: Condition,
     since: Option<Instant>,
     checked: Option<Instant>,
+    left: Option<Instant>,
+}
+
+impl Watch {
+    fn settles(&self, term: &Term) -> Duration {
+        let ran = self.left.is_some_and(|left| term.input_at.is_none_or(|input| left > input));
+        if ran { SHELL_SETTLES } else { SHELL_UNSEEN }
+    }
+
+    fn next_look(&self, term: &Term) -> Option<Instant> {
+        let at = self.checked.filter(|checked| term.output_at >= *checked)?;
+        at.checked_add(TEXT_EVERY)
+    }
 }
 
 enum Condition {
@@ -163,7 +178,11 @@ fn duration(seconds: f64, what: &str) -> Result<Duration, String> {
 }
 
 fn deadline(timeout: Option<f64>, now: Instant) -> Result<Option<(Instant, f64)>, String> {
-    timeout.map(|seconds| duration(seconds, "--timeout").map(|d| (now + d, seconds))).transpose()
+    let at = |seconds| {
+        let at = now.checked_add(duration(seconds, "--timeout")?);
+        at.map(|at| (at, seconds)).ok_or_else(|| "--timeout is too long".to_string())
+    };
+    timeout.map(at).transpose()
 }
 
 fn name_of(name: Option<String>) -> Option<String> {
@@ -221,7 +240,7 @@ impl App {
     }
 
     fn handle_request(&mut self, client: u64, request: Request, area: Option<Rect>, now: Instant) -> Handled {
-        let caller = request.caller;
+        let caller = request.caller.filter(|_| request.server.as_deref() == Some(control::server_token()));
         match request.command {
             Command::Status(_) => Ok(Some(json(&self.report(caller)))),
             Command::Open(open) => self.open_request(&open, area),
@@ -334,16 +353,20 @@ impl App {
         let pane = watch.pane;
         let Some(term) = self.pane_by(pane) else { return Verdict::Failed(format!("pane {pane} closed")) };
         let quiet = now.saturating_duration_since(term.output_at);
+        if !term.shell_in_foreground() {
+            watch.left = Some(now);
+        }
+        let look = watch.checked.is_none() || watch.next_look(term).is_some_and(|due| now >= due);
         match &watch.until {
             Condition::Shell
                 if term.shell_in_foreground()
                     && term.input_at.is_none_or(|at| term.output_at > at)
-                    && quiet >= SHELL_SETTLES =>
+                    && quiet >= watch.settles(term) =>
             {
                 return Verdict::Ended("shell", None);
             }
             Condition::Quiet(enough) if quiet >= *enough => return Verdict::Ended("quiet", None),
-            Condition::Text(re) if watch.checked.is_none_or(|at| term.output_at >= at) => {
+            Condition::Text(re) if look => {
                 watch.checked = Some(now);
                 let screen = term.emulator.screen_text().unwrap_or_default();
                 if let Some(line) = screen.lines().find(|line| re.is_match(line)) {
@@ -355,7 +378,7 @@ impl App {
             Condition::Stops | Condition::Idle | Condition::Working | Condition::Waiting => {}
         }
         let Some(status) = term.agent.status() else {
-            if self.runs_agent(term) {
+            if self.watched_agent(term).is_ok() {
                 return Verdict::Pending;
             }
             return Verdict::Failed(format!("the agent in pane {pane} exited"));
@@ -381,12 +404,12 @@ impl App {
             let deadline = pending.timeout.filter(|_| pending.client.is_some()).map(|(at, _)| at);
             let (quiet, start_by) = match &pending.stage {
                 Stage::Watch(watch) => {
-                    let settles = match watch.until {
-                        Condition::Quiet(quiet) => Some(quiet),
-                        Condition::Shell => Some(SHELL_SETTLES),
+                    let quiet = self.pane_by(watch.pane).and_then(|term| match watch.until {
+                        Condition::Quiet(quiet) => term.output_at.checked_add(quiet),
+                        Condition::Shell => term.output_at.checked_add(watch.settles(term)),
+                        Condition::Text(_) => watch.next_look(term),
                         _ => None,
-                    };
-                    let quiet = settles.zip(self.pane_by(watch.pane)).map(|(quiet, term)| term.output_at + quiet);
+                    });
                     (quiet, watch.since.map(|since| since + STARTS_WITHIN))
                 }
                 _ => (None, None),
@@ -407,11 +430,21 @@ impl App {
     fn watch(&self, pane: u64, until: Condition, now: Instant) -> Watch {
         let submitted = self.pane_by(pane).and_then(|term| term.submitted);
         let recent = submitted.filter(|at| now.saturating_duration_since(*at) < STARTS_WITHIN);
-        Watch { pane, since: recent.filter(|_| until.ends_on_idle()), until, checked: None }
+        Watch { pane, since: recent.filter(|_| until.ends_on_idle()), until, checked: None, left: None }
     }
 
     fn runs_agent(&self, term: &Term) -> bool {
         term.agent.status().is_some() || agents::detect(&self.config, &term.foreground_args()).is_some()
+    }
+
+    fn watched_agent(&self, term: &Term) -> Result<(), Option<String>> {
+        if term.agent.status().is_some() {
+            return Ok(());
+        }
+        match agents::detect(&self.config, &term.foreground_args()) {
+            Some(agent) if agent == agents::CLAUDE || agent == agents::CODEX => Ok(()),
+            other => Err(other),
+        }
     }
 
     fn locate(&self, pane: u64) -> Option<(usize, usize, usize)> {
@@ -593,7 +626,7 @@ impl App {
         if !path.is_dir() {
             return Err(format!("`{}` is not a folder", path.display()));
         }
-        let p = match self.projects.iter().position(|p| p.path == path) {
+        let p = match self.projects.iter().position(|p| p.path == path && !p.closing) {
             Some(p) => p,
             None => self.add_project(path, sized(area)?).map_err(|e| e.to_string())?,
         };
@@ -682,13 +715,7 @@ impl App {
         let path = result.map_err(|e| e.to_string())?;
         let path = path.canonicalize().unwrap_or(path);
         let p = self.project_index(project).ok_or_else(|| format!("project {project} closed"))?;
-        let w = if let Some(w) = self.projects[p].workspaces.iter().position(|w| w.path == path) {
-            w
-        } else {
-            let id = self.take_id();
-            self.projects[p].workspaces.push(Workspace::new(id, path, None, true));
-            self.projects[p].workspaces.len() - 1
-        };
+        let w = self.worktree_workspace(p, path);
         let launch = match then.start {
             Some((spec, name)) => {
                 let t = self.push_tab(p, w, area, name).map_err(|e| e.to_string())?;
@@ -851,10 +878,15 @@ impl App {
 
     fn can_wait(&self, caller: Option<u64>, pane: u64, until: &Condition) -> Result<(), String> {
         let term = self.pane_by(pane).ok_or_else(|| none("pane", pane))?;
-        if until.needs_agent() && !self.runs_agent(term) {
+        if until.needs_agent()
+            && let Err(agent) = self.watched_agent(term)
+        {
+            let runs = agent.map_or_else(
+                || "runs no agent".to_string(),
+                |agent| format!("runs {agent}, and cornercase only knows what Claude Code and Codex are doing"),
+            );
             return Err(format!(
-                "pane {pane} runs no agent, so there is nothing to wait for; wait with --until shell, --text or \
-                 --quiet instead"
+                "pane {pane} {runs}, so there is nothing to wait for; wait with --until shell, --text or --quiet instead"
             ));
         }
         if caller == Some(pane) && (until.needs_agent() || matches!(until, Condition::Shell)) {

@@ -1893,23 +1893,13 @@ impl App {
     }
 
     fn close_workspace(&mut self, p: usize, w: usize) {
-        let project = &mut self.projects[p];
-        let workspace = &mut project.workspaces[w];
-        if workspace.worktree {
-            self.overlay = Some(Overlay::RemoveWorkspace {
-                project: project.id,
-                workspace: workspace.id,
-                error: None,
-                force: false,
-                removing: false,
-            });
+        let (project, workspace) = (self.projects[p].id, self.projects[p].workspaces[w].id);
+        if self.projects[p].workspaces[w].worktree {
+            self.overlay =
+                Some(Overlay::RemoveWorkspace { project, workspace, error: None, force: false, removing: false });
             return;
         }
-        workspace.closing = true;
-        workspace.kill();
-        if workspace.tabs.is_empty() {
-            project.remove_workspace(w);
-        }
+        self.drop_workspace(project, workspace);
     }
 
     fn add_tab(&mut self, p: usize, w: usize, area: Rect) -> Result<()> {
@@ -3188,14 +3178,17 @@ impl App {
             self.overlay = None;
         }
         let Some(p) = self.project_index(project) else { return Ok(()) };
-        let w = if let Some(w) = self.projects[p].workspaces.iter().position(|w| w.path == path) {
-            w
-        } else {
-            let id = self.take_id();
-            self.projects[p].workspaces.push(Workspace::new(id, path, None, true));
-            self.projects[p].workspaces.len() - 1
-        };
+        let w = self.worktree_workspace(p, path);
         self.open_workspace(p, w, start, area)
+    }
+
+    fn worktree_workspace(&mut self, p: usize, path: PathBuf) -> usize {
+        if let Some(w) = self.projects[p].workspaces.iter().position(|w| w.path == path) {
+            return w;
+        }
+        let id = self.take_id();
+        self.projects[p].workspaces.push(Workspace::new(id, path, None, true));
+        self.projects[p].workspaces.len() - 1
     }
 
     fn open_workspace(&mut self, p: usize, w: usize, start: Option<Start>, area: Rect) -> Result<()> {
@@ -9452,7 +9445,8 @@ rm -f "$s"
 "#;
 
         fn request(app: &mut App, caller: Option<u64>, command: Command, area: Option<Rect>) {
-            let text = serde_json::to_string(&wire::Request { caller, command }).expect("json");
+            let server = caller.map(|_| wire::server_token().to_string());
+            let text = serde_json::to_string(&wire::Request { caller, server, command }).expect("json");
             app.request(CLIENT, &text, area, Instant::now());
         }
 
@@ -9559,6 +9553,37 @@ rm -f "$s"
                     .collect();
                 assert_eq!(panes, [(caller, true), (other, false)]);
                 assert_eq!((report.caller, report.shown.pane), (Some(caller), Some(other)));
+            }
+
+            #[test]
+            fn a_pane_of_another_server_is_not_the_caller() {
+                let (mut app, _rx, _dirs) = app_with(1);
+                let caller = Some(term(&app, 0).id);
+                let status = Command::Status(wire::Status {});
+                let text =
+                    serde_json::to_string(&wire::Request { caller, server: Some("another".into()), command: status })
+                        .expect("json");
+
+                app.request(CLIENT, &text, Some(AREA), Instant::now());
+
+                let report: Report = serde_json::from_value(match answers(&mut app).remove(0) {
+                    Response::Ok(value) => value,
+                    Response::Error(message) => panic!("{message}"),
+                })
+                .expect("a report");
+                assert_eq!(report.caller, None);
+            }
+
+            #[test]
+            fn a_project_being_closed_is_opened_again() {
+                let (mut app, _rx, dirs) = app_with(1);
+                let old = app.projects[0].id;
+                app.close_project(old);
+                let open = Command::Open(wire::Open { path: dirs[0].path().to_path_buf(), focus: false });
+
+                let opened = done(now(&mut app, None, open));
+
+                assert!(opened.ids.project.is_some_and(|id| id != old), "{opened:?}");
             }
 
             #[test]
@@ -9712,6 +9737,19 @@ rm -f "$s"
             }
 
             #[test]
+            fn a_shell_busy_before_its_program_starts_is_not_back_yet() {
+                let (mut app, rx) = app();
+                ask(&mut app, None, new_tab(Some("x=$(sleep 0.6); sleep 1")));
+                let id = done(answered(&mut app, &rx, "the command is typed")).ids.pane.expect("the pane");
+                let typed = Instant::now();
+
+                ask(&mut app, None, wait_for(id, Until::Shell, None));
+                done(answered(&mut app, &rx, "the program ends"));
+
+                assert!(typed.elapsed() >= Duration::from_millis(1500), "it ended after {:?}", typed.elapsed());
+            }
+
+            #[test]
             fn wait_for_text_takes_a_line_already_on_the_screen() {
                 let (mut app, rx) = app();
                 let id = first(&app);
@@ -9740,6 +9778,18 @@ rm -f "$s"
             }
 
             #[test]
+            fn a_timeout_past_the_clock_is_refused_and_a_long_quiet_is_kept() {
+                let (mut app, _rx) = app();
+                let id = first(&app);
+
+                let message = error(now(&mut app, None, wait_for(id, Until::Quiet(1e19), Some(1e19))));
+                ask(&mut app, None, wait_for(id, Until::Quiet(1e19), None));
+                let tick = app.tick(Instant::now());
+
+                assert_eq!((message.as_str(), answers(&mut app), tick), ("--timeout is too long", Vec::new(), None));
+            }
+
+            #[test]
             fn waiting_for_an_agent_needs_one() {
                 let (mut app, _rx) = app();
                 let id = first(&app);
@@ -9747,6 +9797,23 @@ rm -f "$s"
                 let message = error(now(&mut app, None, wait_for(id, Until::Stops, None)));
 
                 assert!(message.contains(&format!("pane {id} runs no agent")), "{message}");
+            }
+
+            #[test]
+            fn waiting_for_an_agent_cornercase_cannot_follow_says_so() {
+                let (mut app, rx) = app();
+                let bin = TempDir::new();
+                let gemini = bin.path().join("gemini");
+                write_executable(&gemini, "#!/bin/sh\nsleep 30\n");
+                let id = first(&app);
+                type_line(&mut app, &gemini.display().to_string());
+                pump_until(&mut app, &rx, "gemini runs", |a| {
+                    crate::agents::detect(&a.config, &pane(a, id).foreground_args()).is_some()
+                });
+
+                let message = error(now(&mut app, None, wait_for(id, Until::Stops, None)));
+
+                assert!(message.contains(&format!("pane {id} runs gemini")), "{message}");
             }
 
             #[test]

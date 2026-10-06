@@ -306,8 +306,7 @@ impl Server {
     }
 
     fn draw(&mut self) {
-        let Some(area) = self.area else { return };
-        let Self { app, clients, .. } = self;
+        let Self { app, clients, area, .. } = self;
         for bytes in app.take_host_writes() {
             for client in clients.iter().filter(|c| c.screen.is_some()) {
                 client.send(ServerMessage::Frame(bytes.clone()));
@@ -318,6 +317,7 @@ impl Server {
                 client.send(ServerMessage::Frame(notification.encode(client.notify)));
             }
         }
+        let Some(area) = *area else { return };
         app.resize(area);
         for screen in clients.iter_mut().filter_map(|c| c.screen.as_mut()) {
             let _ = screen.draw(|f| app.draw(f));

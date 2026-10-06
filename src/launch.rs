@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::issues::one_line;
-use crate::term::{PASTE_END, PASTE_START};
+use crate::term::bracketed;
 
 const SHELL_QUIET: Duration = Duration::from_millis(300);
 const SHELL_LATEST: Duration = Duration::from_secs(5);
@@ -138,7 +138,7 @@ impl Launch {
                 }
                 let Some(prompt) = &self.spec.prompt else { return Step::Done(Vec::new()) };
                 let text = if self.spec.submit && seen.bracketed_paste { prompt.clone() } else { one_line(prompt) };
-                let bytes = if seen.bracketed_paste { format!("{PASTE_START}{text}{PASTE_END}") } else { text };
+                let bytes = if seen.bracketed_paste { bracketed(&text) } else { text };
                 if self.spec.submit {
                     self.next(Stage::Submit, now);
                     Step::Write(bytes.into_bytes())

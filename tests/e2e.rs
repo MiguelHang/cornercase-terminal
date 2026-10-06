@@ -118,6 +118,31 @@ impl Session {
     fn report(&self) -> Report {
         serde_json::from_str(&self.says(&["status", "--json"])).expect("a status report")
     }
+
+    fn spawn(&self, args: &[&str]) -> std::process::Child {
+        let mut cmd = self.command();
+        cmd.args(args).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        cmd.spawn().expect("run cornercase")
+    }
+
+    fn output(child: std::process::Child) -> String {
+        let out = child.wait_with_output().expect("wait for cornercase");
+        assert!(out.status.success(), "cornercase failed: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim_end().to_string()
+    }
+
+    fn wait_for_working(&self) {
+        let deadline = Instant::now() + TIMEOUT;
+        let working = |report: Report| {
+            let panes =
+                report.projects.into_iter().flat_map(|p| p.workspaces).flat_map(|w| w.tabs).flat_map(|t| t.panes);
+            panes.into_iter().any(|p| p.status.as_deref() == Some("working"))
+        };
+        while !working(self.report()) {
+            assert!(Instant::now() < deadline, "timed out waiting for: an agent at work");
+            thread::sleep(POLL);
+        }
+    }
 }
 
 impl Drop for Session {
@@ -1380,18 +1405,27 @@ fn an_agent_started_from_the_command_line_takes_its_prompts_and_is_waited_for() 
         "#!/bin/sh\nd=\"$CLAUDE_CONFIG_DIR/sessions\"; mkdir -p \"$d\"; s=\"$d/$$.json\"\n\
          printf '{\"pid\":%s,\"status\":\"idle\"}' $$ > \"$s\"\n\
          while printf 'agent> ' && IFS= read -r line; do\n\
-         printf '{\"pid\":%s,\"status\":\"busy\"}' $$ > \"$s\"; sleep 1; printf 'done: %s\\n' \"$line\"\n\
-         printf '{\"pid\":%s,\"status\":\"idle\"}' $$ > \"$s\"; done\n",
+         printf '{\"pid\":%s,\"status\":\"busy\"}' $$ > \"$s\"\n\
+         while [ ! -e \"$CLAUDE_CONFIG_DIR/finish\" ]; do sleep 0.02; done; rm -f \"$CLAUDE_CONFIG_DIR/finish\"\n\
+         printf 'done: %s\\n' \"$line\"; printf '{\"pid\":%s,\"status\":\"idle\"}' $$ > \"$s\"; done\n",
     );
     let config = format!("{{\"agent_commands\": {{\"claude\": \"{}\"}}}}", agent.display());
     std::fs::write(session.dir.join("config.json"), config).expect("write config");
     let mut app = Harness::open(Arc::clone(&session), ROWS, COLS);
     app.wait_for("app starts with one terminal", |s| s.contains(&first_entry()));
+    let finish = || {
+        session.wait_for_working();
+        std::fs::write(session.claude_dir().join("finish"), "").expect("let the agent finish");
+    };
 
-    let started = session.says(&["start", "claude", "--prompt", "fix the login", "--wait", "--timeout", "30"]);
+    let start = session.spawn(&["start", "claude", "--prompt", "fix the login", "--wait", "--timeout", "30"]);
+    finish();
+    let started = Session::output(start);
     let lines: Vec<&str> = started.lines().collect();
     let [pane, ended] = lines[..] else { panic!("not a pane and an ending: {started}") };
-    let next = session.says(&["send", "--pane", pane, "--enter", "--wait", "--timeout", "30", "add tests"]);
+    let send = session.spawn(&["send", "--pane", pane, "--enter", "--wait", "--timeout", "30", "add tests"]);
+    finish();
+    let next = Session::output(send);
 
     assert_eq!((ended, next.as_str()), ("done", "done"));
     let screen = session.says(&["read", "--pane", pane]);

@@ -1,16 +1,29 @@
 use std::path::PathBuf;
+use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const PANE_ENV: &str = "CORNERCASE_PANE";
+pub const SERVER_ENV: &str = "CORNERCASE_SERVER";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     #[serde(default)]
     pub caller: Option<u64>,
+    #[serde(default)]
+    pub server: Option<String>,
     #[serde(flatten)]
     pub command: Command,
+}
+
+pub fn server_token() -> &'static str {
+    static TOKEN: OnceLock<String> = OnceLock::new();
+    TOKEN.get_or_init(|| {
+        let started = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_nanos());
+        format!("{}-{started}", std::process::id())
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -330,11 +343,14 @@ mod tests {
 
     #[test]
     fn a_request_names_its_command_next_to_its_arguments() {
-        let request = Request { caller: Some(7), command: read(3) };
+        let request = Request { caller: Some(7), server: Some("1-2".into()), command: read(3) };
 
         let sent = serde_json::to_value(&request).expect("json");
 
-        assert_eq!(sent, json!({"caller": 7, "command": "read", "args": {"pane": 3, "tab": null, "lines": null}}));
+        assert_eq!(
+            sent,
+            json!({"caller": 7, "server": "1-2", "command": "read", "args": {"pane": 3, "tab": null, "lines": null}})
+        );
     }
 
     #[test]
@@ -343,7 +359,7 @@ mod tests {
 
         let request: Request = serde_json::from_str(text).expect("a request");
 
-        assert_eq!(request, Request { caller: Some(7), command: read(3) });
+        assert_eq!(request, Request { caller: Some(7), server: None, command: read(3) });
     }
 
     #[test]
@@ -376,7 +392,8 @@ mod tests {
         let names: Vec<String> = commands
             .iter()
             .map(|command| {
-                let sent = serde_json::to_value(Request { caller: None, command: command.clone() }).expect("json");
+                let request = Request { caller: None, server: None, command: command.clone() };
+                let sent = serde_json::to_value(request).expect("json");
                 command_name(&sent).expect("a name").to_string()
             })
             .collect();
