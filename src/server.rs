@@ -42,11 +42,11 @@ enum ServerEvent {
     Shutdown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
-    Background,
-    Input,
+    Refresh,
     Draw,
+    Save,
+    Event(ServerEvent),
 }
 
 struct FrameWriter {
@@ -160,6 +160,7 @@ struct Server {
     uses: u64,
     started: bool,
     build: String,
+    session: PathBuf,
     saver: Saver,
     todo_saver: Saver<todo::Saved>,
     restart: Option<PathBuf>,
@@ -179,11 +180,12 @@ pub fn run() -> Result<()> {
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let mut app = App::new(shell, HostTheme::default(), config::path(), app_tx);
-    app.set_issue_cache(state::path().with_file_name(ISSUE_CACHE_FILE));
-    let todos = todo::load(&todo::path(&state::path()));
-    let todo_saver = Saver::new(todo::path(&state::path()), Some(todos.saved()));
+    let session = state::path();
+    app.set_issue_cache(session.with_file_name(ISSUE_CACHE_FILE));
+    let todos = todo::load(&todo::path(&session));
+    let todo_saver = Saver::new(todo::path(&session), Some(todos.saved()));
     app.set_todos(todos);
-    let mut server = Server::new(app, todo_saver, tx);
+    let mut server = Server::new(app, session, todo_saver, tx);
     server.serve(&rx);
     let _ = std::fs::remove_file(&path);
     server.shutdown();
@@ -263,7 +265,7 @@ fn spawn_client_reader(id: u64, mut stream: UnixStream, tx: Sender<ServerEvent>)
 }
 
 impl Server {
-    fn new(app: App, todo_saver: Saver<todo::Saved>, tx: Sender<ServerEvent>) -> Self {
+    fn new(app: App, session: PathBuf, todo_saver: Saver<todo::Saved>, tx: Sender<ServerEvent>) -> Self {
         Self {
             app,
             clients: Vec::new(),
@@ -272,7 +274,8 @@ impl Server {
             uses: 0,
             started: false,
             build: protocol::build_id(),
-            saver: Saver::new(state::path(), None),
+            saver: Saver::new(session.clone(), None),
+            session,
             todo_saver,
             restart: None,
             tx,
@@ -280,48 +283,53 @@ impl Server {
     }
 
     fn serve(&mut self, rx: &Receiver<ServerEvent>) {
+        self.serve_with(rx, Self::step);
+    }
+
+    fn serve_with(&mut self, rx: &Receiver<ServerEvent>, run: impl Fn(&mut Self, Step) -> ControlFlow<()>) {
         loop {
-            self.contain(Step::Background, |s| s.app.refresh(Instant::now()));
-            self.contain(Step::Draw, Self::draw);
-            self.contain(Step::Background, Self::save);
+            for step in [Step::Refresh, Step::Draw, Step::Save] {
+                self.contain(step, &run);
+            }
             let first = match rx.recv_timeout(self.app.tick().unwrap_or(TICK)) {
                 Ok(ev) => Some(ev),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => return,
             };
             for ev in first.into_iter().chain(std::iter::from_fn(|| rx.try_recv().ok())) {
-                let step = if matches!(ev, ServerEvent::Message(_, ClientMessage::Event(_))) {
-                    Step::Input
-                } else {
-                    Step::Background
-                };
-                if self.contain(step, |s| s.handle(ev)) == Some(ControlFlow::Break(())) {
+                if self.contain(Step::Event(ev), &run) == Some(ControlFlow::Break(())) {
                     return;
                 }
             }
         }
     }
 
-    fn contain<T>(&mut self, step: Step, run: impl FnOnce(&mut Self) -> T) -> Option<T> {
-        let done = panics::contain(|| run(self));
-        if done.is_none() {
-            self.recover(step);
+    fn step(&mut self, step: Step) -> ControlFlow<()> {
+        match step {
+            Step::Refresh => self.app.refresh(Instant::now()),
+            Step::Draw => self.draw(),
+            Step::Save => self.save(),
+            Step::Event(ev) => return self.handle(ev),
         }
-        done
+        ControlFlow::Continue(())
     }
 
-    fn recover(&mut self, step: Step) {
-        if step != Step::Background {
-            self.app.reset_interaction();
-        }
-        if step == Step::Draw
-            && let Some(area) = self.area
-        {
-            for client in &mut self.clients {
-                client.reset_screen(area);
+    fn contain(&mut self, step: Step, run: impl Fn(&mut Self, Step) -> ControlFlow<()>) -> Option<ControlFlow<()>> {
+        let drawing = matches!(step, Step::Draw);
+        let interacting = drawing || matches!(step, Step::Event(ServerEvent::Message(_, ClientMessage::Event(_))));
+        let done = panics::contain(|| run(self, step));
+        if done.is_none() {
+            if interacting {
+                self.app.reset_interaction();
             }
+            if drawing && let Some(area) = self.area {
+                for client in &mut self.clients {
+                    client.reset_screen(area);
+                }
+            }
+            self.app.report_bug();
         }
-        self.app.report_bug();
+        done
     }
 
     fn save(&mut self) {
@@ -419,14 +427,14 @@ impl Server {
 
     fn open_first_terminals(&mut self) -> Result<()> {
         let area = self.area.unwrap_or_default();
-        let saved = state::load(&state::path());
+        let saved = state::load(&self.session);
         if let Some(saved) = &saved {
             self.app.restore(saved, area)?;
         }
         if self.app.is_empty() {
             self.app.open_here(area)?;
         }
-        self.saver = Saver::new(state::path(), saved);
+        self.saver = Saver::new(self.session.clone(), saved);
         Ok(())
     }
 
@@ -496,7 +504,7 @@ impl Server {
         }
         if self.restart.is_some()
             && self.started
-            && let Err(e) = state::save(&state::path(), &self.app.state())
+            && let Err(e) = state::save(&self.session, &self.app.state())
         {
             eprintln!("cornercase server: failed to save the session: {e}");
         }
@@ -545,34 +553,79 @@ mod tests {
     }
 
     mod a_bug {
+        use std::cell::Cell;
+
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent};
 
         use super::*;
+        use crate::state::{PaneState, ProjectState, State, TabState, WorkspaceState};
         use crate::test_util::wait_until;
 
         const COLS: u16 = 100;
         const ROWS: u16 = 20;
         const BUG: &str = "cornercase hit a bug, see server.log";
         const PANE_MENU: &str = "split right";
+        const NOBODY: u64 = u64::MAX;
+        const BUGGY: ServerEvent = ServerEvent::Gone(NOBODY);
+        const BUGGY_KEY: KeyCode = KeyCode::F(12);
+
+        fn buggy(step: &Step) -> bool {
+            match step {
+                Step::Event(ServerEvent::Gone(NOBODY)) => true,
+                Step::Event(ServerEvent::Message(_, ClientMessage::Event(Event::Key(key)))) => key.code == BUGGY_KEY,
+                _ => false,
+            }
+        }
+
+        fn buggy_events(server: &mut Server, step: Step) -> ControlFlow<()> {
+            assert!(!buggy(&step), "a bug while handling an event");
+            server.step(step)
+        }
+
+        fn one_shell_in(dir: &Path) -> State {
+            let tabs = vec![TabState {
+                name: None,
+                panes: vec![PaneState { cwd: Some(dir.to_path_buf()), right_clicks: false }],
+                active: 0,
+                layout: None,
+            }];
+            let workspace =
+                WorkspaceState { path: dir.to_path_buf(), name: None, worktree: false, tabs, active: 0, base: None };
+            let project = ProjectState {
+                path: dir.to_path_buf(),
+                name: None,
+                group: None,
+                workspaces: vec![workspace],
+                active: 0,
+            };
+            State { version: state::VERSION, projects: vec![project], ..State::default() }
+        }
 
         struct Attached {
             server: Server,
-            output: Receiver<AppEvent>,
+            rx: Receiver<ServerEvent>,
+            client: Client,
+            _dir: TempDir,
+        }
+
+        struct Client {
+            tx: Sender<ServerEvent>,
             frames: Receiver<ServerMessage>,
             screen: vt100::Parser,
-            _events: Receiver<ServerEvent>,
-            _dir: TempDir,
+            clears: usize,
         }
 
         impl Attached {
             fn new() -> Self {
                 let dir = TempDir::new();
-                let (app_tx, output) = mpsc::channel();
-                let mut app = App::new("/bin/sh".into(), HostTheme::default(), dir.path().join("config.json"), app_tx);
-                app.open_here(Rect::new(0, 0, COLS, ROWS)).expect("open the first project");
-                let (tx, events) = mpsc::channel();
-                let mut server = Server::new(app, Saver::new(dir.path().join("todos.json"), None), tx);
-                server.started = true;
+                let session = dir.path().join("session.json");
+                state::save(&session, &one_shell_in(dir.path())).expect("save a session");
+                let (tx, rx) = mpsc::channel();
+                let (app_tx, app_rx) = mpsc::channel();
+                spawn_forwarder(app_rx, tx.clone());
+                let app = App::new("/bin/sh".into(), HostTheme::default(), dir.path().join("config.json"), app_tx);
+                let todo_saver = Saver::new(dir.path().join("todos.json"), None);
+                let mut server = Server::new(app, session, todo_saver, tx.clone());
                 let (ours, mut theirs) = UnixStream::pair().expect("a socket pair");
                 let _ = server.handle(ServerEvent::Accepted(ours));
                 let (version, build, theme) = (protocol::VERSION, protocol::build_id(), HostTheme::default());
@@ -586,76 +639,108 @@ mod tests {
                         }
                     }
                 });
-                let screen = vt100::Parser::new(ROWS, COLS, 0);
-                Self { server, output, frames, screen, _events: events, _dir: dir }
+                let client = Client { tx, frames, screen: vt100::Parser::new(ROWS, COLS, 0), clears: 0 };
+                Self { server, rx, client, _dir: dir }
             }
 
-            fn input(&mut self, ev: Event) {
-                self.server.contain(Step::Input, |s| s.handle(ServerEvent::Message(1, ClientMessage::Event(ev))));
+            fn serve(
+                self,
+                run: impl Fn(&mut Server, Step) -> ControlFlow<()>,
+                script: impl FnOnce(&mut Client) + Send + 'static,
+            ) {
+                let Self { mut server, rx, mut client, _dir } = self;
+                let stop = client.tx.clone();
+                let script = thread::spawn(move || {
+                    let done = panics::contain(|| script(&mut client));
+                    let _ = stop.send(ServerEvent::Shutdown);
+                    done.expect("the script runs to its end");
+                });
+                server.serve_with(&rx, run);
+                script.join().expect("the script passes");
+            }
+        }
+
+        impl Client {
+            fn send(&self, ev: ServerEvent) {
+                self.tx.send(ev).expect("the server listens");
             }
 
-            fn type_line(&mut self, line: &str) {
-                for code in line.chars().map(KeyCode::Char).chain([KeyCode::Enter]) {
-                    self.input(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
-                }
+            fn input(&self, ev: Event) {
+                self.send(ServerEvent::Message(1, ClientMessage::Event(ev)));
             }
 
-            fn right_click_in_the_pane(&mut self) {
+            fn key(&self, code: KeyCode) {
+                self.input(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+            }
+
+            fn type_line(&self, line: &str) {
+                line.chars().map(KeyCode::Char).chain([KeyCode::Enter]).for_each(|code| self.key(code));
+            }
+
+            fn right_click_in_the_pane(&self) {
                 let kind = MouseEventKind::Down(MouseButton::Right);
                 self.input(Event::Mouse(MouseEvent { kind, column: COLS - 10, row: 3, modifiers: KeyModifiers::NONE }));
             }
 
-            fn screen_until(&mut self, what: &str, cond: impl Fn(&str) -> bool) {
+            fn text(&self) -> String {
+                self.screen.screen().contents()
+            }
+
+            fn until(&mut self, what: &str, cond: impl Fn(&Self) -> bool) {
                 wait_until(what, || {
-                    while let Ok(ev) = self.output.try_recv() {
-                        self.server.contain(Step::Background, |s| s.handle(ServerEvent::App(ev)));
-                    }
-                    self.server.contain(Step::Draw, Server::draw);
                     while let Ok(msg) = self.frames.try_recv() {
                         if let ServerMessage::Frame(bytes) = msg {
+                            self.clears += usize::from(bytes == CLEAR_SCREEN);
                             self.screen.process(&bytes);
                         }
                     }
-                    cond(&self.screen.screen().contents())
+                    cond(self)
                 });
             }
 
             fn shows(&mut self, text: &str) {
-                self.screen_until(text, |screen| screen.contains(text));
+                self.until(text, |client| client.text().contains(text));
             }
         }
 
         #[test]
-        fn a_panic_while_handling_an_event_drops_only_that_event() {
-            let mut attached = Attached::new();
-            attached.server.contain(Step::Input, |_| panic!("a bug"));
-            attached.shows(BUG);
-            attached.type_line("echo still-\"\"alive");
-            attached.shows("still-alive");
+        fn an_event_that_panics_is_dropped_and_the_next_ones_are_handled() {
+            Attached::new().serve(buggy_events, |client| {
+                client.send(BUGGY);
+                client.shows(BUG);
+                client.type_line("echo still-\"\"alive");
+                client.shows("still-alive");
+            });
         }
 
         #[test]
         fn a_panic_while_drawing_starts_every_screen_over() {
-            let mut attached = Attached::new();
-            attached.shows("quit");
-            attached.server.contain(Step::Draw, |_| panic!("a bug"));
-            wait_until(
-                "the screen is cleared",
-                || matches!(attached.frames.try_recv(), Ok(ServerMessage::Frame(bytes)) if bytes == CLEAR_SCREEN),
-            );
-            attached.shows(BUG);
+            let armed = Cell::new(false);
+            let run = move |server: &mut Server, step: Step| {
+                armed.set(armed.get() || buggy(&step));
+                assert!(!(matches!(step, Step::Draw) && armed.replace(false)), "a bug while drawing");
+                server.step(step)
+            };
+            Attached::new().serve(run, |client| {
+                client.shows("quit");
+                let before = client.clears;
+                client.send(BUGGY);
+                client.until("the screen is cleared", |client| client.clears > before);
+                client.shows(BUG);
+            });
         }
 
         #[test]
         fn only_a_panic_in_what_the_user_does_closes_what_is_open() {
-            let mut attached = Attached::new();
-            attached.right_click_in_the_pane();
-            attached.shows(PANE_MENU);
-            attached.server.contain(Step::Background, |_| panic!("a bug in a background step"));
-            attached.shows(BUG);
-            assert!(attached.screen.screen().contents().contains(PANE_MENU));
-            attached.server.contain(Step::Input, |_| panic!("a bug"));
-            attached.screen_until("the menu closes", |screen| !screen.contains(PANE_MENU));
+            Attached::new().serve(buggy_events, |client| {
+                client.right_click_in_the_pane();
+                client.shows(PANE_MENU);
+                client.send(BUGGY);
+                client.shows(BUG);
+                assert!(client.text().contains(PANE_MENU));
+                client.key(BUGGY_KEY);
+                client.until("the menu closes", |client| !client.text().contains(PANE_MENU));
+            });
         }
     }
 }
