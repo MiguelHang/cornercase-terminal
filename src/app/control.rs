@@ -333,7 +333,10 @@ impl App {
         if self.pane_by(pane).is_none() {
             format!("pane {pane} closed before it was ready")
         } else {
-            format!("the agent did not start in pane {pane}; `cornercase read --pane {pane}` shows what the shell said")
+            format!(
+                "pane {pane} did not take what was typed: the agent did not start, or its program is not reading; \
+                 `cornercase read --pane {pane}` shows where it is"
+            )
         }
     }
 

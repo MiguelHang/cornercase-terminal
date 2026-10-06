@@ -715,9 +715,13 @@ impl App {
             };
             match launch.step(now, &mut seen) {
                 Step::Wait => {}
-                Step::Write(bytes) => _ = term.write(&bytes),
-                Step::Done(bytes) => {
-                    term.write(&bytes);
+                Step::Write(bytes) => {
+                    if !(bytes.is_empty() || term.write(&bytes)) {
+                        finished.push((i, false));
+                    }
+                }
+                Step::Done(bytes) if !(bytes.is_empty() || term.write(&bytes)) => finished.push((i, false)),
+                Step::Done(_) => {
                     if launch.submits() {
                         term.submitted = Some(now);
                     }
@@ -3771,10 +3775,8 @@ impl App {
         ws.active = t;
         let tab = &mut ws.tabs[t];
         tab.focus(id);
-        if let Some(term) = tab.panes.iter_mut().find(|term| term.id == id) {
-            term.paste(text);
-        }
-        self.toast = Some(Toast::new(SENT_TO_AGENT, None));
+        let sent = tab.panes.iter_mut().find(|term| term.id == id).is_some_and(|term| term.paste(text));
+        self.toast = Some(Toast::new(if sent { SENT_TO_AGENT } else { NOT_READING }, None));
     }
 
     fn open_branches(&mut self, target: &Checkout) {
@@ -9750,6 +9752,21 @@ rm -f "$s"
                 done(answered(&mut app, &rx, "the program ends"));
 
                 assert!(typed.elapsed() >= Duration::from_millis(1500), "it ended after {:?}", typed.elapsed());
+            }
+
+            #[test]
+            fn an_enter_a_full_pane_refuses_is_not_reported_as_pressed() {
+                let (mut app, rx) = app();
+                let id = first(&app);
+                type_line(&mut app, "stty -echo; sleep 30");
+                pump_until(&mut app, &rx, "sleep runs", |a| pane(a, id).program(&a.config).as_deref() == Some("sleep"));
+                let full = vec![b'x'; crate::term::MAX_QUEUED + 1024 * 1024];
+                let filled = app.projects[0].workspaces[0].tabs[0].panes[0].write(&full);
+
+                ask(&mut app, None, send_text(id, "", true, false));
+
+                let message = error(answered(&mut app, &rx, "the enter is refused"));
+                assert!(filled && message.contains("did not take what was typed"), "{message}");
             }
 
             #[test]
