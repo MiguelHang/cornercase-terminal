@@ -1,5 +1,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::Instant;
@@ -28,7 +30,13 @@ const NOT_A_SCRIPT: [&str; 6] = ["-e", "--eval", "-p", "--print", "-c", "-m"];
 const PASTE_START: &str = "\x1b[200~";
 const PASTE_END: &str = "\x1b[201~";
 
-type Writer = Sender<Vec<u8>>;
+pub const MAX_QUEUED: usize = 16 * 1024 * 1024;
+
+#[derive(Clone)]
+struct Writer {
+    tx: Sender<Vec<u8>>,
+    queued: Arc<AtomicUsize>,
+}
 
 pub struct Term {
     pub id: u64,
@@ -90,8 +98,9 @@ impl Term {
         let reader = pair.master.try_clone_reader().map_err(|e| Error::AttachPty(e.into()))?;
         let writer = spawn_writer(pair.master.take_writer().map_err(|e| Error::AttachPty(e.into()))?);
         let replies = writer.clone();
-        let emulator = Emulator::new(rows, cols, SCROLLBACK, theme, Box::new(move |bytes| write_to(&replies, bytes)))
-            .map_err(|e| Error::Emulator(e.into()))?;
+        let emulator =
+            Emulator::new(rows, cols, SCROLLBACK, theme, Box::new(move |bytes| _ = write_to(&replies, bytes)))
+                .map_err(|e| Error::Emulator(e.into()))?;
         spawn_reader(id, reader, tx);
 
         Ok(Self {
@@ -115,16 +124,16 @@ impl Term {
         self.emulator.feed(bytes);
     }
 
-    pub fn write(&mut self, bytes: &[u8]) {
+    pub fn write(&mut self, bytes: &[u8]) -> bool {
         self.input_at = Some(Instant::now());
-        write_to(&self.writer, bytes);
+        write_to(&self.writer, bytes)
     }
 
-    pub fn paste(&mut self, text: &str) {
+    pub fn paste(&mut self, text: &str) -> bool {
         if self.emulator.bracketed_paste() {
-            self.write(bracketed(text).as_bytes());
+            self.write(bracketed(text).as_bytes())
         } else {
-            self.write(text.as_bytes());
+            self.write(text.as_bytes())
         }
     }
 
@@ -216,20 +225,27 @@ fn script(argv: &[String]) -> Option<String> {
     path.file_stem().and_then(|s| s.to_str()).filter(|s| !s.is_empty()).map(str::to_string)
 }
 
-fn write_to(writer: &Writer, bytes: &[u8]) {
-    let _ = writer.send(bytes.to_vec());
+fn write_to(writer: &Writer, bytes: &[u8]) -> bool {
+    if writer.queued.load(Ordering::Relaxed) >= MAX_QUEUED {
+        return false;
+    }
+    writer.queued.fetch_add(bytes.len(), Ordering::Relaxed);
+    writer.tx.send(bytes.to_vec()).is_ok()
 }
 
 fn spawn_writer(mut pty: Box<dyn Write + Send>) -> Writer {
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let queued = Arc::new(AtomicUsize::new(0));
+    let written = Arc::clone(&queued);
     thread::spawn(move || {
         for bytes in rx {
             if pty.write_all(&bytes).and_then(|()| pty.flush()).is_err() {
                 return;
             }
+            written.fetch_sub(bytes.len(), Ordering::Relaxed);
         }
     });
-    tx
+    Writer { tx, queued }
 }
 
 fn spawn_reader(id: u64, mut reader: Box<dyn Read + Send>, tx: Sender<AppEvent>) {
@@ -358,6 +374,17 @@ mod tests {
 
     mod writing {
         use super::*;
+
+        #[test]
+        fn a_program_that_stops_reading_gets_no_more_than_its_queue() {
+            let (mut term, _rx) = spawn_sh();
+            term.write(b"stty -echo; sleep 30\r");
+            wait_until("sleep runs", || term.program(&Config::default()).as_deref() == Some("sleep"));
+
+            let queued = term.write(&vec![b'x'; MAX_QUEUED + 1024 * 1024]);
+
+            assert_eq!((queued, term.write(b"y")), (true, false));
+        }
 
         #[test]
         fn a_paste_cannot_end_itself_early() {

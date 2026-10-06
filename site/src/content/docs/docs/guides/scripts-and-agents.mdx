@@ -195,6 +195,7 @@ Some messages you may meet:
 | `the running cornercase server (…) has no … command` | The command is newer than the server. Restart the server so it runs the version you installed. |
 | `this cornercase server has not opened a window yet …` | A server started without a window has no size to give a new terminal, and hasn't restored your session yet. Run `cornercase` once. |
 | `the agent in pane … is waiting for an answer …` | `send` refused to type into an agent's question or permission prompt. |
+| `the program in pane … is not reading its input …` | Over 16 MiB sent to the pane are still waiting for its program to read them, so `send` and `keys` stop adding more. |
 | `timed out after …` | The `--timeout` passed; the rest of the message says what the pane was doing. |
 
 ## Teach your agents

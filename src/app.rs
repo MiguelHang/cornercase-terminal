@@ -206,6 +206,7 @@ const COMPARE_SUBMIT: &str = "compare";
 const CHANGES_LABEL: &str = "changes";
 const SENT_TO_AGENT: &str = "sent to the agent";
 const NO_AGENT: &str = "no agent here, so the reference is copied";
+const NOT_READING: &str = "the program in this pane is not reading what it gets";
 const EDIT_SCRIPT: &str = "exec ${VISUAL:-${EDITOR:-vi}} \"+$1\" \"$2\"";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -714,7 +715,7 @@ impl App {
             };
             match launch.step(now, &mut seen) {
                 Step::Wait => {}
-                Step::Write(bytes) => term.write(&bytes),
+                Step::Write(bytes) => _ = term.write(&bytes),
                 Step::Done(bytes) => {
                     term.write(&bytes);
                     if launch.submits() {
@@ -1189,8 +1190,8 @@ impl App {
     fn forward_key(&mut self, key: KeyEvent) {
         let Some(term) = self.term_mut() else { return };
         let bytes = term.emulator.encode_key(key);
-        if !bytes.is_empty() {
-            term.write(&bytes);
+        if !bytes.is_empty() && !term.write(&bytes) {
+            self.toast = Some(Toast::new(NOT_READING, None));
         }
     }
 
@@ -3289,8 +3290,10 @@ impl App {
             self.changes.scroll = 0;
             return;
         }
-        if let Some(term) = self.term_mut() {
-            term.paste(text);
+        if let Some(term) = self.term_mut()
+            && !term.paste(text)
+        {
+            self.toast = Some(Toast::new(NOT_READING, None));
         }
     }
 

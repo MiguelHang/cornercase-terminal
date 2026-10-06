@@ -22,7 +22,7 @@ use crate::notify::{self, Notification};
 use crate::project::{Project, Tab, Workspace};
 use crate::search::Goto;
 use crate::split::{self, Dir};
-use crate::term::Term;
+use crate::term::{self, Term};
 use crate::update;
 
 const STARTS_WITHIN: Duration = Duration::from_secs(10);
@@ -189,6 +189,13 @@ fn name_of(name: Option<String>) -> Option<String> {
     let name: String = name?.chars().filter(|c| !c.is_control()).collect();
     let name = name.trim();
     (!name.is_empty()).then(|| name.to_string())
+}
+
+fn not_reading(pane: u64) -> String {
+    format!(
+        "the program in pane {pane} is not reading its input: {} MiB are waiting for it, so nothing more was sent",
+        term::MAX_QUEUED / (1024 * 1024)
+    )
 }
 
 fn pane_ids(pane: u64) -> Done {
@@ -866,8 +873,9 @@ impl App {
         }
         if let Some(text) = &text
             && let Some(term) = self.pane_by_mut(pane)
+            && !term.paste(text)
         {
-            term.paste(text);
+            return Err(not_reading(pane));
         }
         if !send.enter {
             return Ok(Some(json(&pane_ids(pane))));
@@ -912,7 +920,9 @@ impl App {
             term.submitted = Some(now);
         }
         let bytes: Vec<u8> = events.into_iter().flat_map(|key| term.emulator.encode_key(key)).collect();
-        term.write(&bytes);
+        if !term.write(&bytes) {
+            return Err(not_reading(pane));
+        }
         Ok(Some(json(&pane_ids(pane))))
     }
 
