@@ -119,7 +119,7 @@ pub fn with_changelog(mut release: Release, current: &str) -> Release {
     let changelog = release.asset(CHANGELOG).and_then(|url| http::download(&SERVICE, url));
     if let Ok(changelog) = changelog {
         let notes = changelog_notes(&String::from_utf8_lossy(&changelog), current, &release.version);
-        if !notes.is_empty() {
+        if notes.first().is_some_and(|(version, _)| *version == release.version) {
             release.notes = notes;
         }
     }
@@ -383,6 +383,19 @@ mod tests {
                 with_changelog(with_body(&serde_json::json!([])), "0.1.0").notes,
                 notes(&[("9.0.0", "- From the body.")])
             );
+        }
+
+        #[test]
+        fn a_changelog_without_the_release_keeps_its_own_notes() {
+            let server = FakeHttp::start(vec![("GET /CHANGELOG.md", 200, "## 8.0.0\n\n- Middle.\n")]);
+            let url = format!("{}/CHANGELOG.md", server.url());
+
+            let release = with_changelog(
+                with_body(&serde_json::json!([{"name": "CHANGELOG.md", "browser_download_url": url}])),
+                "0.1.0",
+            );
+
+            assert_eq!(release.notes, notes(&[("9.0.0", "- From the body.")]));
         }
 
         #[test]

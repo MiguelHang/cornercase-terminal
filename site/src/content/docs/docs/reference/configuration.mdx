@@ -219,7 +219,7 @@ How cornercase asks your terminal for a desktop notification when an agent in an
 
 #### `check_updates`
 
-Whether cornercase asks GitHub for the latest release, when the server starts and then every hour, to offer an [update](../../installation/#update). Only a request for the latest release is sent, nothing about you. Builds made with `cargo run` never check.
+Whether cornercase asks GitHub for the latest release, when the server starts and then every hour, to offer an [update](../../installation/#update). Only a request for the latest release is sent, and, once a newer one is out, a download of its changelog for the update dialog; nothing about you. Builds made with `cargo run` never check.
 
 [Agents](../agents/) explains `agent`, `agent_args`, `agent_modes`, `agent_commands` and the trust prompt in depth.
 

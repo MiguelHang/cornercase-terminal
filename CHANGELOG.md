@@ -4,7 +4,7 @@ Every pull request that changes the app adds a section here for its new version.
 
 ## 0.6.2
 
-- cornercase now looks for a new version every hour instead of once a day, so a release reaches you the same morning. It is still one small request to GitHub, and **settings → TUI → check for updates** still turns it off.
+- cornercase now looks for a new version every hour instead of once a day, so a release reaches you the same morning. It is still one small request to GitHub (plus the changelog once a new version is out), and **settings → TUI → check for updates** still turns it off.
 - The update dialog now shows what changed in every version since yours, newest first, so if a second release comes out before you update, you also see what the first one brought.
 
 ## 0.6.1
