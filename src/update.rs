@@ -17,16 +17,17 @@ pub const LATEST_ENV: &str = "CORNERCASE_RELEASES_URL";
 pub const DEFAULT_LATEST: &str = "https://api.github.com/repos/usecornercase/cornercase-terminal/releases/latest";
 pub const INSTALLER: &str = "curl -fsSL https://usecornercase.dev/install.sh | sh";
 pub const BREW: &str = "brew upgrade cornercase";
-pub const CHECK_EVERY: Duration = Duration::from_hours(24);
+pub const CHECK_EVERY: Duration = Duration::from_hours(1);
 const SERVICE: Service = Service { name: "GitHub", rejected: "GitHub refused the update check" };
 const BINARY: &str = "cornercase";
 const BREW_DIRS: [&str; 3] = ["/Cellar/", "/homebrew/", "/linuxbrew/"];
 const NOTES_HEADING: &str = "## Release Notes";
+const CHANGELOG: &str = "CHANGELOG.md";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {
     pub version: String,
-    pub notes: String,
+    pub notes: Vec<(String, String)>,
     assets: Vec<(String, String)>,
 }
 
@@ -103,14 +104,40 @@ pub fn release(json: &Value) -> Option<Release> {
             Some((a.get("name")?.as_str()?.to_string(), a.get("browser_download_url")?.as_str()?.to_string()))
         })
         .collect();
-    let body = json.get("body").and_then(Value::as_str).unwrap_or_default();
-    Some(Release { version, notes: notes(body), assets })
+    let body = notes(json.get("body").and_then(Value::as_str).unwrap_or_default());
+    let notes = if body.is_empty() { Vec::new() } else { vec![(version.clone(), body)] };
+    Some(Release { version, notes, assets })
 }
 
 fn notes(body: &str) -> String {
     let Some((_, after)) = body.split_once(NOTES_HEADING) else { return String::new() };
     let end = after.find("\n## ").unwrap_or(after.len());
     after[..end].trim().to_string()
+}
+
+pub fn with_changelog(mut release: Release, current: &str) -> Release {
+    let changelog = release.asset(CHANGELOG).and_then(|url| http::download(&SERVICE, url));
+    if let Ok(changelog) = changelog {
+        let notes = changelog_notes(&String::from_utf8_lossy(&changelog), current, &release.version);
+        if !notes.is_empty() {
+            release.notes = notes;
+        }
+    }
+    release
+}
+
+fn changelog_notes(changelog: &str, current: &str, latest: &str) -> Vec<(String, String)> {
+    format!("\n{changelog}")
+        .split("\n## ")
+        .skip(1)
+        .filter_map(|section| {
+            let (heading, body) = section.split_once('\n').unwrap_or((section, ""));
+            let version = heading.trim();
+            let body = body.trim();
+            (newer(version, current) && !newer(version, latest) && !body.is_empty())
+                .then(|| (version.to_string(), body.to_string()))
+        })
+        .collect()
 }
 
 pub fn check(url: &str, current: &str) -> Result<Option<Release>> {
@@ -281,7 +308,8 @@ mod tests {
         #[case::notes_at_the_end("## Release Notes\n\n- Faster.\n", "- Faster.")]
         fn keeps_the_release_notes_of_the_body(#[case] body: &str, #[case] expected: &str) {
             let json = serde_json::json!({"tag_name": "v9.0.0", "assets": [], "body": body});
-            assert_eq!(release(&json).map(|r| r.notes).as_deref(), Some(expected));
+            let notes = release(&json).expect("a release").notes;
+            assert_eq!(notes.first().map_or("", |(_, notes)| notes.as_str()), expected);
         }
 
         #[test]
@@ -306,6 +334,68 @@ mod tests {
             let err = check(&latest(&server), "0.1.0").err().map(|e| e.to_string());
 
             assert_eq!(err.as_deref(), Some("GitHub answered 404 to the update check"));
+        }
+    }
+
+    mod changelog {
+        use super::*;
+
+        const CHANGELOG: &str = "# Changelog\n\nIntro.\n\n## 9.1.0\n\n- Later.\n\n## 9.0.0\n\n- Newest.\n\n\
+                                 ## 8.0.0\n\n- Middle.\n\n### Fixes\n\n- A crash.\n\n## 7.0.0\n\n\
+                                 ## 0.1.0\n\n- Current.\n\n## 0.0.9\n\n- Older.\n";
+
+        fn notes(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+            pairs.iter().map(|(version, notes)| ((*version).to_string(), (*notes).to_string())).collect()
+        }
+
+        fn with_body(assets: &Value) -> Release {
+            let body = "## Release Notes\n\n- From the body.\n";
+            release(&serde_json::json!({"tag_name": "v9.0.0", "assets": assets, "body": body})).expect("a release")
+        }
+
+        #[test]
+        fn keeps_every_version_after_the_current_one_up_to_the_latest() {
+            assert_eq!(
+                changelog_notes(CHANGELOG, "0.1.0", "9.0.0"),
+                notes(&[("9.0.0", "- Newest."), ("8.0.0", "- Middle.\n\n### Fixes\n\n- A crash.")])
+            );
+        }
+
+        #[test]
+        fn the_release_notes_come_from_its_changelog() {
+            let server = FakeHttp::start(vec![("GET /CHANGELOG.md", 200, CHANGELOG)]);
+            let url = format!("{}/CHANGELOG.md", server.url());
+
+            let release = with_changelog(
+                with_body(&serde_json::json!([{"name": "CHANGELOG.md", "browser_download_url": url}])),
+                "0.1.0",
+            );
+
+            assert_eq!(
+                release.notes,
+                notes(&[("9.0.0", "- Newest."), ("8.0.0", "- Middle.\n\n### Fixes\n\n- A crash.")])
+            );
+        }
+
+        #[test]
+        fn a_release_without_a_changelog_keeps_its_own_notes() {
+            assert_eq!(
+                with_changelog(with_body(&serde_json::json!([])), "0.1.0").notes,
+                notes(&[("9.0.0", "- From the body.")])
+            );
+        }
+
+        #[test]
+        fn a_changelog_that_cannot_be_downloaded_keeps_the_release_notes() {
+            let server = FakeHttp::start(vec![("GET /CHANGELOG.md", 404, "")]);
+            let url = format!("{}/CHANGELOG.md", server.url());
+
+            let release = with_changelog(
+                with_body(&serde_json::json!([{"name": "CHANGELOG.md", "browser_download_url": url}])),
+                "0.1.0",
+            );
+
+            assert_eq!(release.notes, notes(&[("9.0.0", "- From the body.")]));
         }
     }
 

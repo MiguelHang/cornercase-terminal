@@ -1315,7 +1315,7 @@ export class App {
       { id: 'dim', section: '', label: 'inactive panes', value: c.dim ? '[x] dimmed' : '[ ] as bright as the active one', note: 'in a split tab' },
       { id: 'contextLine', section: '', label: 'context line', value: c.contextLine ? '[x] model and context' : '[ ] hidden, tabs take one row', note: 'under a Claude Code or Codex tab' },
       { id: 'notify', section: '', label: 'desktop notifications', value: c.notify, note: 'when an agent in another tab needs you or finishes' },
-      { id: 'updates', section: '', label: 'check for updates', value: c.updates ? '[x] once a day' : '[ ] never', note: 'asks GitHub for the latest release' },
+      { id: 'updates', section: '', label: 'check for updates', value: c.updates ? '[x] every hour' : '[ ] never', note: 'asks GitHub for the latest release' },
     ];
   }
 
