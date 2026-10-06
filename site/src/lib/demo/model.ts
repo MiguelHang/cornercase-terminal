@@ -135,6 +135,8 @@ export type Overlay =
   | { kind: 'remove'; project: number; workspace: number; removing?: boolean }
   | { kind: 'deleteGroup'; group: number }
   | { kind: 'closeProject'; project: number }
+  | { kind: 'closeWorkspace'; project: number; workspace: number }
+  | { kind: 'closeTab'; project: number; workspace: number; tab: number }
   | { kind: 'picker'; dir: string[]; filter: string; selected: number | null; scroll: number }
   | { kind: 'search'; query: string; selected: number; scroll: number }
   | { kind: 'usage' }

@@ -390,9 +390,10 @@ export class Painter {
   }
 
   private closeX(row: Rect, pitch: number, bg: Style, act: () => void): void {
-    if (!this.sidebarHovered(row)) return;
+    const hover = this.sidebarHovered(row);
+    if (!hover && pitch === 1) return;
     const r = closeButton(row, pitch);
-    const style = this.hovered(r) ? { ...bg, fg: 1, add: BOLD } : { ...bg, fg: 8 };
+    const style = hover && this.hovered(r) ? { ...bg, fg: 1, add: BOLD } : { ...bg, fg: 8 };
     this.band(r, [seg(centered('×', r.w))], style);
     this.region({ r, click: act, cursor: 'pointer' });
   }
@@ -531,7 +532,7 @@ export class Painter {
         this.band(r, segs, bg);
         const grab: Target = { kind: 'workspace', project: p.id, workspace: w.id };
         this.region({ r, click: () => app.selectWorkspace(spec.w), right: (x, y) => app.openMenu({ x, y }, grab), grab, cursor: 'pointer' });
-        this.closeX(r, areas.pitch, bg, () => app.closeWorkspace(spec.w));
+        this.closeX(r, areas.pitch, bg, () => (areas.compact ? app.askCloseWorkspace(spec.w) : app.closeWorkspace(spec.w)));
       } else if (spec.kind === 'tab') {
         const w = p.workspaces[spec.w];
         const t = w.tabs[spec.t];
@@ -547,7 +548,7 @@ export class Painter {
         if (tabLines(details) > 1) this.details(r, areas.pitch, details, 4 + (status ? 2 : 0));
         const grab: Target = { kind: 'tab', project: p.id, workspace: w.id, tab: t.id };
         this.region({ r, click: () => app.selectTab(spec.w, spec.t), right: (x, y) => app.openMenu({ x, y }, grab), grab, cursor: 'pointer' });
-        this.closeX(r, areas.pitch, bg, () => app.closeTab(spec.w, spec.t));
+        this.closeX(r, areas.pitch, bg, () => (areas.compact ? app.askCloseTab(spec.w, spec.t) : app.closeTab(spec.w, spec.t)));
       } else {
         this.button(r, '   ', '+ tab', this.buttonStyle(r, DARK, 6));
         this.region({ r, click: () => app.addTab(spec.w), cursor: 'pointer' });
