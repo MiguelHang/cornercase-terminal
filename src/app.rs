@@ -20,7 +20,7 @@ use crate::host_theme::HostTheme;
 use crate::issues::browser::{self, Action, Browser, Connection, Place, Screen, Tab as IssueTab};
 use crate::issues::cache::{Cache as IssueCache, Key as CacheKey};
 use crate::issues::{
-    self, Account, Client, Detail, Issue, Listed, People, Person, Query, Secret, Source, linear, shortcut,
+    self, Account, Client, Detail, Issue, Listed, People, Person, Query, Secret, Source, jira, linear, shortcut,
 };
 use crate::launch::{self, Launch, Step};
 use crate::markdown;
@@ -402,6 +402,7 @@ pub struct App {
 struct Apis {
     shortcut: String,
     linear: String,
+    jira: Option<String>,
 }
 
 impl Apis {
@@ -410,6 +411,7 @@ impl Apis {
         Self {
             shortcut: var(shortcut::API_ENV, shortcut::DEFAULT_API),
             linear: var(linear::API_ENV, linear::DEFAULT_API),
+            jira: std::env::var(jira::API_ENV).ok(),
         }
     }
 }
@@ -1797,6 +1799,25 @@ impl App {
         source.secret_key().and_then(|key| secrets::read(&self.secrets_path, key)).map(|token| (token, false))
     }
 
+    fn jira(&self, token: String) -> Option<jira::Api> {
+        let config = &self.config;
+        if config.jira_site.is_empty() || config.jira_email.is_empty() {
+            return None;
+        }
+        Some(jira::Api {
+            base: self.apis.jira.clone().unwrap_or_else(|| format!("https://{}", config.jira_site)),
+            site: config.jira_site.clone(),
+            email: config.jira_email.clone(),
+            token,
+            jql: config.jira_jql.clone(),
+        })
+    }
+
+    fn connected(&self, source: Source) -> Option<bool> {
+        let (token, from_env) = self.token(source)?;
+        (source != Source::Jira || self.jira(token).is_some()).then_some(from_env)
+    }
+
     fn client(&self, source: Source, project: u64) -> Option<Client> {
         match source {
             Source::Github => {
@@ -1807,6 +1828,7 @@ impl App {
                 Some(Client::Shortcut { base: self.apis.shortcut.clone(), token: self.token(source)?.0 })
             }
             Source::Linear => Some(Client::Linear { url: self.apis.linear.clone(), token: self.token(source)?.0 }),
+            Source::Jira => self.jira(self.token(source)?.0).map(Client::Jira),
         }
     }
 
@@ -1839,7 +1861,7 @@ impl App {
         let connections = Source::REMOTE
             .into_iter()
             .filter_map(|source| {
-                let (_, from_env) = self.token(source)?;
+                let from_env = self.connected(source)?;
                 Some((source, Connection { from_env, account: self.accounts.get(&source).cloned() }))
             })
             .collect();
@@ -1856,6 +1878,8 @@ impl App {
             lists: HashMap::new(),
             connections,
             forms: HashMap::new(),
+            jira_site: self.config.jira_site.clone(),
+            jira_email: self.config.jira_email.clone(),
             screen: Screen::List,
             starting: false,
             error: None,
@@ -1938,6 +1962,7 @@ impl App {
                 }
             }
             Action::CheckToken(source, token) => self.check_token(source, token),
+            Action::SaveJira { site, email } => return self.save_jira(site, email, area),
             Action::Disconnect(source) => self.disconnect(source),
             Action::Copy(url) => {
                 self.host_writes.push(clipboard::osc52(&url));
@@ -2067,11 +2092,45 @@ impl App {
         });
     }
 
+    fn save_jira(&mut self, site: String, email: String, area: Rect) -> Result<()> {
+        let config = Config { jira_site: site, jira_email: email, ..self.config.clone() };
+        let saved = config::save(&self.config_path, &config);
+        let Some(Overlay::Issues(b)) = &mut self.overlay else { return Ok(()) };
+        if let Err(e) = saved {
+            b.token_rejected(Source::Jira, format!("failed to save the settings: {e}"));
+            return Ok(());
+        }
+        self.set_config(config);
+        let Some(from_env) = self.connected(Source::Jira) else { return Ok(()) };
+        let Some(Overlay::Issues(b)) = &mut self.overlay else { return Ok(()) };
+        b.connected(Source::Jira, Connection { from_env, account: None });
+        let action = b.needs_load();
+        self.act(action, area)
+    }
+
+    fn set_config(&mut self, config: Config) {
+        let jira = |c: &Config| (c.jira_site.clone(), c.jira_email.clone(), c.jira_jql.clone());
+        if jira(&config) != jira(&self.config) {
+            self.accounts.remove(&Source::Jira);
+            self.issue_cache.forget(Source::Jira);
+            self.people_cache.retain(|(source, _), _| *source != Source::Jira);
+        }
+        self.config = config;
+    }
+
     fn check_token(&mut self, source: Source, token: Secret) {
         let client = match source {
             Source::Github => return,
             Source::Shortcut => Client::Shortcut { base: self.apis.shortcut.clone(), token: token.0.clone() },
             Source::Linear => Client::Linear { url: self.apis.linear.clone(), token: token.0.clone() },
+            Source::Jira => {
+                let Some(api) = self.jira(token.0.clone()) else {
+                    let error = Err(crate::error::Error::Api("set the Jira site and email first".into()));
+                    let _ = self.tx.send(AppEvent::TokenChecked { source, token, result: error });
+                    return;
+                };
+                Client::Jira(api)
+            }
         };
         let tx = self.tx.clone();
         std::thread::spawn(move || {
@@ -2890,7 +2949,7 @@ impl App {
                     }
                     return;
                 }
-                self.config = *config;
+                self.set_config(*config);
             }
             settings::Action::CheckToken(source, token) => self.check_token(source, token),
             settings::Action::RemoveToken(source) => {
@@ -7988,6 +8047,90 @@ rm -f "$1/sessions/$$.json"
 
                 assert_eq!(secrets::read(&secrets_file(&s), "shortcut_token"), None);
                 assert!(!browser(&s.app).connections.contains_key(&Source::Shortcut));
+            }
+        }
+
+        mod jira {
+            use super::*;
+
+            const MYSELF: &str = r#"{"accountId":"a1","displayName":"Ana"}"#;
+            const SEARCH: &str = r#"{"issues":[{"key":"SHOP-482","fields":{"summary":"Returns page crashes",
+                "updated":"2026-09-30T00:00:00.000+0000"}}],"isLast":true}"#;
+
+            fn jira(s: &mut Setup) -> FakeHttp {
+                let server = FakeHttp::start(vec![
+                    ("GET /rest/api/3/myself", 200, MYSELF),
+                    ("GET /rest/api/3/search/jql", 200, SEARCH),
+                ]);
+                s.app.apis.jira = Some(server.url());
+                server
+            }
+
+            fn type_site_and_email(s: &mut Setup) {
+                open_list(s);
+                to_tab(s, IssueTab::One(Source::Jira));
+                type_text(&mut s.app, "acme");
+                enter(s);
+                type_text(&mut s.app, "ana@acme.dev");
+                enter(s);
+            }
+
+            fn saved_config(s: &Setup) -> Config {
+                config::load(&s.config.path().join("config.json"))
+            }
+
+            #[test]
+            fn connecting_saves_the_site_and_the_email_then_the_token_and_lists() {
+                let mut s = setup(false, "echo '[]'");
+                let server = jira(&mut s);
+
+                type_site_and_email(&mut s);
+                let config = saved_config(&s);
+                type_text(&mut s.app, "t0k");
+                enter(&mut s);
+
+                pump_until(&mut s.app, &s.rx, "the issues load", |a| loaded(a, Source::Jira));
+                assert_eq!(shown(&s.app), ["SHOP-482"]);
+                assert_eq!(
+                    (config.jira_site.as_str(), config.jira_email.as_str()),
+                    ("acme.atlassian.net", "ana@acme.dev")
+                );
+                assert_eq!(secrets::read(&secrets_file(&s), "jira_api_token").as_deref(), Some("t0k"));
+                let basic = clipboard::base64(b"ana@acme.dev:t0k").to_lowercase();
+                assert!(server.request(0).to_lowercase().contains(&format!("authorization: basic {basic}")));
+            }
+
+            #[test]
+            fn a_token_from_the_environment_connects_once_the_email_is_typed() {
+                let mut s = setup(false, "echo '[]'");
+                let _server = jira(&mut s);
+                s.app.env_tokens.insert(Source::Jira, "env-token".into());
+
+                type_site_and_email(&mut s);
+
+                pump_until(&mut s.app, &s.rx, "the issues load", |a| loaded(a, Source::Jira));
+                assert_eq!(shown(&s.app), ["SHOP-482"]);
+            }
+
+            #[test]
+            fn a_token_without_a_site_is_not_connected() {
+                let mut s = setup(false, "echo '[]'");
+                secrets::write(&secrets_file(&s), "jira_api_token", "t0k").expect("save token");
+
+                open_list(&mut s);
+
+                assert!(!browser(&s.app).connections.contains_key(&Source::Jira));
+            }
+
+            #[test]
+            fn another_site_forgets_the_account_and_the_lists_of_the_old_one() {
+                let mut s = setup(false, "echo '[]'");
+                s.app.accounts.insert(Source::Jira, Account { handle: "Ana".into(), workspace: "a".into() });
+                s.app.accounts.insert(Source::Linear, Account { handle: "ana".into(), workspace: "b".into() });
+
+                s.app.set_config(Config { jira_site: "other.atlassian.net".into(), ..s.app.config.clone() });
+
+                assert_eq!(s.app.accounts.keys().collect::<Vec<_>>(), [&Source::Linear]);
             }
         }
     }
