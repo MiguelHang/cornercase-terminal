@@ -20,6 +20,7 @@ pub struct View {
     pub scroll: usize,
     pub adding: Option<Editor>,
     pub light: bool,
+    pub muted: Color,
     pub drag: Option<(u64, Option<usize>)>,
 }
 
@@ -171,7 +172,7 @@ pub fn draw(f: &mut Frame, area: Rect, view: &View, hover: Option<Position>) {
     }
     let (above, below) = layout.hidden();
     let count = |range: std::ops::Range<usize>| (!range.is_empty()).then_some(range.len());
-    super::draw_more(f, [more_above(layout.list), shown.more_below()], count(above), count(below));
+    super::draw_more(f, view.muted, [more_above(layout.list), shown.more_below()], count(above), count(below));
     let button = shown.button();
     if let Some(editor) = &view.adding {
         cursor = cursor.or(draw_field(f.buffer_mut(), view, editor, button, width, "+"));
@@ -189,14 +190,15 @@ fn draw_header(buf: &mut Buffer, area: Rect, view: &View, hover: Option<Position
     let x = put(buf, row.x, row.y, TITLE, Style::default().add_modifier(Modifier::BOLD), row.right());
     let pending = view.pending();
     if pending > 0 {
-        put(buf, x + 1, row.y, &pending.to_string(), dim(), row.right());
+        put(buf, x + 1, row.y, &pending.to_string(), dim(view.muted), row.right());
     }
     let clear = clear_done(area, view);
     if !clear.is_empty() {
-        let style = if hovered(hover, clear) { Style::default().fg(Color::Black).bg(Color::Cyan) } else { dim() };
+        let style =
+            if hovered(hover, clear) { Style::default().fg(Color::Black).bg(Color::Cyan) } else { dim(view.muted) };
         put(buf, clear.x, clear.y, &format!(" {CLEAR_DONE} "), style, clear.right());
     }
-    draw_close(buf, close(area), hover);
+    draw_close(buf, close(area), hover, view.muted);
 }
 
 fn landed(layout: &Rows, landing: Option<usize>) -> Rows {
@@ -232,7 +234,7 @@ fn draw_field(buf: &mut Buffer, view: &View, editor: &Editor, r: Rect, width: us
     let text: Vec<char> = editor.text().chars().collect();
     let x = field.x + 1;
     if text.is_empty() {
-        put(buf, x, r.y, PLACEHOLDER, dim().bg(surface(view)), field.right());
+        put(buf, x, r.y, PLACEHOLDER, dim(view.muted).bg(surface(view)), field.right());
     }
     for (line, range) in editor.lines(width).into_iter().enumerate() {
         let y = r.y.saturating_add(height(line));
@@ -264,7 +266,7 @@ fn draw_item(
     let box_style = if hovered(hover, check(row)) {
         bg.fg(Color::Cyan).add_modifier(Modifier::BOLD)
     } else if item.done || dragged {
-        bg.fg(Color::DarkGray)
+        bg.fg(view.muted)
     } else {
         bg
     };
@@ -273,9 +275,9 @@ fn draw_item(
         return draw_field(buf, view, editor, row, width, "");
     }
     let style = if item.done {
-        bg.fg(Color::DarkGray).add_modifier(Modifier::CROSSED_OUT)
+        bg.fg(view.muted).add_modifier(Modifier::CROSSED_OUT)
     } else if dragged {
-        bg.fg(Color::DarkGray)
+        bg.fg(view.muted)
     } else {
         bg
     };
@@ -290,8 +292,7 @@ fn draw_item(
     }
     if lit {
         let r = delete(row);
-        let style =
-            if hovered(hover, r) { bg.fg(Color::Red).add_modifier(Modifier::BOLD) } else { bg.fg(Color::DarkGray) };
+        let style = if hovered(hover, r) { bg.fg(Color::Red).add_modifier(Modifier::BOLD) } else { bg.fg(view.muted) };
         put(buf, r.x + 1, r.y, "×", style, r.right());
     }
     None
@@ -312,7 +313,7 @@ mod tests {
     }
 
     fn view(items: Vec<Item>) -> View {
-        View { items, scroll: 0, adding: None, light: false, drag: None }
+        View { items, scroll: 0, adding: None, light: false, muted: Color::DarkGray, drag: None }
     }
 
     fn list() -> View {

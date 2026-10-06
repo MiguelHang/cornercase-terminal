@@ -2,12 +2,19 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
-## 0.9.0
+## 0.10.0
 
 - Jira: the issue browser has a **Jira** tab for Jira Cloud. Open it, type your site (`acme.atlassian.net`, or just `acme`), your email and an API token from id.atlassian.com, and its issues show up next to GitHub, Shortcut and Linear: read them (descriptions and comments are turned into Markdown), filter them by assignee or reporter, and press **start** to put an agent on one in a worktree on a `SHOP-77-…` branch.
 - **settings → Issues → Jira** holds the site, the email and the token, plus an optional **Jira filter**: a JQL condition such as `project = SHOP` for when your site has more than you want to see. `JIRA_API_TOKEN` in the environment works like the other trackers' variables.
 - If you hid some issue tabs before, the Jira tab is added at the end of your list once; hide it in settings if you don't use Jira.
 - Issues from different trackers are now sorted correctly in the **All** tab when their times come with a time zone.
+
+## 0.9.0
+
+- cornercase now starts with one column on the left, the projects on top and the active project's workspaces under them, so your panes get the width the workspaces column used to take. Drag the line between the two lists to share the height. If you prefer the three columns, pick **settings → TUI → sidebar → side_by_side**; a `config.json` that already names `side_by_side` keeps it.
+- A new sidebar layout, **tree**, shows one list with your groups, every project, their workspaces and their tabs, so a tab in another project is one click away. Click `▾` to fold a project or a workspace and `▸` to open it again; a folded row shows `!` or `✓` when something inside needs you. Each project ends with `+ new workspace` and each workspace with `+ tab`, and rows drag to reorder as before. With **memory** on, the tree measures the tabs of every open workspace, not only the active project's. Below 90 columns the compact menu stays as it was.
+- Grey text, such as titles, the buttons at the bottom, the search field and the tree's arrows, no longer disappears in themes whose *bright black* is close to the background, such as Warp's Adeberry or Solarized Dark. cornercase then uses a grey that shows on any background, and keeps your theme's own where it reads well.
+- What you fold is saved with your session. The first time, only the project you were on stays open. The session file gets a new format for this, so going back to an older cornercase afterwards starts with an empty session.
 
 ## 0.8.0
 
