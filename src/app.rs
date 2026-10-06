@@ -64,6 +64,7 @@ pub enum AppEvent {
     IssuesLoaded {
         project: u64,
         source: Source,
+        epoch: u64,
         query: Query,
         result: Result<Listed>,
     },
@@ -80,6 +81,7 @@ pub enum AppEvent {
     PeopleLoaded {
         project: u64,
         source: Source,
+        epoch: u64,
         result: Result<Vec<Person>>,
     },
     Behind {
@@ -379,6 +381,7 @@ pub struct App {
     host_writes: Vec<Vec<u8>>,
     notifications: Vec<Notification>,
     accounts: HashMap<Source, Account>,
+    issue_epochs: HashMap<Source, u64>,
     issue_tab: Option<IssueTab>,
     settings_page: Page,
     apis: Apis,
@@ -469,6 +472,7 @@ impl App {
             host_writes: Vec::new(),
             notifications: Vec::new(),
             accounts: HashMap::new(),
+            issue_epochs: HashMap::new(),
             issue_tab: None,
             settings_page: Page::default(),
             apis: Apis::from_env(),
@@ -1110,8 +1114,10 @@ impl App {
             AppEvent::WorktreeRemoved { project, workspace, result } => {
                 self.worktree_removed(project, workspace, result);
             }
-            AppEvent::IssuesLoaded { project, source, query, result } => {
-                self.issues_loaded(project, source, &query, result);
+            AppEvent::IssuesLoaded { project, source, epoch, query, result } => {
+                if epoch == self.epoch(source) {
+                    self.issues_loaded(project, source, &query, result);
+                }
             }
             AppEvent::IssueRead { source, key, result } => {
                 if let Some(Overlay::Issues(b)) = &mut self.overlay {
@@ -1119,7 +1125,11 @@ impl App {
                 }
             }
             AppEvent::TokenChecked { source, token, result } => self.token_checked(source, &token, result, area)?,
-            AppEvent::PeopleLoaded { project, source, result } => self.people_loaded(project, source, result),
+            AppEvent::PeopleLoaded { project, source, epoch, result } => {
+                if epoch == self.epoch(source) {
+                    self.people_loaded(project, source, result);
+                }
+            }
             AppEvent::Behind { project, behind } => self.behind_counted(project, &behind),
             AppEvent::Changes { workspace, generation, request, result } => {
                 self.changes.loaded(workspace, generation, &request, result);
@@ -2180,10 +2190,10 @@ impl App {
     fn load_people(&mut self, source: Source) {
         let Some(project) = self.browser_project() else { return };
         let Some(client) = self.client(source, project) else { return };
-        let tx = self.tx.clone();
+        let (tx, epoch) = (self.tx.clone(), self.epoch(source));
         std::thread::spawn(move || {
             let result = client.people();
-            let _ = tx.send(AppEvent::PeopleLoaded { project, source, result });
+            let _ = tx.send(AppEvent::PeopleLoaded { project, source, epoch, result });
         });
     }
 
@@ -2215,10 +2225,10 @@ impl App {
             b.loaded(source, &query, Err(format!("{} is not connected", source.name())));
             return;
         };
-        let tx = self.tx.clone();
+        let (tx, epoch) = (self.tx.clone(), self.epoch(source));
         std::thread::spawn(move || {
             let result = client.list(&query);
-            let _ = tx.send(AppEvent::IssuesLoaded { project, source, query, result });
+            let _ = tx.send(AppEvent::IssuesLoaded { project, source, epoch, query, result });
         });
     }
 
@@ -2280,11 +2290,20 @@ impl App {
     fn set_config(&mut self, config: Config) {
         let jira = |c: &Config| (c.jira_site.clone(), c.jira_email.clone(), c.jira_jql.clone());
         if jira(&config) != jira(&self.config) {
-            self.accounts.remove(&Source::Jira);
-            self.issue_cache.forget(Source::Jira);
-            self.people_cache.retain(|(source, _), _| *source != Source::Jira);
+            self.forget(Source::Jira);
         }
         self.config = config;
+    }
+
+    fn epoch(&self, source: Source) -> u64 {
+        self.issue_epochs.get(&source).copied().unwrap_or(0)
+    }
+
+    fn forget(&mut self, source: Source) {
+        self.accounts.remove(&source);
+        self.issue_cache.forget(source);
+        self.people_cache.retain(|(s, _), _| *s != source);
+        *self.issue_epochs.entry(source).or_default() += 1;
     }
 
     fn check_token(&mut self, source: Source, token: Secret) {
@@ -2344,9 +2363,8 @@ impl App {
             b.error = Some(format!("failed to remove the {}: {e}", source.token_name()));
             return;
         }
-        self.accounts.remove(&source);
-        self.issue_cache.forget(source);
         b.disconnected(source);
+        self.forget(source);
     }
 
     fn issues_key(&mut self, key: KeyEvent, area: Rect) -> Result<()> {
@@ -3148,9 +3166,8 @@ impl App {
                     s.notice = Some(format!("failed to remove the {}: {e}", source.token_name()));
                     return;
                 }
-                self.accounts.remove(&source);
-                self.issue_cache.forget(source);
                 s.removed(source);
+                self.forget(source);
             }
         }
     }
@@ -8608,6 +8625,29 @@ rm -f "$1/sessions/$$.json"
                 open_list(&mut s);
 
                 assert!(!browser(&s.app).connections.contains_key(&Source::Jira));
+            }
+
+            #[test]
+            fn a_list_asked_before_the_site_changed_is_dropped() {
+                let mut s = setup(false, "echo '[]'");
+                let _server = jira(&mut s);
+                s.app.config.jira_site = "acme.atlassian.net".into();
+                s.app.config.jira_email = "ana@acme.dev".into();
+                secrets::write(&secrets_file(&s), "jira_api_token", "t0k").expect("save token");
+                open_list(&mut s);
+                let key = s.app.cache_key(Source::Jira, browser(&s.app).project, &browser(&s.app).query(Source::Jira));
+
+                s.app.set_config(Config { jira_site: "other.atlassian.net".into(), ..s.app.config.clone() });
+                loop {
+                    let event = s.rx.recv_timeout(Duration::from_secs(10)).expect("the old list arrives");
+                    let old = matches!(event, AppEvent::IssuesLoaded { source: Source::Jira, .. });
+                    s.app.handle_event(event, AREA).expect("handle event");
+                    if old {
+                        break;
+                    }
+                }
+
+                assert_eq!((s.app.accounts.get(&Source::Jira), s.app.issue_cache.get(&key)), (None, None));
             }
 
             #[test]

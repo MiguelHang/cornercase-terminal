@@ -155,7 +155,7 @@ src/error.rs      library error type
 - **Undo instead of confirming**: ` × ` and ` clear done ` remove at once and set a toast with an ` undo ` button (`Toast::undo`, `UNDO_FOR` 6 s instead of 2 s). Only the last removal can be undone. The toast's button is checked before overlays, so it works with a menu open.
 
 **Issues (`issues/`)**
-- `Browser` is pure state that returns `Action`s; `App` does the I/O on threads. Answers carry their query and issue key so stale ones are dropped. Lists are cached in memory and in `issues.json` (titles and metadata only, never tokens).
+- `Browser` is pure state that returns `Action`s; `App` does the I/O on threads. Answers carry their query and issue key so stale ones are dropped, and lists and people also the source's epoch, bumped by `App::forget` when its connection goes (disconnect, token removed, Jira settings changed), so a load still in flight cannot refill the cache with the old one. Lists are cached in memory and in `issues.json` (titles and metadata only, never tokens).
 - GitHub goes through `gh` in the project folder. Shortcut (REST v3), Linear (GraphQL) and Jira Cloud (REST v3) go through `ureq`, capped at 100 issues. People filters go into each tracker's query.
 - Tokens come from `SHORTCUT_API_TOKEN` / `LINEAR_API_KEY` / `JIRA_API_TOKEN` or are typed in the app, checked, and saved to `secrets.json` (0600). `issues::Secret` hides them in `Debug`; they are never logged.
 - **Starting an issue**: in a repo root, a worktree on `issue-<n>-<slug>` / `sc-<n>-<slug>` / `ENG-123-<slug>` / `PROJ-123-<slug>`; elsewhere a new tab. Shortcut, Linear and Jira issues ask which open project or workspace to use. Then the agent starts with the prompt.

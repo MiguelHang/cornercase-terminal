@@ -1716,6 +1716,7 @@ export class App {
       else {
         if (site) this.config.jiraSite = value;
         else this.config.jiraEmail = value;
+        if (!value) this.config.accounts.jira = false;
         o.edit = undefined;
         o.notice = value ? `Jira ${name}: ${value}` : `the Jira ${name} was cleared`;
       }
@@ -1791,7 +1792,9 @@ export class App {
     const github = !!p?.repo;
     const allowed = (s: string) => (s === 'github' ? github : isRemote(s) && this.config.accounts[s]);
     const f = o.filter.trim().toLowerCase();
+    const project = /\bproject\s*=\s*"?([a-z][a-z0-9_]*)"?/i.exec(this.config.jiraJql)?.[1].toUpperCase();
     return ISSUES.filter((i) => (source === 'all' ? allowed(i.source) : i.source === source && allowed(i.source)))
+      .filter((i) => i.source !== 'jira' || !project || i.key.startsWith(`${project}-`))
       .filter((i) => !o.mine || i.mine)
       .filter((i) => !f || [i.key, i.title, i.author, i.state, ...i.labels].some((k) => k.toLowerCase().includes(f)));
   }
@@ -2588,11 +2591,12 @@ export class App {
     }
     if (view.token) {
       if (k.key === 'Enter') this.issuesConnect();
-      else if (k.key === 'Backspace') o.token.input = o.token.input.slice(0, -1);
       else if (k.key === 'Tab' || k.key === 'ArrowRight') this.issuesTab((o.tab + 1) % this.config.sources.length);
       else if (k.key === 'ArrowLeft') this.issuesTab((o.tab + this.config.sources.length - 1) % this.config.sources.length);
-      else if (ch) o.token.input += ch;
-      o.token.error = undefined;
+      else if (k.key === 'Backspace' || ch) {
+        o.token.input = k.key === 'Backspace' ? o.token.input.slice(0, -1) : o.token.input + ch;
+        o.token.error = undefined;
+      }
       this.dirty();
       return true;
     }
