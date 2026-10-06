@@ -62,6 +62,7 @@ const LIGHT_HOVER: Color = Color::Indexed(255);
 const CLOSE_BUTTON_WIDTH: u16 = 3;
 const COMPACT_CLOSE_WIDTH: u16 = 5;
 const TOAST_ICON: &str = " ✓ ";
+const BUG_ICON: &str = " ✗ ";
 const TOAST_MARGIN: u16 = 1;
 const BEHIND_ICON: &str = "↓";
 const CONTEXT_SEPARATOR: &str = " · ";
@@ -1763,9 +1764,16 @@ pub struct ChangesButton {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastIcon {
+    Check,
+    Agent(Status),
+    Bug,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Toast<'a> {
     pub message: &'a str,
-    pub status: Option<Status>,
+    pub icon: ToastIcon,
     pub undo: bool,
 }
 
@@ -1950,9 +1958,13 @@ pub fn toast_undo(area: Rect, toast: Toast) -> Rect {
 
 fn draw_toast(f: &mut Frame, view: &View, toast: Toast) {
     let r = toast_area(f.area(), toast);
-    let icon = match toast.status.map(status_icon) {
-        Some(icon) => Span::styled(format!(" {} ", icon.content), icon.style),
-        None => Span::styled(TOAST_ICON, Style::default().fg(Color::Green)),
+    let icon = match toast.icon {
+        ToastIcon::Check => Span::styled(TOAST_ICON, Style::default().fg(Color::Green)),
+        ToastIcon::Agent(status) => {
+            let icon = status_icon(status);
+            Span::styled(format!(" {} ", icon.content), icon.style)
+        }
+        ToastIcon::Bug => Span::styled(BUG_ICON, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
     };
     let border = Style::default().fg(icon.style.fg.unwrap_or(Color::Green));
     f.render_widget(Clear, r);
@@ -5200,12 +5212,12 @@ mod tests {
         use super::*;
 
         fn copied() -> Toast<'static> {
-            Toast { message: "copied to clipboard", status: None, undo: false }
+            Toast { message: "copied to clipboard", icon: ToastIcon::Check, undo: false }
         }
 
         #[test]
         fn an_undo_button_sits_at_its_end() {
-            let toast = Toast { message: "deleted", status: None, undo: true };
+            let toast = Toast { message: "deleted", icon: ToastIcon::Check, undo: true };
             let (r, undo) = (toast_area(AREA, toast), toast_undo(AREA, toast));
             let t = render(&View { toast: Some(toast), ..view(&["~"]) });
             let text: String = (undo.x..undo.right()).map(|x| t.backend().buffer()[(x, undo.y)].symbol()).collect();
@@ -5237,10 +5249,15 @@ mod tests {
         }
 
         #[rstest]
-        #[case::waiting(Status::Waiting, "!", WAITING_COLOR)]
-        #[case::done(Status::Done, "✓", Color::Green)]
-        fn about_an_agent_shows_its_status(#[case] status: Status, #[case] glyph: &str, #[case] colour: Color) {
-            let toast = Toast { message: "claude needs you in shop › main", status: Some(status), undo: false };
+        #[case::agent_waiting(ToastIcon::Agent(Status::Waiting), "!", WAITING_COLOR)]
+        #[case::agent_done(ToastIcon::Agent(Status::Done), "✓", Color::Green)]
+        #[case::bug(ToastIcon::Bug, "✗", Color::Red)]
+        fn its_icon_and_border_say_what_it_is_about(
+            #[case] icon: ToastIcon,
+            #[case] glyph: &str,
+            #[case] colour: Color,
+        ) {
+            let toast = Toast { message: "something happened", icon, undo: false };
             let r = toast_area(AREA, toast);
             let v = View { toast: Some(toast), ..view(&["~"]) };
             let t = render(&v);

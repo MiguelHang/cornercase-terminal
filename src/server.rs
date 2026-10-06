@@ -21,6 +21,7 @@ use crate::config;
 use crate::error::{Error, Result};
 use crate::host_theme::HostTheme;
 use crate::notify::Channel;
+use crate::panics;
 use crate::protocol::{self, ClientMessage, Hello, ServerMessage};
 use crate::state::{self, Saver};
 use crate::todo;
@@ -39,6 +40,13 @@ enum ServerEvent {
     Incompatible(u64),
     Gone(u64),
     Shutdown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Background,
+    Input,
+    Draw,
 }
 
 struct FrameWriter {
@@ -159,6 +167,7 @@ struct Server {
 }
 
 pub fn run() -> Result<()> {
+    panics::log_to_stderr();
     let _ = rustix::process::setsid();
     let path = protocol::socket_path();
     let (listener, _lock) = bind(&path)?;
@@ -174,19 +183,7 @@ pub fn run() -> Result<()> {
     let todos = todo::load(&todo::path(&state::path()));
     let todo_saver = Saver::new(todo::path(&state::path()), Some(todos.saved()));
     app.set_todos(todos);
-    let mut server = Server {
-        app,
-        clients: Vec::new(),
-        area: None,
-        next_client: 1,
-        uses: 0,
-        started: false,
-        build: protocol::build_id(),
-        saver: Saver::new(state::path(), None),
-        todo_saver,
-        restart: None,
-        tx,
-    };
+    let mut server = Server::new(app, todo_saver, tx);
     server.serve(&rx);
     let _ = std::fs::remove_file(&path);
     server.shutdown();
@@ -266,22 +263,65 @@ fn spawn_client_reader(id: u64, mut stream: UnixStream, tx: Sender<ServerEvent>)
 }
 
 impl Server {
+    fn new(app: App, todo_saver: Saver<todo::Saved>, tx: Sender<ServerEvent>) -> Self {
+        Self {
+            app,
+            clients: Vec::new(),
+            area: None,
+            next_client: 1,
+            uses: 0,
+            started: false,
+            build: protocol::build_id(),
+            saver: Saver::new(state::path(), None),
+            todo_saver,
+            restart: None,
+            tx,
+        }
+    }
+
     fn serve(&mut self, rx: &Receiver<ServerEvent>) {
         loop {
-            self.app.refresh(Instant::now());
-            self.draw();
-            self.save();
+            self.contain(Step::Background, |s| s.app.refresh(Instant::now()));
+            self.contain(Step::Draw, Self::draw);
+            self.contain(Step::Background, Self::save);
             let first = match rx.recv_timeout(self.app.tick().unwrap_or(TICK)) {
                 Ok(ev) => Some(ev),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => return,
             };
             for ev in first.into_iter().chain(std::iter::from_fn(|| rx.try_recv().ok())) {
-                if self.handle(ev).is_break() {
+                let step = if matches!(ev, ServerEvent::Message(_, ClientMessage::Event(_))) {
+                    Step::Input
+                } else {
+                    Step::Background
+                };
+                if self.contain(step, |s| s.handle(ev)) == Some(ControlFlow::Break(())) {
                     return;
                 }
             }
         }
+    }
+
+    fn contain<T>(&mut self, step: Step, run: impl FnOnce(&mut Self) -> T) -> Option<T> {
+        let done = panics::contain(|| run(self));
+        if done.is_none() {
+            self.recover(step);
+        }
+        done
+    }
+
+    fn recover(&mut self, step: Step) {
+        if step != Step::Background {
+            self.app.reset_interaction();
+        }
+        if step == Step::Draw
+            && let Some(area) = self.area
+        {
+            for client in &mut self.clients {
+                client.reset_screen(area);
+            }
+        }
+        self.app.report_bug();
     }
 
     fn save(&mut self) {
@@ -501,6 +541,121 @@ mod tests {
             drop(lock(&socket).expect("first lock"));
 
             crate::test_util::wait_until("the lock is free", || lock(&socket).is_ok());
+        }
+    }
+
+    mod a_bug {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent};
+
+        use super::*;
+        use crate::test_util::wait_until;
+
+        const COLS: u16 = 100;
+        const ROWS: u16 = 20;
+        const BUG: &str = "cornercase hit a bug, see server.log";
+        const PANE_MENU: &str = "split right";
+
+        struct Attached {
+            server: Server,
+            output: Receiver<AppEvent>,
+            frames: Receiver<ServerMessage>,
+            screen: vt100::Parser,
+            _events: Receiver<ServerEvent>,
+            _dir: TempDir,
+        }
+
+        impl Attached {
+            fn new() -> Self {
+                let dir = TempDir::new();
+                let (app_tx, output) = mpsc::channel();
+                let mut app = App::new("/bin/sh".into(), HostTheme::default(), dir.path().join("config.json"), app_tx);
+                app.open_here(Rect::new(0, 0, COLS, ROWS)).expect("open the first project");
+                let (tx, events) = mpsc::channel();
+                let mut server = Server::new(app, Saver::new(dir.path().join("todos.json"), None), tx);
+                server.started = true;
+                let (ours, mut theirs) = UnixStream::pair().expect("a socket pair");
+                let _ = server.handle(ServerEvent::Accepted(ours));
+                let (version, build, theme) = (protocol::VERSION, protocol::build_id(), HostTheme::default());
+                let hello = Hello { version, build, cols: COLS, rows: ROWS, theme, notify: Channel::Bell };
+                let _ = server.handle(ServerEvent::Message(1, ClientMessage::Hello(Box::new(hello))));
+                let (frames_tx, frames) = mpsc::channel();
+                thread::spawn(move || {
+                    while let Ok(Some(msg)) = protocol::recv::<ServerMessage>(&mut theirs) {
+                        if frames_tx.send(msg).is_err() {
+                            return;
+                        }
+                    }
+                });
+                let screen = vt100::Parser::new(ROWS, COLS, 0);
+                Self { server, output, frames, screen, _events: events, _dir: dir }
+            }
+
+            fn input(&mut self, ev: Event) {
+                self.server.contain(Step::Input, |s| s.handle(ServerEvent::Message(1, ClientMessage::Event(ev))));
+            }
+
+            fn type_line(&mut self, line: &str) {
+                for code in line.chars().map(KeyCode::Char).chain([KeyCode::Enter]) {
+                    self.input(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+                }
+            }
+
+            fn right_click_in_the_pane(&mut self) {
+                let kind = MouseEventKind::Down(MouseButton::Right);
+                self.input(Event::Mouse(MouseEvent { kind, column: COLS - 10, row: 3, modifiers: KeyModifiers::NONE }));
+            }
+
+            fn screen_until(&mut self, what: &str, cond: impl Fn(&str) -> bool) {
+                wait_until(what, || {
+                    while let Ok(ev) = self.output.try_recv() {
+                        self.server.contain(Step::Background, |s| s.handle(ServerEvent::App(ev)));
+                    }
+                    self.server.contain(Step::Draw, Server::draw);
+                    while let Ok(msg) = self.frames.try_recv() {
+                        if let ServerMessage::Frame(bytes) = msg {
+                            self.screen.process(&bytes);
+                        }
+                    }
+                    cond(&self.screen.screen().contents())
+                });
+            }
+
+            fn shows(&mut self, text: &str) {
+                self.screen_until(text, |screen| screen.contains(text));
+            }
+        }
+
+        #[test]
+        fn a_panic_while_handling_an_event_drops_only_that_event() {
+            let mut attached = Attached::new();
+            attached.server.contain(Step::Input, |_| panic!("a bug"));
+            attached.shows(BUG);
+            attached.type_line("echo still-\"\"alive");
+            attached.shows("still-alive");
+        }
+
+        #[test]
+        fn a_panic_while_drawing_starts_every_screen_over() {
+            let mut attached = Attached::new();
+            attached.shows("quit");
+            attached.server.contain(Step::Draw, |_| panic!("a bug"));
+            wait_until(
+                "the screen is cleared",
+                || matches!(attached.frames.try_recv(), Ok(ServerMessage::Frame(bytes)) if bytes == CLEAR_SCREEN),
+            );
+            attached.shows(BUG);
+        }
+
+        #[test]
+        fn only_a_panic_in_what_the_user_does_closes_what_is_open() {
+            let mut attached = Attached::new();
+            attached.right_click_in_the_pane();
+            attached.shows(PANE_MENU);
+            attached.server.contain(Step::Background, |_| panic!("a bug in a background step"));
+            attached.shows(BUG);
+            assert!(attached.screen.screen().contents().contains(PANE_MENU));
+            attached.server.contain(Step::Input, |_| panic!("a bug"));
+            attached.screen_until("the menu closes", |screen| !screen.contains(PANE_MENU));
         }
     }
 }

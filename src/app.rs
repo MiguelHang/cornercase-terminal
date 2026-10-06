@@ -14,7 +14,7 @@ use crate::changes::diff::File as ChangedFile;
 use crate::changes::{self, BranchPicker, Checkout, Tints};
 use crate::clipboard;
 use crate::config::{self, Config};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::git;
 use crate::host_theme::HostTheme;
 use crate::issues::browser::{self, Action, Browser, Connection, Place, Screen, Tab as IssueTab};
@@ -27,6 +27,7 @@ use crate::markdown;
 use crate::memory;
 use crate::mouse;
 use crate::notify::{self, Notification};
+use crate::panics;
 use crate::picker::Picker;
 use crate::process;
 use crate::project::{Group, Project, Tab, Workspace, move_before, shift_active};
@@ -191,6 +192,7 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const AUTO_SCROLL_EVERY: Duration = Duration::from_millis(150);
 const TOAST_FOR: Duration = Duration::from_secs(2);
 const UNDO_FOR: Duration = Duration::from_secs(6);
+const BUG_FOR: Duration = Duration::from_secs(6);
 const COPIED: &str = "copied to clipboard";
 const UPDATE_AVAILABLE: &str = "a new cornercase is out";
 const UPDATE_SUBMIT: &str = "update";
@@ -292,18 +294,24 @@ struct Focus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Toast {
     message: String,
-    status: Option<activity::Status>,
+    icon: ui::ToastIcon,
     at: Instant,
     undo: Option<todo::Removed>,
 }
 
 impl Toast {
-    fn new(message: impl Into<String>, status: Option<activity::Status>) -> Self {
-        Self { message: message.into(), status, at: Instant::now(), undo: None }
+    fn new(message: impl Into<String>, icon: ui::ToastIcon) -> Self {
+        Self { message: message.into(), icon, at: Instant::now(), undo: None }
     }
 
     fn lasts(&self) -> Duration {
-        if self.undo.is_some() { UNDO_FOR } else { TOAST_FOR }
+        if self.undo.is_some() {
+            UNDO_FOR
+        } else if self.icon == ui::ToastIcon::Bug {
+            BUG_FOR
+        } else {
+            TOAST_FOR
+        }
     }
 }
 
@@ -502,6 +510,24 @@ impl App {
         self.theme = theme;
     }
 
+    pub fn report_bug(&mut self) {
+        self.toast = Some(Toast::new(Error::Bug.to_string(), ui::ToastIcon::Bug));
+    }
+
+    pub fn reset_interaction(&mut self) {
+        self.overlay = None;
+        self.nav = None;
+        self.hover = None;
+        self.row_drag = None;
+        self.resizing = None;
+        self.divider_drag = None;
+        self.selecting = None;
+        self.todo.field = None;
+        if let Some(filter) = &mut self.changes.filter {
+            filter.focused = false;
+        }
+    }
+
     fn sidebar(&self) -> ui::Sidebar {
         ui::Sidebar::from_setting(&self.config.sidebar)
     }
@@ -612,7 +638,7 @@ impl App {
         let place = format!("{} › {}", self.project_label(project), project.workspaces[w].label());
         let message = notify::clean(&format!("{agent} {what} in {place}"));
         self.notifications.extend(Notification::new(&message, &self.config.desktop_notifications));
-        self.toast = Some(Toast::new(message, Some(status)));
+        self.toast = Some(Toast::new(message, ui::ToastIcon::Agent(status)));
     }
 
     fn count_behind(&mut self, now: Instant) {
@@ -641,7 +667,7 @@ impl App {
             }
             let (id, repo, tx) = (project.id, project.path.clone(), self.tx.clone());
             std::thread::spawn(move || {
-                let behind = upstream::check(&repo, &workspaces, fetch);
+                let behind = panics::contain(|| upstream::check(&repo, &workspaces, fetch)).unwrap_or_default();
                 let _ = tx.send(AppEvent::Behind { project: id, behind });
             });
         }
@@ -656,7 +682,7 @@ impl App {
         let Some((generation, request)) = self.changes.request(&target, now) else { return };
         let (tx, workspace) = (self.tx.clone(), target.workspace);
         std::thread::spawn(move || {
-            let result = changes::git::load(&request);
+            let result = panics::job(|| changes::git::load(&request));
             let _ = tx.send(AppEvent::Changes { workspace, generation, request: Box::new(request), result });
         });
     }
@@ -1988,7 +2014,7 @@ impl App {
         let Some(client) = self.client(source, project) else { return };
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let result = client.people();
+            let result = panics::job(|| client.people());
             let _ = tx.send(AppEvent::PeopleLoaded { project, source, result });
         });
     }
@@ -2023,7 +2049,7 @@ impl App {
         };
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let result = client.list(&query);
+            let result = panics::job(|| client.list(&query));
             let _ = tx.send(AppEvent::IssuesLoaded { project, source, query, result });
         });
     }
@@ -2057,12 +2083,13 @@ impl App {
         };
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let result = client.read(&issue);
-            if let Ok(detail) = &result {
+            let result = panics::job(|| {
+                let detail = client.read(&issue)?;
                 std::iter::once(&detail.body).chain(detail.comments.iter().map(|c| &c.body)).for_each(|body| {
                     markdown::warm(body);
                 });
-            }
+                Ok(detail)
+            });
             let _ = tx.send(AppEvent::IssueRead { source: issue.source, key: issue.key, result });
         });
     }
@@ -2075,16 +2102,16 @@ impl App {
         };
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let result = client.whoami();
+            let result = panics::job(|| client.whoami());
             let _ = tx.send(AppEvent::TokenChecked { source, token, result });
         });
     }
 
     fn token_checked(&mut self, source: Source, token: &Secret, result: Result<Account>, area: Rect) -> Result<()> {
         let saved = result.and_then(|account| {
-            let key = source.secret_key().ok_or_else(|| crate::error::Error::Api("nothing to save".into()))?;
+            let key = source.secret_key().ok_or_else(|| Error::Api("nothing to save".into()))?;
             secrets::write(&self.secrets_path, key, &token.0)
-                .map_err(|e| crate::error::Error::Api(format!("failed to save the {}: {e}", source.token_name())))?;
+                .map_err(|e| Error::Api(format!("failed to save the {}: {e}", source.token_name())))?;
             Ok(account)
         });
         if let Some(Overlay::Settings(s)) = &mut self.overlay {
@@ -2168,7 +2195,7 @@ impl App {
         let path = worktree::checkout_path(&self.config.worktrees_dir(self.home.as_deref()), &repo, &branch);
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let result = worktree::create(&repo, &branch, &path).map(|()| path);
+            let result = panics::job(|| worktree::create(&repo, &branch, &path).map(|()| path));
             let _ = tx.send(AppEvent::WorktreeCreated { project, result, start: Some(start) });
         });
         if let Some(Overlay::Issues(b)) = &mut self.overlay {
@@ -2637,8 +2664,10 @@ impl App {
         self.updates.checked = Some(now);
         let (url, tx) = (self.updates.url.clone(), self.tx.clone());
         std::thread::spawn(move || {
-            let found = update::check(&url, update::CURRENT);
-            let found = found.map(|release| release.map(|release| update::with_changelog(release, update::CURRENT)));
+            let found = panics::job(|| {
+                let found = update::check(&url, update::CURRENT)?;
+                Ok(found.map(|release| update::with_changelog(release, update::CURRENT)))
+            });
             let _ = tx.send(AppEvent::UpdateChecked(found));
         });
     }
@@ -2647,7 +2676,7 @@ impl App {
         match result {
             Ok(Some(release)) if !self.updates.installed => {
                 if self.updates.available.as_ref().is_none_or(|known| known.version != release.version) {
-                    self.toast = Some(Toast::new(UPDATE_AVAILABLE, None));
+                    self.toast = Some(Toast::new(UPDATE_AVAILABLE, ui::ToastIcon::Check));
                 }
                 self.updates.available = Some(release);
             }
@@ -2718,7 +2747,7 @@ impl App {
                 };
                 let tx = self.tx.clone();
                 std::thread::spawn(move || {
-                    let _ = tx.send(AppEvent::Updated(update::update(&release, target, &exe)));
+                    let _ = tx.send(AppEvent::Updated(panics::job(|| update::update(&release, target, &exe))));
                 });
                 Some(Overlay::Update(UpdateStep::Updating))
             }
@@ -2790,7 +2819,7 @@ impl App {
             let command = agents::command(&self.config, agent.kind());
             let (timeout, tx) = (self.usage_timeout, self.tx.clone());
             std::thread::spawn(move || {
-                let _ = tx.send(AppEvent::Usage(agent, usage::probe(agent, &command, timeout)));
+                let _ = tx.send(AppEvent::Usage(agent, panics::job(|| usage::probe(agent, &command, timeout))));
             });
         }
     }
@@ -2920,7 +2949,7 @@ impl App {
             let path = worktree::checkout_path(&self.config.worktrees_dir(self.home.as_deref()), &repo, &name);
             let tx = self.tx.clone();
             std::thread::spawn(move || {
-                let result = worktree::create(&repo, &name, &path).map(|()| path);
+                let result = panics::job(|| worktree::create(&repo, &name, &path).map(|()| path));
                 let _ = tx.send(AppEvent::WorktreeCreated { project, result, start: None });
             });
             self.overlay = Some(Overlay::NewWorkspace { project, input, worktree, error: None, creating: true });
@@ -2996,7 +3025,7 @@ impl App {
         let path = self.projects[p].workspaces[w].path.clone();
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let result = worktree::remove(&repo, &path, force);
+            let result = panics::job(|| worktree::remove(&repo, &path, force));
             let _ = tx.send(AppEvent::WorktreeRemoved { project, workspace, result });
         });
         Some(Overlay::RemoveWorkspace { project, workspace, error: None, force, removing: true })
@@ -3148,11 +3177,7 @@ impl App {
             light: self.theme.is_light() == Some(true),
             tab,
             overlay,
-            toast: self.toast.as_ref().map(|t| ui::Toast {
-                message: &t.message,
-                status: t.status,
-                undo: t.undo.is_some(),
-            }),
+            toast: self.toast.as_ref().map(|t| ui::Toast { message: &t.message, icon: t.icon, undo: t.undo.is_some() }),
             nav: self.nav,
             update: self.update_label(),
             changes: if self.changes_shown() { self.panel_view() } else { None },
@@ -3505,7 +3530,7 @@ impl App {
         });
         let Some((t, id)) = found else {
             self.host_writes.push(clipboard::osc52(text.trim_end()));
-            self.toast = Some(Toast::new(NO_AGENT, None));
+            self.toast = Some(Toast::new(NO_AGENT, ui::ToastIcon::Check));
             return;
         };
         let ws = &mut self.projects[p].workspaces[w];
@@ -3517,7 +3542,7 @@ impl App {
                 if term.emulator.bracketed_paste() { format!("\x1b[200~{text}\x1b[201~") } else { text.to_string() };
             term.write(bytes.as_bytes());
         }
-        self.toast = Some(Toast::new(SENT_TO_AGENT, None));
+        self.toast = Some(Toast::new(SENT_TO_AGENT, ui::ToastIcon::Check));
     }
 
     fn open_branches(&mut self, target: &Checkout) {
@@ -3621,7 +3646,7 @@ impl App {
 
 fn copy(host_writes: &mut Vec<Vec<u8>>, toast: &mut Option<Toast>, text: &str) {
     host_writes.push(clipboard::osc52(text));
-    *toast = Some(Toast::new(COPIED, None));
+    *toast = Some(Toast::new(COPIED, ui::ToastIcon::Check));
 }
 
 fn pane_cell(pane: Rect, ev: MouseEvent) -> Option<Position> {
@@ -6790,7 +6815,9 @@ rm -f "$1/sessions/$$.json"
         #[test]
         fn the_toast_goes_away_after_a_while() {
             let (mut app, _rx) = showing("hello world");
-            app.toast = Instant::now().checked_sub(TOAST_FOR).map(|at| Toast { at, ..Toast::new(COPIED, None) });
+            app.toast = Instant::now()
+                .checked_sub(TOAST_FOR)
+                .map(|at| Toast { at, ..Toast::new(COPIED, ui::ToastIcon::Check) });
             let mut t = Terminal::new(TestBackend::new(AREA.width, AREA.height)).expect("test backend");
 
             t.draw(|f| app.draw(f)).expect("draw");
@@ -8717,7 +8744,10 @@ rm -f "$1/sessions/$$.json"
         }
 
         fn undo(app: &mut App, message: &str) {
-            click(app, ui::toast_undo(AREA, ui::Toast { message, status: None, undo: true }).as_position());
+            click(
+                app,
+                ui::toast_undo(AREA, ui::Toast { message, icon: ui::ToastIcon::Check, undo: true }).as_position(),
+            );
         }
 
         fn opened() -> (App, Receiver<AppEvent>, Vec<TempDir>) {
@@ -8899,6 +8929,53 @@ rm -f "$1/sessions/$$.json"
             back.set_todos(Todos::from(saved));
             back.restore(&state, AREA).expect("restore");
             assert_eq!((state.todo, back.todo.open, texts(&back)), (true, true, vec!["a".into()]));
+        }
+    }
+
+    mod bugs {
+        use super::*;
+
+        #[test]
+        fn a_bug_says_where_to_look_and_stays_a_while() {
+            let (mut app, _rx) = empty_app();
+            app.report_bug();
+            let shown = app.toast.as_ref().map(|t| (t.message.as_str(), t.icon, t.lasts()));
+            assert_eq!(shown, Some(("cornercase hit a bug, see server.log", ui::ToastIcon::Bug, BUG_FOR)));
+        }
+
+        #[test]
+        fn resetting_the_interaction_closes_dialogs_and_ends_drags() {
+            let (mut app, _rx) = app();
+            let row = sidebar_pos(&app, SidebarRow::Project(0));
+            press(&mut app, row);
+            app.overlay = Some(Overlay::Usage);
+            app.nav = Some(ui::Nav::Projects);
+            app.resizing = Some(ui::Border::Projects);
+            app.divider_drag = Some((1, vec![true]));
+            app.selecting = Some(1);
+            assert!(app.row_drag.is_some() && app.hover.is_some());
+
+            app.reset_interaction();
+
+            assert!(app.overlay.is_none());
+            assert_eq!(
+                (app.nav, app.hover, app.row_drag, app.resizing, app.divider_drag, app.selecting),
+                (None, None, None, None, None, None)
+            );
+        }
+
+        #[test]
+        fn resetting_the_interaction_drops_the_todo_field_and_gives_the_filter_keys_back() {
+            let (mut app, _rx) = app();
+            let mut filter = changes::filter::Filter::default();
+            filter.push('a');
+            app.changes.filter = Some(filter);
+            app.todo.field = Some(todo::Field::default());
+
+            app.reset_interaction();
+
+            let filter = app.changes.filter.as_ref().map(|f| (f.query(), f.focused));
+            assert_eq!((app.todo.field.is_none(), filter), (true, Some(("a", false))));
         }
     }
 }
