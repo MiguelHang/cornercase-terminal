@@ -214,6 +214,7 @@ skills/cornercase/SKILL.md  the agent skill, embedded for `cornercase skill`
 **Terminals (`term.rs`, `emulator.rs`)**
 - The emulator is libghostty-vt: it answers terminal queries (DSR, DA, DECRQM, kitty keyboard…) that programs like fzf and nvim wait for, and reflows on resize.
 - Its types are `!Send`, so the emulator lives on the server's main thread; the reader thread only forwards bytes. Query replies go out from `on_pty_write`, ordered with the output that asked.
+- Every write to a PTY (keys, pastes, launches, query replies) goes through one writer thread per pane (`term::spawn_writer`), in order: once a terminal's input buffer is full, a write to a program that doesn't read blocks, and on the server loop that froze every client (a long paste or `cornercase send` into a pane running `sleep`).
 - Cells keep palette indices so the outer theme applies. The client asks the outer terminal for its colours (OSC 10/11/4, then XTVERSION, then DA1 as an end marker) before starting the input thread, and every emulator uses them as defaults.
 - cwd, name and arguments of the PTY's foreground process group leader come from `process.rs`: `/proc` on Linux, `proc_pidinfo` / `proc_name` / `sysctl(KERN_PROCARGS2)` on macOS (with `getpeereid`, the only `unsafe` and the only use of `libc`). In a pipeline the leader may be dead (`process::alive`), so the shell is used instead. Agent launch and detection depend on it.
 

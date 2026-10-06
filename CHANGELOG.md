@@ -9,6 +9,7 @@ Every pull request that changes the app adds a section here for its new version.
 - These commands never move what your window shows, unless you ask with `focus` or `--focus`. Run inside a pane, a command acts on that pane: every shell now has `CORNERCASE_PANE` set to its pane's id.
 - `cornercase --help` and `cornercase COMMAND --help` now describe every command, and a mistake in how a command is called exits with status 2.
 - A server started before this update answers these commands with "too old": restart it once (cornercase offers to when you open it).
+- Pasting a long text into a pane whose program isn't reading it, such as one waiting in `sleep`, no longer freezes cornercase until the program reads.
 
 ## 0.9.0
 

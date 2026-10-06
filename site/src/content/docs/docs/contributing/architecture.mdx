@@ -57,7 +57,7 @@ Colours are palette indices (cyan, the brand purple `99`, the surfaces `236` and
 Panes are emulated with [libghostty-vt](https://github.com/ghostty-org/ghostty), Ghostty's terminal core, wrapped in `emulator.rs`:
 
 - It answers the terminal queries programs wait for (DSR, DA, DECRQM, kitty keyboard queries…) and reflows text on resize.
-- Its types are `!Send`, so every emulator lives on the server's main thread; each PTY's reader thread only forwards bytes. Replies go out from `on_pty_write`, in order with the output that asked for them.
+- Its types are `!Send`, so every emulator lives on the server's main thread; each PTY's reader thread only forwards bytes. Replies go out from `on_pty_write`, in order with the output that asked for them. Everything written to a PTY, keys, pastes and replies alike, goes through a writer thread per pane, so a program that stops reading never blocks the server.
 - Cells keep palette indices. The colours queried from the outer terminal (OSC 10, 11 and 4, with DA1 as an end marker) become every emulator's defaults. The same query asks for the terminal's name (XTVERSION), which decides how desktop notifications are written to it.
 - `take_copied` hands over OSC 52 clipboard writes from programs; reads and primary-selection writes are dropped.
 

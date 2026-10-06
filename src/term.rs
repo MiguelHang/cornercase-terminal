@@ -1,11 +1,9 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::Instant;
 
-use parking_lot::Mutex;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::activity;
@@ -30,7 +28,7 @@ const NOT_A_SCRIPT: [&str; 6] = ["-e", "--eval", "-p", "--print", "-c", "-m"];
 pub const PASTE_START: &str = "\x1b[200~";
 pub const PASTE_END: &str = "\x1b[201~";
 
-type Writer = Arc<Mutex<Box<dyn Write + Send>>>;
+type Writer = Sender<Vec<u8>>;
 
 pub struct Term {
     pub id: u64,
@@ -89,8 +87,8 @@ impl Term {
         drop(pair.slave);
 
         let reader = pair.master.try_clone_reader().map_err(|e| Error::AttachPty(e.into()))?;
-        let writer: Writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| Error::AttachPty(e.into()))?));
-        let replies = Arc::clone(&writer);
+        let writer = spawn_writer(pair.master.take_writer().map_err(|e| Error::AttachPty(e.into()))?);
+        let replies = writer.clone();
         let emulator = Emulator::new(rows, cols, SCROLLBACK, theme, Box::new(move |bytes| write_to(&replies, bytes)))
             .map_err(|e| Error::Emulator(e.into()))?;
         spawn_reader(id, reader, tx);
@@ -214,10 +212,19 @@ fn script(argv: &[String]) -> Option<String> {
 }
 
 fn write_to(writer: &Writer, bytes: &[u8]) {
-    let mut writer = writer.lock();
-    if writer.write_all(bytes).is_ok() {
-        let _ = writer.flush();
-    }
+    let _ = writer.send(bytes.to_vec());
+}
+
+fn spawn_writer(mut pty: Box<dyn Write + Send>) -> Writer {
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    thread::spawn(move || {
+        for bytes in rx {
+            if pty.write_all(&bytes).and_then(|()| pty.flush()).is_err() {
+                return;
+            }
+        }
+    });
+    tx
 }
 
 fn spawn_reader(id: u64, mut reader: Box<dyn Read + Send>, tx: Sender<AppEvent>) {
@@ -341,6 +348,23 @@ mod tests {
             term.write(b"echo x\r");
 
             assert_matches!(rx.recv_timeout(RECV_TIMEOUT), Ok(AppEvent::Output(1, _)));
+        }
+    }
+
+    mod writing {
+        use super::*;
+
+        #[test]
+        fn a_program_that_does_not_read_never_blocks_the_writer() {
+            let (mut term, _rx) = spawn_sh();
+            term.write(b"stty -echo; sleep 2; cat > /dev/null\r");
+            wait_until("sleep runs", || term.program(&Config::default()).as_deref() == Some("sleep"));
+            let lines = format!("{}\n", "x".repeat(63)).repeat(16 * 1024);
+
+            let started = Instant::now();
+            term.write(lines.as_bytes());
+
+            assert!(started.elapsed() < Duration::from_millis(500), "the write took {:?}", started.elapsed());
         }
     }
 
