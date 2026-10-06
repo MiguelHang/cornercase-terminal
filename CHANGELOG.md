@@ -2,6 +2,13 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.9.0
+
+- Jira: the issue browser has a **Jira** tab for Jira Cloud. Open it, type your site (`acme.atlassian.net`, or just `acme`), your email and an API token from id.atlassian.com, and its issues show up next to GitHub, Shortcut and Linear: read them (descriptions and comments are turned into Markdown), filter them by assignee or reporter, and press **start** to put an agent on one in a worktree on a `SHOP-77-…` branch.
+- **settings → Issues → Jira** holds the site, the email and the token, plus an optional **Jira filter**: a JQL condition such as `project = SHOP` for when your site has more than you want to see. `JIRA_API_TOKEN` in the environment works like the other trackers' variables.
+- If you hid some issue tabs before, the Jira tab is added at the end of your list once; hide it in settings if you don't use Jira.
+- Issues from different trackers are now sorted correctly in the **All** tab when their times come with a time zone.
+
 ## 0.8.0
 
 - A TODO list: click **`todo`** under `changes` (or `☐` in the compact bar) to open it in the column right of your panes. Add items with **`+ new todo`**, click an item's text to edit it (with a cursor you move with the arrows), click `[ ]` to check it off and drag items to reorder them. Done items sink to the bottom, struck through, and **`clear done`** removes them.
