@@ -672,7 +672,8 @@ impl App {
             }
             let (id, repo, tx) = (project.id, project.path.clone(), self.tx.clone());
             std::thread::spawn(move || {
-                let behind = panics::contain(|| upstream::check(&repo, &workspaces, fetch)).unwrap_or_default();
+                let behind = panics::contain(|| upstream::check(&repo, &workspaces, fetch))
+                    .unwrap_or_else(|| workspaces.iter().map(|(id, _)| (*id, 0)).collect());
                 let _ = tx.send(AppEvent::Behind { project: id, behind });
             });
         }
