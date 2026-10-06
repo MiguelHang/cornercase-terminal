@@ -26,7 +26,7 @@ pub enum Row {
     Fetch,
     Sidebar,
     DimPanes,
-    ContextLine,
+    Detail(Detail),
     Notifications,
     Updates,
     Token(Source),
@@ -45,7 +45,7 @@ impl Row {
             | Self::Fetch
             | Self::Sidebar
             | Self::DimPanes
-            | Self::ContextLine
+            | Self::Detail(_)
             | Self::Notifications
             | Self::Updates => "",
             Self::Token(_) => "Accounts",
@@ -60,7 +60,59 @@ impl Row {
             Self::Folder | Self::Fetch => Page::Worktrees,
             Self::DefaultAgent | Self::Submit | Self::Trust | Self::Kind(_) | Self::AddAgent => Page::Agents,
             Self::Token(_) | Self::Tab(_) => Page::Issues,
-            Self::Sidebar | Self::DimPanes | Self::ContextLine | Self::Notifications | Self::Updates => Page::Tui,
+            Self::Sidebar | Self::DimPanes | Self::Detail(_) | Self::Notifications | Self::Updates => Page::Tui,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detail {
+    Model,
+    Context,
+    Memory,
+}
+
+impl Detail {
+    fn on(self, config: &Config) -> bool {
+        match self {
+            Self::Model => config.model,
+            Self::Context => config.context,
+            Self::Memory => config.memory,
+        }
+    }
+
+    fn switch(self, config: &mut Config) -> &mut bool {
+        match self {
+            Self::Model => &mut config.model,
+            Self::Context => &mut config.context,
+            Self::Memory => &mut config.memory,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Context => "context",
+            Self::Memory => "memory",
+        }
+    }
+
+    fn note(self) -> &'static str {
+        match self {
+            Self::Model => "under a Claude Code or Codex tab, such as Opus 5.5",
+            Self::Context => "how full its context is, such as 23%",
+            Self::Memory => "the RAM its processes use, such as 1.2 GB",
+        }
+    }
+
+    fn notice(self, on: bool) -> &'static str {
+        match (self, on) {
+            (Self::Model, true) => "agent tabs show their model",
+            (Self::Model, false) => "agent tabs hide their model",
+            (Self::Context, true) => "agent tabs show how full their context is",
+            (Self::Context, false) => "agent tabs hide their context",
+            (Self::Memory, true) => "agent tabs show the memory they use",
+            (Self::Memory, false) => "agent tabs hide their memory",
         }
     }
 }
@@ -196,7 +248,16 @@ impl Settings {
         rows.extend(shown.iter().copied().chain(hidden).map(Row::Tab));
         rows.extend([Row::DefaultAgent, Row::Submit, Row::Trust]);
         rows.extend(self.listed_kinds().into_iter().map(Row::Kind));
-        rows.extend([Row::AddAgent, Row::Sidebar, Row::DimPanes, Row::ContextLine, Row::Notifications, Row::Updates]);
+        rows.extend([
+            Row::AddAgent,
+            Row::Sidebar,
+            Row::DimPanes,
+            Row::Detail(Detail::Model),
+            Row::Detail(Detail::Context),
+            Row::Detail(Detail::Memory),
+            Row::Notifications,
+            Row::Updates,
+        ]);
         rows.retain(|row| row.page() == self.page);
         rows
     }
@@ -275,10 +336,11 @@ impl Settings {
                 let notice = if on { "inactive panes are dimmed" } else { "every pane looks the same" };
                 self.save(Config { dim_inactive_panes: on, ..self.config.clone() }, notice.into())
             }
-            Row::ContextLine => {
-                let on = !self.config.context_line;
-                let notice = if on { "tabs show their model and context" } else { "tabs take one row" };
-                self.save(Config { context_line: on, ..self.config.clone() }, notice.into())
+            Row::Detail(detail) => {
+                let mut config = self.config.clone();
+                let on = !detail.on(&config);
+                *detail.switch(&mut config) = on;
+                self.save(config, detail.notice(on).into())
             }
             Row::Sidebar => self.pick_from(row, ui::Sidebar::choices()),
             Row::Notifications => self.pick_from(row, notify::choices()),
@@ -659,9 +721,9 @@ impl Settings {
                 let value = if config.dim_inactive_panes { "[x] dimmed" } else { "[ ] as bright as the active one" };
                 ("inactive panes".into(), value.into(), "in a split tab".into(), false)
             }
-            Row::ContextLine => {
-                let value = if config.context_line { "[x] model and context" } else { "[ ] hidden, tabs take one row" };
-                ("context line".into(), value.into(), "under a Claude Code or Codex tab".into(), false)
+            Row::Detail(detail) => {
+                let value = if detail.on(config) { "[x] shown" } else { "[ ] hidden" };
+                (detail.label().into(), value.into(), detail.note().into(), false)
             }
             Row::Sidebar => (
                 "sidebar".into(),
@@ -683,19 +745,7 @@ impl Settings {
                 let value = if config.auto_accept_trust_prompt { "[x] accepted for you" } else { "[ ] left to you" };
                 ("trust prompts".into(), value.into(), "\"do you trust this folder?\"".into(), false)
             }
-            Row::Kind(kind) => {
-                let args = agents::args(config, kind);
-                let modes = agents::modes(config, kind);
-                let mode = agents::mode_of(&args, &modes);
-                let extra = agents::extra_args(&args, &modes);
-                let mut value = mode.clone().unwrap_or_else(|| "default".into());
-                if !extra.is_empty() {
-                    value = format!("{value} + {}", agents::join_args(&extra));
-                }
-                let is_default = agents::resolve(config, None, None).as_deref() == Some(kind.as_str());
-                let note = if is_default { "the default agent".into() } else { String::new() };
-                (kind.clone(), value, note, mode.as_deref().is_some_and(agents::is_dangerous))
-            }
+            Row::Kind(kind) => kind_row(config, kind),
             Row::AddAgent => ("+ another agent…".into(), String::new(), String::new(), false),
         };
         ui::SettingsRow {
@@ -785,6 +835,20 @@ fn with_args(config: &Config, kind: &str, args: Vec<String>) -> Config {
         agent_args.insert(kind.to_string(), args);
     }
     Config { agent_args, ..config.clone() }
+}
+
+fn kind_row(config: &Config, kind: &str) -> (String, String, String, bool) {
+    let args = agents::args(config, kind);
+    let modes = agents::modes(config, kind);
+    let mode = agents::mode_of(&args, &modes);
+    let extra = agents::extra_args(&args, &modes);
+    let mut value = mode.clone().unwrap_or_else(|| "default".into());
+    if !extra.is_empty() {
+        value = format!("{value} + {}", agents::join_args(&extra));
+    }
+    let is_default = agents::resolve(config, None, None).as_deref() == Some(kind);
+    let note = if is_default { "the default agent".into() } else { String::new() };
+    (kind.to_string(), value, note, mode.as_deref().is_some_and(agents::is_dangerous))
 }
 
 #[cfg(test)]
@@ -1059,23 +1123,31 @@ mod tests {
         }
     }
 
-    mod context_line {
+    mod agent_tabs {
+        use rstest::rstest;
+
         use super::*;
 
-        #[test]
-        fn is_a_switch() {
+        #[rstest]
+        #[case::model(Detail::Model, |c: &Config| c.model)]
+        #[case::context(Detail::Context, |c: &Config| c.context)]
+        #[case::memory(Detail::Memory, |c: &Config| c.memory)]
+        fn each_part_is_a_switch(#[case] detail: Detail, #[case] on: fn(&Config) -> bool) {
             let mut s = settings();
-            go_to(&mut s, &Row::ContextLine);
-            assert!(!saved(press(&mut s, KeyCode::Enter)).context_line);
+            let before = on(&s.config);
+            go_to(&mut s, &Row::Detail(detail));
+            assert_eq!(on(&saved(press(&mut s, KeyCode::Enter))), !before);
         }
 
         #[test]
-        fn shows_whether_it_is_on() {
+        fn show_whether_each_part_is_on() {
             let mut s = settings();
-            s.config.context_line = false;
+            s.config.context = false;
             s.open_page(Page::Tui);
             let ui::Overlay::Settings(view) = s.view() else { panic!("not the settings") };
-            assert_eq!(view.rows[2].value, "[ ] hidden, tabs take one row");
+            let rows: Vec<(&str, &str)> =
+                view.rows[2..5].iter().map(|r| (r.label.as_str(), r.value.as_str())).collect();
+            assert_eq!(rows, [("model", "[x] shown"), ("context", "[ ] hidden"), ("memory", "[ ] hidden")]);
         }
     }
 
@@ -1086,7 +1158,18 @@ mod tests {
         fn comes_first_on_the_tui_page() {
             let mut s = settings();
             s.open_page(Page::Tui);
-            assert_eq!(s.rows(), [Row::Sidebar, Row::DimPanes, Row::ContextLine, Row::Notifications, Row::Updates]);
+            assert_eq!(
+                s.rows(),
+                [
+                    Row::Sidebar,
+                    Row::DimPanes,
+                    Row::Detail(Detail::Model),
+                    Row::Detail(Detail::Context),
+                    Row::Detail(Detail::Memory),
+                    Row::Notifications,
+                    Row::Updates
+                ]
+            );
         }
 
         #[test]

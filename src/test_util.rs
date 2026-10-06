@@ -13,6 +13,16 @@ pub fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     }
 }
 
+pub fn this_pid() -> i32 {
+    i32::try_from(std::process::id()).expect("pid fits in i32")
+}
+
+pub fn exited_pid() -> i32 {
+    let mut child = std::process::Command::new("/bin/sh").arg("-c").arg("exit 0").spawn().expect("spawn sh");
+    child.wait().expect("wait for sh");
+    i32::try_from(child.id()).expect("pid fits in i32")
+}
+
 pub struct TempDir(PathBuf);
 
 impl TempDir {
@@ -71,6 +81,46 @@ impl Drop for Sleeper {
     }
 }
 
+pub struct Family(std::process::Child);
+
+impl Family {
+    pub fn new() -> Self {
+        let child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("/bin/sh -c '/bin/sleep 30; :'; :")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sh");
+        let family = Self(child);
+        wait_until("the grandchild starts", || family.grandchild().is_some());
+        family
+    }
+
+    pub fn pid(&self) -> i32 {
+        i32::try_from(self.0.id()).expect("pid fits in i32")
+    }
+
+    pub fn child(&self) -> Option<i32> {
+        crate::process::children(self.pid()).first().copied()
+    }
+
+    pub fn grandchild(&self) -> Option<i32> {
+        crate::process::children(self.child()?).first().copied()
+    }
+}
+
+impl Drop for Family {
+    fn drop(&mut self) {
+        if let Some(pid) = self.grandchild().and_then(rustix::process::Pid::from_raw) {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 pub fn is_sh(name: &str) -> bool {
     matches!(name, "sh" | "bash" | "dash")
 }
@@ -111,15 +161,13 @@ impl FakeCodex {
             r#"#!/bin/sh
 exec 3>> "$1"
 while [ -d "$2" ] && [ ! -e "$2/quit" ]; do
-  if [ -e "$2/switch" ]; then
-    next=$(cat "$2/switch")
+  if mv "$2/switch" "$2/.switched" 2>/dev/null; then
+    next=$(cat "$2/.switched")
     exec 3>&-
     exec 3>> "$next"
-    rm "$2/switch"
   fi
-  if [ -e "$2/title" ]; then
-    printf '\033]0;%s\007' "$(cat "$2/title")"
-    rm "$2/title"
+  if mv "$2/title" "$2/.shown" 2>/dev/null; then
+    printf '\033]0;%s\007' "$(cat "$2/.shown")"
   fi
   sleep 0.02
 done

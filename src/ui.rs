@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 pub mod changes;
 
 use crate::activity::{self, Status};
-use crate::context::Context;
 use crate::emulator::Snapshot;
 use crate::markdown;
 use crate::split::{Dir, Node};
@@ -62,6 +61,8 @@ const TOAST_MARGIN: u16 = 1;
 const BEHIND_ICON: &str = "↓";
 const CONTEXT_SEPARATOR: &str = " · ";
 const MIN_MODEL_WIDTH: usize = 4;
+const MB: u64 = 1 << 20;
+const GB: u64 = 1 << 30;
 const WAITING_COLOR: Color = Color::Indexed(208);
 const GROUP_INDENT: &str = "  ";
 pub const GROUP_ICONS: [char; 12] = ['●', '◉', '◐', '◆', '■', '▲', '▼', '★', '✦', '♥', '♣', '♠'];
@@ -725,10 +726,6 @@ pub enum WorkspaceRow {
     Tab(usize, usize),
     NewTab(usize),
     Landing,
-}
-
-pub fn tab_lines(context: bool) -> u16 {
-    1 + u16::from(context)
 }
 
 pub fn workspace_rows(tabs: &[Vec<u16>]) -> Vec<WorkspaceRow> {
@@ -1719,7 +1716,20 @@ pub struct WorkspaceEntry {
 pub struct TabEntry {
     pub name: String,
     pub status: Option<Status>,
-    pub context: Option<Context>,
+    pub details: Details,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Details {
+    pub model: Option<String>,
+    pub percent: Option<u16>,
+    pub memory: Option<u64>,
+}
+
+impl Details {
+    pub fn lines(&self) -> u16 {
+        1 + u16::from(self.model.is_some() || self.percent.is_some() || self.memory.is_some())
+    }
 }
 
 impl From<&str> for TabEntry {
@@ -1730,7 +1740,7 @@ impl From<&str> for TabEntry {
 
 impl From<String> for TabEntry {
     fn from(name: String) -> Self {
-        Self { name, status: None, context: None }
+        Self { name, status: None, details: Details::default() }
     }
 }
 
@@ -1788,7 +1798,7 @@ impl View<'_> {
     }
 
     pub fn tab_lines(&self) -> Vec<Vec<u16>> {
-        self.workspaces.iter().map(|w| w.tabs.iter().map(|t| tab_lines(t.context.is_some())).collect()).collect()
+        self.workspaces.iter().map(|w| w.tabs.iter().map(|t| t.details.lines()).collect()).collect()
     }
 
     fn surface(&self) -> Color {
@@ -2862,8 +2872,8 @@ fn draw_workspaces(f: &mut Frame, view: &View, areas: &Areas) {
                 }
                 line.push(Span::styled(truncate_right(&tab.name, max), style));
                 draw_band(f, r, Line::from(line), bg);
-                if let Some(context) = &tab.context {
-                    draw_context(f, r, areas.pitch, context, 4 + icon_width);
+                if tab.details.lines() > 1 {
+                    draw_details(f, r, areas.pitch, &tab.details, 4 + icon_width);
                 }
                 draw_row_close(f, view, r, areas.pitch, bg);
             }
@@ -2909,33 +2919,42 @@ fn draw_issues_row(f: &mut Frame, view: &View, areas: &Areas) {
     }
 }
 
-fn draw_context(f: &mut Frame, row: Rect, pitch: u16, context: &Context, indent: usize) {
+fn draw_details(f: &mut Frame, row: Rect, pitch: u16, details: &Details, indent: usize) {
     let r = Rect { y: middle(row).y + 1, height: 1, ..row }.intersection(row);
     let close = row_close_button(row, pitch);
     let reserved = if close.bottom() > r.y { usize::from(close.width) } else { 0 };
-    let room = usize::from(r.width).saturating_sub(indent + reserved + 1);
     let dim = Style::default().fg(Color::DarkGray);
-    let Some(used) = context.percent else {
-        let line =
-            Line::from(vec![Span::raw(" ".repeat(indent)), Span::styled(truncate_right(&context.model, room), dim)]);
-        f.render_widget(Paragraph::new(line), r);
-        return;
-    };
-    let percent = format!("{used}%");
-    let level = match Severity::of(used) {
-        Severity::Normal => dim,
-        severity => Style::default().fg(severity_color(severity)),
-    };
-    let model_room = room.saturating_sub(percent.chars().count() + CONTEXT_SEPARATOR.chars().count());
+    let percent = details.percent.map(|used| {
+        let level = match Severity::of(used) {
+            Severity::Normal => dim,
+            severity => Style::default().fg(severity_color(severity)),
+        };
+        Span::styled(format!("{used}%"), level)
+    });
+    let memory = details.memory.map(|bytes| Span::styled(memory_size(bytes), dim));
+    let fixed: Vec<Span> = percent.into_iter().chain(memory).collect();
+    let separator = CONTEXT_SEPARATOR.chars().count();
+    let fixed_width = fixed.iter().map(|s| s.width() + separator).sum::<usize>();
+    let free = usize::from(r.width).saturating_sub(reserved + 1);
+    let indent = indent.min(free.saturating_sub(fixed_width.saturating_sub(separator)));
+    let model_room = free.saturating_sub(indent + fixed_width);
+    let model = details
+        .model
+        .as_ref()
+        .filter(|_| fixed.is_empty() || model_room >= MIN_MODEL_WIDTH)
+        .map(|model| Span::styled(truncate_right(model, model_room), dim));
     let mut line = vec![Span::raw(" ".repeat(indent))];
-    if model_room >= MIN_MODEL_WIDTH {
-        line.extend([
-            Span::styled(truncate_right(&context.model, model_room), dim),
-            Span::styled(CONTEXT_SEPARATOR, dim),
-        ]);
-    }
-    line.push(Span::styled(percent, level));
+    line.extend(model.into_iter().chain(fixed).flat_map(|part| [Span::styled(CONTEXT_SEPARATOR, dim), part]).skip(1));
     f.render_widget(Paragraph::new(Line::from(line)), r);
+}
+
+fn memory_size(bytes: u64) -> String {
+    let megabytes = bytes.saturating_add(MB / 2) / MB;
+    if megabytes < 1024 {
+        return format!("{megabytes} MB");
+    }
+    let tenths = bytes.saturating_mul(10).saturating_add(GB / 2) / GB;
+    format!("{}.{} GB", tenths / 10, tenths % 10)
 }
 
 fn status_icon(status: Status) -> Span<'static> {
@@ -3195,7 +3214,7 @@ mod tests {
     }
 
     fn tabs(counts: &[usize]) -> Vec<Vec<u16>> {
-        counts.iter().map(|&n| vec![tab_lines(false); n]).collect()
+        counts.iter().map(|&n| vec![Details::default().lines(); n]).collect()
     }
 
     fn render(view: &View) -> Terminal<TestBackend> {
@@ -4581,12 +4600,12 @@ mod tests {
     mod tab_context {
         use super::*;
 
-        fn opus(percent: u16) -> Context {
-            Context { model: "Opus 5.5".into(), percent: Some(percent) }
+        fn opus(percent: u16) -> Details {
+            Details { model: Some("Opus 5.5".into()), percent: Some(percent), memory: None }
         }
 
-        fn with_context(context: Option<Context>) -> View<'static> {
-            let claude = TabEntry { status: Some(Status::Working), context, ..TabEntry::from("claude") };
+        fn with_details(details: Details) -> View<'static> {
+            let claude = TabEntry { status: Some(Status::Working), details, ..TabEntry::from("claude") };
             View {
                 has_project: true,
                 workspaces: vec![WorkspaceEntry { name: "login".into(), tabs: vec![claude, "nvim".into()], behind: 0 }],
@@ -4606,11 +4625,11 @@ mod tests {
 
         #[test]
         fn renders_the_model_and_the_context_under_the_tab() {
-            insta::assert_snapshot!(render(&with_context(Some(opus(17)))).backend());
+            insta::assert_snapshot!(render(&with_details(opus(17))).backend());
         }
 
         fn codex(model: &str, percent: Option<u16>) -> View<'static> {
-            let mut view = with_context(Some(Context { model: model.into(), percent }));
+            let mut view = with_details(Details { model: Some(model.into()), percent, memory: None });
             let tab = &mut view.workspaces[0].tabs[0];
             tab.name = "codex".into();
             tab.status = None;
@@ -4657,24 +4676,70 @@ mod tests {
 
         #[test]
         fn the_tab_takes_a_second_row() {
-            assert_eq!(row(&with_context(Some(opus(17))), AREA, WorkspaceRow::Tab(0, 0)).height, 2);
+            assert_eq!(row(&with_details(opus(17)), AREA, WorkspaceRow::Tab(0, 0)).height, 2);
         }
 
         #[test]
         fn the_rows_below_move_down_one() {
-            let moved = row(&with_context(Some(opus(17))), AREA, WorkspaceRow::Tab(0, 1));
-            let before = row(&with_context(None), AREA, WorkspaceRow::Tab(0, 1));
+            let moved = row(&with_details(opus(17)), AREA, WorkspaceRow::Tab(0, 1));
+            let before = row(&with_details(Details::default()), AREA, WorkspaceRow::Tab(0, 1));
             assert_eq!(moved.y, before.y + 1);
         }
 
         #[rstest]
-        #[case::fits(26, "      Opus 5.5 · 17%")]
-        #[case::cuts_the_model(19, "      Opus… · 17%")]
-        #[case::keeps_the_percentage(16, "      17%")]
-        fn a_narrow_column_cuts_the_model_first(#[case] workspaces: u16, #[case] expected: &str) {
-            let v = View { widths: Widths { workspaces, ..Widths::default() }, ..with_context(Some(opus(17))) };
+        #[case::fits(26, None, "      Opus 5.5 · 17%")]
+        #[case::cuts_the_model(19, None, "      Opus… · 17%")]
+        #[case::keeps_the_percentage(16, None, "      17%")]
+        #[case::fits_with_the_memory(32, Some(GB * 12 / 10), "      Opus 5.5 · 17% · 1.2 GB")]
+        #[case::cuts_the_model_before_the_memory(30, Some(GB * 12 / 10), "      Opus 5… · 17% · 1.2 GB")]
+        #[case::drops_the_model_before_the_memory(26, Some(GB * 12 / 10), "      17% · 1.2 GB")]
+        #[case::moves_left_to_keep_the_memory(16, Some(GB * 12 / 10), "  17% · 1.2 GB")]
+        fn a_narrow_column_cuts_the_model_first(
+            #[case] workspaces: u16,
+            #[case] memory: Option<u64>,
+            #[case] expected: &str,
+        ) {
+            let v = View {
+                widths: Widths { workspaces, ..Widths::default() },
+                ..with_details(Details { memory, ..opus(17) })
+            };
             let r = row(&v, AREA, WorkspaceRow::Tab(0, 0));
             assert_eq!(line(&render(&v), r, 1), expected);
+        }
+
+        #[rstest]
+        #[case::the_model(Details { model: Some("Opus 5.5".into()), ..Details::default() }, "      Opus 5.5")]
+        #[case::the_context(Details { percent: Some(17), ..Details::default() }, "      17%")]
+        #[case::the_memory(Details { memory: Some(300 * MB), ..Details::default() }, "      300 MB")]
+        #[case::the_model_and_the_memory(Details { memory: Some(GB * 12 / 10), ..codex_model() }, "      gpt-5.4 · 1.2 GB")]
+        #[case::the_context_and_the_memory(Details { model: None, memory: Some(300 * MB), ..opus(17) }, "      17% · 300 MB")]
+        fn each_part_shows_without_the_others(#[case] details: Details, #[case] expected: &str) {
+            let v = with_details(details);
+            let r = row(&v, AREA, WorkspaceRow::Tab(0, 0));
+
+            assert_eq!((r.height, line(&render(&v), r, 1)), (2, expected.into()));
+        }
+
+        fn codex_model() -> Details {
+            Details { model: Some("gpt-5.4".into()), ..Details::default() }
+        }
+
+        #[test]
+        fn renders_the_memory_in_the_compact_layout() {
+            let view =
+                View { nav: Some(Nav::Workspaces), ..with_details(Details { memory: Some(GB * 12 / 10), ..opus(17) }) };
+
+            insta::assert_snapshot!(render_sized(&view, SMALL.width, SMALL.height).backend());
+        }
+
+        #[rstest]
+        #[case::megabytes(300 * MB, "300 MB")]
+        #[case::rounded_to_the_nearest_megabyte(300 * MB + MB * 6 / 10, "301 MB")]
+        #[case::nearly_a_gigabyte(GB - MB / 10, "1.0 GB")]
+        #[case::gigabytes(GB * 12 / 10, "1.2 GB")]
+        #[case::rounded_to_a_tenth(GB * 25 / 2, "12.5 GB")]
+        fn memory_reads_in_megabytes_then_gigabytes(#[case] bytes: u64, #[case] expected: &str) {
+            assert_eq!(memory_size(bytes), expected);
         }
 
         #[rstest]
@@ -4682,7 +4747,7 @@ mod tests {
         #[case::getting_full(80, WAITING_COLOR)]
         #[case::nearly_full(95, Color::Red)]
         fn the_percentage_turns_orange_then_red(#[case] percent: u16, #[case] colour: Color) {
-            let v = with_context(Some(opus(percent)));
+            let v = with_details(opus(percent));
             let r = row(&v, AREA, WorkspaceRow::Tab(0, 0));
             let t = render(&v);
             let end = u16::try_from(line(&t, r, 1).chars().count()).expect("fits");
@@ -4691,7 +4756,7 @@ mod tests {
 
         #[test]
         fn only_the_first_row_has_the_close_button() {
-            let v = with_context(Some(opus(17)));
+            let v = with_details(opus(17));
             let r = row(&v, AREA, WorkspaceRow::Tab(0, 0));
             let hit = |x: u16, y: u16| {
                 workspace_hit(areas().workspaces_list, areas().pitch, &v.tab_lines(), 0, Position::new(x, y))
@@ -4709,7 +4774,7 @@ mod tests {
 
         #[test]
         fn a_compact_band_shows_it_on_its_last_row() {
-            let v = View { nav: Some(Nav::Workspaces), ..with_context(Some(opus(17))) };
+            let v = View { nav: Some(Nav::Workspaces), ..with_details(opus(17)) };
             let r = row(&v, SMALL, WorkspaceRow::Tab(0, 0));
             let t = render_sized(&v, SMALL.width, SMALL.height);
             assert_eq!(
