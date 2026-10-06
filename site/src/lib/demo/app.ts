@@ -12,6 +12,8 @@ import {
   SIDEBARS,
   type Sidebar,
   type SidebarRow,
+  type TreeRow,
+  type TreeShape,
   type Widths,
   type WorkspaceRow,
   activeRow,
@@ -24,6 +26,10 @@ import {
   sidebarRows,
   type Details,
   tabLines,
+  treeActiveRow,
+  treeDrop,
+  treeLayout,
+  treeRows,
   workspaceDrop,
   workspaceLayout,
   workspaceRows,
@@ -104,9 +110,17 @@ const SOURCE_NAMES: Record<string, string> = { all: 'All', github: 'GitHub', sho
 const DOUBLE_CLICK = 400;
 const AUTO_SCROLL_EVERY = 150;
 
+interface Focus {
+  project: number | null;
+  workspace: number | null;
+  tab: number | null;
+  tree: boolean;
+}
+
 export type RowDragView =
   | { list: 'sidebar'; row: SidebarRow; landing: Landing | null }
-  | { list: 'workspaces'; row: WorkspaceRow; landing: Landing | null };
+  | { list: 'workspaces'; row: WorkspaceRow; landing: Landing | null }
+  | { list: 'tree'; row: TreeRow; landing: Landing | null };
 
 function moveBefore<T>(items: T[], from: number, before: number, active: number): number {
   const to = before > from ? before - 1 : before;
@@ -196,7 +210,7 @@ export class App {
   private frame: Frame | null = null;
   private grid = new Grid(this.cols, this.rows);
   private lastClick: { at: number; border: string } | null = null;
-  private followed: number | null = null;
+  private followed: Focus = { project: null, workspace: null, tab: null, tree: false };
   private needsDraw = true;
 
   on(listener: Listener): void {
@@ -293,17 +307,19 @@ export class App {
 
   private watchAgents(): void {
     const visible = this.visibleTab();
-    const measured = this.config.memory ? this.project() : undefined;
+    const tree = this.areas().tree;
+    const shown = (p: Project) => (tree ? !p.collapsed && !this.group(p.group)?.collapsed : p === this.project());
     const now = this.now();
     for (const p of this.projects) {
       for (const w of p.workspaces) {
+        const measured = this.config.memory && shown(p) && !(tree && w.collapsed);
         for (const t of w.tabs) {
           for (const pane of t.panes) {
             const agent = agentIn(pane);
             const fg = pane.shell.fg;
             pane.context = fg instanceof Agent ? fg.context : null;
             if (!agent) pane.memory = null;
-            else if (p === measured) pane.memory = agent.memory;
+            else if (measured) pane.memory = agent.memory;
             followAgent(pane, agent?.name ?? null);
             const status = watchPane(pane, agentActivity(agent), t === visible, now);
             if (status && agent) this.notify(`${agent.name} ${status === 'waiting' ? 'needs you' : 'finished'} in ${projectLabel(p)} › ${workspaceLabel(w)}`, status);
@@ -415,7 +431,37 @@ export class App {
   }
 
   tabLines(): number[][] {
-    return this.project()?.workspaces.map((w) => w.tabs.map((t) => tabLines(this.tabDetails(t)))) ?? [];
+    return this.project()?.workspaces.map((w) => this.workspaceLines(w)) ?? [];
+  }
+
+  private workspaceLines(w: Workspace): number[] {
+    return w.tabs.map((t) => tabLines(this.tabDetails(t)));
+  }
+
+  treeShape(): TreeShape {
+    return {
+      groups: this.groups.map((g) => g.collapsed),
+      projects: this.projects.map((p) => ({
+        group: this.groupIndex(p.group),
+        collapsed: !!p.collapsed,
+        workspaces: p.workspaces.map((w) => ({ collapsed: !!w.collapsed, tabs: p.collapsed || w.collapsed ? [] : this.workspaceLines(w) })),
+      })),
+    };
+  }
+
+  private treeRowOf(t: Target): TreeRow | null {
+    if (t.kind === 'group') {
+      const g = this.groupIndex(t.group);
+      return g === null ? null : { kind: 'group', g };
+    }
+    const p = this.projects.findIndex((x) => x.id === t.project);
+    if (p < 0) return null;
+    if (t.kind === 'project') return { kind: 'project', p };
+    const w = this.projects[p].workspaces.findIndex((x) => x.id === t.workspace);
+    if (w < 0) return null;
+    if (t.kind === 'workspace') return { kind: 'ws', p, w };
+    const tab = this.projects[p].workspaces[w].tabs.findIndex((x) => x.id === t.tab);
+    return tab < 0 ? null : { kind: 'tab', p, w, t: tab };
   }
 
   tabDetails(t: Tab): Details {
@@ -437,33 +483,30 @@ export class App {
     const h = this.hover;
     if (!d?.moved || !h) return null;
     const areas = this.areas();
-    const t = d.target;
-    if (t.kind === 'group' || t.kind === 'project') {
-      const i = t.kind === 'group' ? (this.groupIndex(t.group) ?? -1) : this.projects.findIndex((p) => p.id === t.project);
-      if (i < 0) return null;
-      const row: SidebarRow = t.kind === 'group' ? { kind: 'group', g: i } : { kind: 'project', p: i };
+    const row = this.treeRowOf(d.target);
+    if (!row) return null;
+    if (areas.tree) return { list: 'tree', row, landing: treeDrop(areas.list, this.treeShape(), this.projectsScroll, row, h.x, h.y) };
+    if (row.kind === 'group' || row.kind === 'project') {
       return { list: 'sidebar', row, landing: sidebarDrop(areas.list, areas.pitch, this.sidebarRows(), this.projectsScroll, row, h.x, h.y) };
     }
-    const p = this.project();
-    const w = p && p.id === t.project ? p.workspaces.findIndex((x) => x.id === t.workspace) : -1;
-    if (!p || w < 0) return null;
-    const row: WorkspaceRow = t.kind === 'workspace' ? { kind: 'ws', w } : { kind: 'tab', w, t: p.workspaces[w].tabs.findIndex((x) => x.id === t.tab) };
-    if (row.kind === 'tab' && row.t < 0) return null;
-    const landing = workspaceDrop(areas.workspacesList, areas.pitch, this.tabLines(), this.workspacesScroll, row, h.x, h.y);
-    return { list: 'workspaces', row, landing };
+    if ((row.kind !== 'ws' && row.kind !== 'tab') || row.p !== this.active) return null;
+    const listed: WorkspaceRow = row.kind === 'ws' ? { kind: 'ws', w: row.w } : { kind: 'tab', w: row.w, t: row.t };
+    const landing = workspaceDrop(areas.workspacesList, areas.pitch, this.tabLines(), this.workspacesScroll, listed, h.x, h.y);
+    return { list: 'workspaces', row: listed, landing };
   }
 
   private dropRow(target: Target): void {
     const spot = this.rowDragView()?.landing?.spot;
-    const p = this.project();
-    const w = p?.workspaces.findIndex((x) => 'workspace' in target && x.id === target.workspace) ?? -1;
-    if (!spot) return;
-    if (target.kind === 'group' && spot.kind === 'group') moveBefore(this.groups, this.groupIndex(target.group) ?? -1, spot.before, 0);
-    else if (target.kind === 'project' && spot.kind === 'project') this.moveProject(target.project, spot.group, spot.before);
-    else if (p && target.kind === 'workspace' && spot.kind === 'workspace') p.active = moveBefore(p.workspaces, w, spot.before, p.active);
-    else if (p && w >= 0 && target.kind === 'tab' && spot.kind === 'tab') {
-      const ws = p.workspaces[w];
-      ws.active = moveBefore(ws.tabs, ws.tabs.findIndex((x) => x.id === target.tab), spot.before, ws.active);
+    const row = this.treeRowOf(target);
+    if (!spot || !row) return;
+    if (row.kind === 'group' && spot.kind === 'group') moveBefore(this.groups, row.g, spot.before, 0);
+    else if (row.kind === 'project' && spot.kind === 'project') this.moveProject(this.projects[row.p].id, spot.group, spot.before);
+    else if (row.kind === 'ws' && spot.kind === 'workspace') {
+      const p = this.projects[row.p];
+      p.active = moveBefore(p.workspaces, row.w, spot.before, p.active);
+    } else if (row.kind === 'tab' && spot.kind === 'tab') {
+      const w = this.projects[row.p].workspaces[row.w];
+      w.active = moveBefore(w.tabs, row.t, spot.before, w.active);
     }
   }
 
@@ -486,10 +529,13 @@ export class App {
     const h = this.hover;
     if (!d?.moved || !h || this.now() - d.scrolled < AUTO_SCROLL_EVERY) return;
     const areas = this.areas();
-    const sidebar = d.target.kind === 'group' || d.target.kind === 'project';
-    const rows = sidebar
-      ? sidebarLayout(areas.list, areas.pitch, this.sidebarRows(), this.projectsScroll)
-      : workspaceLayout(areas.workspacesList, areas.pitch, workspaceRows(this.tabLines()), this.tabLines(), this.workspacesScroll);
+    const shape = this.treeShape();
+    const sidebar = areas.tree || d.target.kind === 'group' || d.target.kind === 'project';
+    const rows = areas.tree
+      ? treeLayout(areas.list, shape, treeRows(shape), this.projectsScroll)
+      : sidebar
+        ? sidebarLayout(areas.list, areas.pitch, this.sidebarRows(), this.projectsScroll)
+        : workspaceLayout(areas.workspacesList, areas.pitch, workspaceRows(this.tabLines()), this.tabLines(), this.workspacesScroll);
     const delta = rows.edge(h.x, h.y);
     if (!delta) return;
     if (sidebar) this.projectsScroll = rows.scrolled(delta);
@@ -501,12 +547,45 @@ export class App {
 
   private follow(): void {
     const p = this.project();
-    if (!p || p.id === this.followed) return;
-    this.followed = p.id;
-    const { list, pitch } = layout(this.cols, this.rows, this.widths, 'projects', false, this.sidebar());
+    const { list, pitch, tree } = layout(this.cols, this.rows, this.widths, 'projects', false, this.sidebar());
+    const focus: Focus = { project: p?.id ?? null, workspace: this.workspace()?.id ?? null, tab: this.tab()?.id ?? null, tree };
+    const before = this.followed;
+    if (focus.project === before.project && focus.workspace === before.workspace && focus.tab === before.tab && tree === before.tree) return;
+    this.followed = focus;
+    if (before.project !== null && (focus.project !== before.project || focus.workspace !== before.workspace)) this.unfoldFocus();
+    if (tree) return this.revealInTree(list);
+    if (!p || (focus.project === before.project && !before.tree)) return;
     const sidebar = this.sidebarRows();
     const i = activeRow(sidebar, this.active, this.groupIndex(p.group));
     if (i >= 0) this.projectsScroll = sidebarLayout(list, pitch, sidebar, this.projectsScroll).reveal(i);
+  }
+
+  private revealInTree(list: Rect): void {
+    const p = this.project();
+    if (!p) return;
+    const w = p.workspaces[p.active];
+    const shape = this.treeShape();
+    const rows = treeRows(shape);
+    const shown = [rows.findIndex((r) => r.kind === 'project' && r.p === this.active), treeActiveRow(rows, shape, this.active, p.active, w?.tabs.length ? w.active : null)];
+    for (const i of shown) if (i >= 0) this.projectsScroll = treeLayout(list, shape, rows, this.projectsScroll).reveal(i);
+  }
+
+  private unfoldFocus(): void {
+    const p = this.project();
+    if (!p) return;
+    p.collapsed = false;
+    const w = p.workspaces[p.active];
+    if (w) w.collapsed = false;
+    const g = this.group(p.group);
+    if (this.followed.tree && g) g.collapsed = false;
+  }
+
+  toggleFold(p: number, w?: number): void {
+    const project = this.projects[p];
+    const folded = w === undefined ? project : project?.workspaces[w];
+    if (!folded) return;
+    folded.collapsed = !folded.collapsed;
+    this.dirty();
   }
 
   toggleGroup(g: number): void {
@@ -545,41 +624,41 @@ export class App {
     return `Close the project ${projectLabel(p)}?${stopped} Folders and worktrees stay on disk.`;
   }
 
-  askCloseWorkspace(w: number): void {
-    const p = this.project();
-    const ws = p?.workspaces[w];
-    if (!p || !ws) return;
-    if (ws.worktree) return this.closeWorkspace(w);
-    this.overlay = { kind: 'closeWorkspace', project: p.id, workspace: ws.id };
+  askCloseWorkspace(p: number, w: number): void {
+    const project = this.projects[p];
+    const ws = project?.workspaces[w];
+    if (!project || !ws) return;
+    if (ws.worktree) return this.closeWorkspace(p, w);
+    this.overlay = { kind: 'closeWorkspace', project: project.id, workspace: ws.id };
     this.dirty();
   }
 
-  askCloseTab(w: number, t: number): void {
-    const p = this.project();
-    const ws = p?.workspaces[w];
+  askCloseTab(p: number, w: number, t: number): void {
+    const project = this.projects[p];
+    const ws = project?.workspaces[w];
     const tab = ws?.tabs[t];
-    if (!p || !ws || !tab) return;
-    this.overlay = { kind: 'closeTab', project: p.id, workspace: ws.id, tab: tab.id };
+    if (!project || !ws || !tab) return;
+    this.overlay = { kind: 'closeTab', project: project.id, workspace: ws.id, tab: tab.id };
     this.dirty();
   }
 
-  private closeTarget(project: number, workspace: number, tab?: number): { w: number; t: number } | null {
-    if (this.project()?.id !== project) return null;
-    const w = this.project()?.workspaces.findIndex((x) => x.id === workspace) ?? -1;
-    const t = tab === undefined ? 0 : (this.project()?.workspaces[w]?.tabs.findIndex((x) => x.id === tab) ?? -1);
-    return w < 0 || t < 0 ? null : { w, t };
+  private closeTarget(project: number, workspace: number, tab?: number): { p: number; w: number; t: number } | null {
+    const p = this.projects.findIndex((x) => x.id === project);
+    const w = this.projects[p]?.workspaces.findIndex((x) => x.id === workspace) ?? -1;
+    const t = tab === undefined ? 0 : (this.projects[p]?.workspaces[w]?.tabs.findIndex((x) => x.id === tab) ?? -1);
+    return p < 0 || w < 0 || t < 0 ? null : { p, w, t };
   }
 
   closeWorkspaceMessage(project: number, workspace: number): string {
     const at = this.closeTarget(project, workspace);
-    const ws = at && this.project()?.workspaces[at.w];
+    const ws = at && this.projects[at.p].workspaces[at.w];
     if (!ws) return '';
     return `Close the workspace ${workspaceLabel(ws)}?${stoppedTabs(ws.tabs.length)}`;
   }
 
   closeTabMessage(project: number, workspace: number, tab: number): string {
     const at = this.closeTarget(project, workspace, tab);
-    const t = at && this.project()?.workspaces[at.w].tabs[at.t];
+    const t = at && this.projects[at.p].workspaces[at.w].tabs[at.t];
     if (!t) return '';
     return `Close the tab ${tabLabel(t)}? The programs running in it are stopped.`;
   }
@@ -601,10 +680,10 @@ export class App {
     if (o?.kind === 'closeProject') this.closeProject(o.project);
     else if (o?.kind === 'closeWorkspace') {
       const at = this.closeTarget(o.project, o.workspace);
-      if (at) this.closeWorkspace(at.w);
+      if (at) this.closeWorkspace(at.p, at.w);
     } else if (o?.kind === 'closeTab') {
       const at = this.closeTarget(o.project, o.workspace, o.tab);
-      if (at) this.closeTab(at.w, at.t);
+      if (at) this.closeTab(at.p, at.w, at.t);
     } else if (o?.kind === 'deleteGroup') this.deleteGroup(o.group);
   }
 
@@ -648,6 +727,7 @@ export class App {
 
   selectProject(i: number): void {
     this.active = i;
+    this.unfoldFocus();
     if (this.nav) this.nav = 'workspaces';
     this.workspacesScroll = 0;
     this.emit('select', 'project');
@@ -666,65 +746,68 @@ export class App {
     this.dirty();
   }
 
-  selectWorkspace(w: number): void {
-    const p = this.project();
-    if (!p) return;
-    p.active = w;
+  private goto(p: number, w: number, t?: number): void {
+    const project = this.projects[p];
+    const ws = project?.workspaces[w];
+    if (!ws) return;
     this.nav = null;
+    this.active = p;
+    project.active = w;
+    if (t !== undefined && ws.tabs[t]) ws.active = t;
+    this.unfoldFocus();
+  }
+
+  selectWorkspace(p: number, w: number): void {
+    this.goto(p, w);
     this.dirty();
   }
 
-  selectTab(w: number, t: number): void {
-    const p = this.project();
-    if (!p) return;
-    p.active = w;
-    p.workspaces[w].active = t;
-    this.nav = null;
+  selectTab(p: number, w: number, t: number): void {
+    this.goto(p, w, t);
     this.selection = null;
     this.emit('select', 'tab');
     this.dirty();
   }
 
-  addTab(w: number): void {
-    const p = this.project();
-    if (!p) return;
-    const ws = p.workspaces[w];
-    ws.tabs.push(this.newTab([this.newPane(p, ws)]));
-    p.active = w;
+  addTab(p: number, w: number): void {
+    const project = this.projects[p];
+    const ws = project?.workspaces[w];
+    if (!ws) return;
+    ws.tabs.push(this.newTab([this.newPane(project, ws)]));
+    this.active = p;
+    project.active = w;
     ws.active = ws.tabs.length - 1;
     this.nav = null;
     this.emit('narrate', 'A fresh tab. Type `help` to see what this little demo shell can do.');
     this.dirty();
   }
 
-  closeTab(w: number, t: number): void {
-    const p = this.project();
-    if (!p) return;
-    const ws = p.workspaces[w];
-    const tab = ws.tabs[t];
-    if (!tab) return;
+  closeTab(p: number, w: number, t: number): void {
+    const ws = this.projects[p]?.workspaces[w];
+    const tab = ws?.tabs[t];
+    if (!ws || !tab) return;
     for (const pane of tab.panes) pane.shell.fg?.dispose?.();
     ws.tabs.splice(t, 1);
     ws.active = Math.max(0, Math.min(ws.active, ws.tabs.length - 1));
     this.dirty();
   }
 
-  closeWorkspace(w: number): void {
-    const p = this.project();
-    if (!p) return;
-    const ws = p.workspaces[w];
+  closeWorkspace(p: number, w: number): void {
+    const project = this.projects[p];
+    const ws = project?.workspaces[w];
+    if (!ws) return;
     if (ws.worktree) {
-      this.overlay = { kind: 'remove', project: p.id, workspace: ws.id };
+      this.overlay = { kind: 'remove', project: project.id, workspace: ws.id };
       this.dirty();
       return;
     }
-    if (p.workspaces.length === 1) {
+    if (project.workspaces.length === 1) {
       ws.tabs = [];
       this.dirty();
       return;
     }
-    p.workspaces.splice(w, 1);
-    p.active = Math.max(0, Math.min(p.active, p.workspaces.length - 1));
+    project.workspaces.splice(w, 1);
+    project.active = Math.max(0, Math.min(project.active, project.workspaces.length - 1));
     this.dirty();
   }
 
@@ -780,7 +863,7 @@ export class App {
   }
 
   sidebar(): Sidebar {
-    return SIDEBARS.find(([id]) => id === this.config.sidebar)?.[0] ?? 'side_by_side';
+    return SIDEBARS.find(([id]) => id === this.config.sidebar)?.[0] ?? 'projects_on_top';
   }
 
   toggleNav(): void {
@@ -1138,10 +1221,10 @@ export class App {
     this.dirty();
   }
 
-  openNewWorkspace(): void {
-    const p = this.project();
-    if (!p) return;
-    this.overlay = { kind: 'newWorkspace', project: p.id, input: '', worktree: p.repo ? true : null };
+  openNewWorkspace(p: number): void {
+    const project = this.projects[p];
+    if (!project) return;
+    this.overlay = { kind: 'newWorkspace', project: project.id, input: '', worktree: project.repo ? true : null };
     this.emit('narrate', 'Name it. In a repository it gets its own branch and folder, so nothing collides.');
     this.dirty();
   }
@@ -1196,6 +1279,7 @@ export class App {
       const w = o.worktree ? this.addWorkspace(p, name, true) : this.addWorkspace(p, p.workspaces[0]?.branch ?? 'main', false, name);
       w.tabs.push(this.newTab([this.newPane(p, w)]));
       p.active = p.workspaces.length - 1;
+      this.active = this.projects.indexOf(p);
       this.overlay = null;
       this.emit('narrate', o.worktree ? `A fresh copy of the repo on ${name}, .env included.` : 'A new workspace in the project folder.');
       this.dirty();
@@ -1322,10 +1406,7 @@ export class App {
           name: label,
           context: project,
           keys,
-          go: () => {
-            this.active = pi;
-            p.active = wi;
-          },
+          go: () => this.goto(pi, wi),
           order: order++,
         });
         w.tabs.forEach((t, ti) => {
@@ -1335,11 +1416,7 @@ export class App {
             name,
             context: `${project} › ${label}`,
             keys: [name, ...keys],
-            go: () => {
-              this.active = pi;
-              p.active = wi;
-              w.active = ti;
-            },
+            go: () => this.goto(pi, wi, ti),
             order: order++,
           });
         });
@@ -1471,7 +1548,7 @@ export class App {
       return rows;
     }
     return [
-      { id: 'sidebar', section: '', label: 'sidebar', value: this.sidebar(), note: 'where the workspaces column goes' },
+      { id: 'sidebar', section: '', label: 'sidebar', value: this.sidebar(), note: 'how projects, workspaces and tabs are laid out' },
       { id: 'dim', section: '', label: 'inactive panes', value: c.dim ? '[x] dimmed' : '[ ] as bright as the active one', note: 'in a split tab' },
       ...DETAILS.map(([id, note]) => ({ id, section: '', label: id, value: c[id] ? '[x] shown' : '[ ] hidden', note })),
       { id: 'notify', section: '', label: 'desktop notifications', value: c.notify, note: 'when an agent in another tab needs you or finishes' },
@@ -1518,7 +1595,7 @@ export class App {
       o.notice = c.updates ? 'cornercase looks for new versions' : 'cornercase no longer looks for new versions';
     } else if (row.id === 'sidebar') {
       const items = SIDEBARS.map(([value, note]) => ({ value, note }));
-      o.pick = { row: row.id, title: 'Where should the workspaces column go?', items, selected: Math.max(0, items.findIndex((i) => i.value === this.sidebar())), filter: '' };
+      o.pick = { row: row.id, title: 'How should projects, workspaces and tabs be laid out?', items, selected: Math.max(0, items.findIndex((i) => i.value === this.sidebar())), filter: '' };
     } else if (row.id === 'notify') {
       const items = NOTIFY_CHOICES.map(([value, note]) => ({ value, note }));
       o.pick = { row: row.id, title: 'How should your terminal notify you?', items, selected: Math.max(0, items.findIndex((i) => i.value === c.notify)), filter: '' };

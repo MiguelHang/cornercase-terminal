@@ -272,7 +272,7 @@ impl Drop for Harness {
 }
 
 fn columns() -> u16 {
-    ui::SIDEBAR_WIDTH + ui::WORKSPACES_WIDTH + ui::PANE_PADDING
+    areas().pane.x
 }
 
 fn entry(name: &str) -> String {
@@ -301,7 +301,7 @@ fn workspace_row(tabs: &[usize], row: WorkspaceRow) -> Position {
 }
 
 fn areas() -> ui::Areas {
-    ui::layout(AREA, ui::Widths::default())
+    ui::layout_with(AREA, ui::Widths::default(), false, ui::Sidebar::default())
 }
 
 const NEW_MENU: [&str; 2] = ["open project", "new group"];
@@ -735,8 +735,15 @@ fn a_todo_typed_in_the_panel_is_saved_next_to_the_session() {
     let mut app = Harness::start();
     app.click(areas().todo_button.as_position());
     app.wait_for("the todo panel opens", |s| s.contains("+ new todo"));
-    let panel = ui::layout_with(AREA, ui::Widths::default(), true, ui::Sidebar::SideBySide).changes;
-    let view = ui::todo::View { items: Vec::new(), scroll: 0, adding: None, light: false, drag: None };
+    let panel = ui::layout_with(AREA, ui::Widths::default(), true, ui::Sidebar::default()).changes;
+    let view = ui::todo::View {
+        items: Vec::new(),
+        scroll: 0,
+        adding: None,
+        light: false,
+        muted: ratatui::style::Color::DarkGray,
+        drag: None,
+    };
     let button = ui::todo::rows(panel, &view).button();
 
     app.click(button.as_position());
@@ -755,7 +762,7 @@ fn dragging_a_border_resizes_the_shell_and_is_saved() {
     app.send(format!("\x1b[<0;{from};{y}M\x1b[<32;{to};{y}M\x1b[<0;{to};{y}m").as_bytes());
     app.send(b"stty size\r");
 
-    let pane = COLS - ui::SIDEBAR_WIDTH - 10 - ui::WORKSPACES_WIDTH - ui::PANE_PADDING;
+    let pane = areas().pane.width - 10;
     app.wait_for("the shell sees the narrower pane", |s| s.contains(&format!("{ROWS} {pane}")));
     let widths = format!("\"projects\": {}", ui::SIDEBAR_WIDTH + 10);
     app.session.wait_for_saved("the widths are saved", |saved| saved.contains(&widths));
@@ -1046,9 +1053,10 @@ fn a_workspace_with_its_own_worktree_is_created_and_removed() {
     app.wait_for("the form opens", |s| s.contains("with its own worktree"));
     app.send(b"e2e/login\r");
 
-    let label_row = ui::workspace_row(workspaces_list(), 1, &tab_lines(&[1, 1]), 0, WorkspaceRow::Workspace(1));
     app.wait_for("the worktree workspace opens", |s| s.contains("e2e/login") && !s.contains("cancel"));
-    assert!(app.row(label_row.y).contains("e2e/login"), "workspace row: {:?}", app.row(label_row.y));
+    let list = workspaces_list();
+    let y = (list.y..list.bottom()).find(|&y| app.row(y).contains("e2e/login")).expect("the workspace row");
+    let label_row = Rect { y, height: 1, ..list };
     let checkout = worktrees.join(&repo_name).join("e2e-login");
     assert_eq!(std::fs::read_to_string(checkout.join(".env")).ok().as_deref(), Some("TOKEN=1\n"));
 
