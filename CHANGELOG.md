@@ -2,6 +2,11 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.8.1
+
+- In the compact layout (below 90 columns, as on a phone over SSH), every project, workspace and tab row now shows its `×` all the time, dimmed, instead of only on hover, which touch screens don't have.
+- Because it is easy to tap by accident there, closing a tab or a workspace in the compact layout asks first, as closing a project always does. The wide layout still closes them at once.
+
 ## 0.8.0
 
 - A TODO list: click **`todo`** under `changes` (or `☐` in the compact bar) to open it in the column right of your panes. Add items with **`+ new todo`**, click an item's text to edit it (with a cursor you move with the arrows), click `[ ]` to check it off and drag items to reorder them. Done items sink to the bottom, struck through, and **`clear done`** removes them.
