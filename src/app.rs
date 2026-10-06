@@ -47,6 +47,7 @@ use crate::ui::{self, FormHit, PickerHit, SidebarHit, SidebarRow, WorkspaceHit, 
 use crate::update::{self, Install, Release, Updates};
 use crate::upstream;
 use crate::usage;
+use crate::vscode;
 use crate::worktree;
 
 mod control;
@@ -247,6 +248,7 @@ enum MenuAction {
     SetGroup(u64, Option<u64>),
     GroupStyle(u64),
     DeleteGroup(u64),
+    AddProject(u64),
     OpenProject,
     NewGroup,
     Pane(u64, PaneAction),
@@ -263,6 +265,7 @@ const UNLOCK_SUBMIT: &str = "unlock and remove";
 const UNCOMMITTED_TOO: &str = "It has uncommitted changes, which are deleted.";
 const MAX_LOCK_REASON: usize = 100;
 const PICKER_SUBMIT: &str = "open";
+const VSCODE_TAG: &str = "vs code";
 const NEW_GROUP_HINT: &str = "right-click a project or its ⋯ to move it into the group";
 const WORKTREE_TOGGLE: &str = "with its own worktree";
 const WHEEL_ROWS: isize = 3;
@@ -315,7 +318,7 @@ enum Overlay {
     Settings(Box<Settings>),
     Rename { target: Target, input: String },
     RemoveWorkspace { project: u64, workspace: u64, check: Check, lock: Option<worktree::Lock> },
-    Picker(Picker),
+    Picker { picker: Picker, group: Option<u64> },
     Issues(Box<Browser>),
     Search(Search),
     Update(UpdateStep),
@@ -338,7 +341,7 @@ impl Overlay {
             Self::Settings(_) => "settings",
             Self::Rename { .. } => "rename",
             Self::RemoveWorkspace { .. } => "remove workspace",
-            Self::Picker(_) => "folder picker",
+            Self::Picker { .. } => "folder picker",
             Self::Issues(_) => "issues",
             Self::Search(_) => "search",
             Self::Update(_) => "update",
@@ -1618,7 +1621,7 @@ impl App {
         match &self.overlay {
             Some(Overlay::Menu { .. }) if key.code == KeyCode::Esc => self.overlay = None,
             None if self.nav.is_some() && key.code == KeyCode::Esc => self.nav = None,
-            Some(Overlay::Picker(_)) => return self.picker_key(key, area),
+            Some(Overlay::Picker { .. }) => return self.picker_key(key, area),
             Some(Overlay::Branches(_)) => self.branches_key(key, area),
             Some(Overlay::Issues(_)) => return self.issues_key(key, area),
             Some(Overlay::Settings(_)) => self.settings_key(key, area),
@@ -2565,14 +2568,77 @@ impl App {
         Ok(workspace.tabs.len() - 1)
     }
 
-    fn open_picker(&mut self) {
+    fn open_picker(&mut self, group: Option<u64>) {
         let home = self.home.as_deref();
-        let near_active = self.project().and_then(|p| p.path.parent().map(Path::to_path_buf));
-        let picker = near_active
+        let in_group = group.and_then(|g| self.projects.iter().find(|p| p.group == Some(g)));
+        let near = in_group.or_else(|| self.project()).and_then(|p| p.path.parent().map(Path::to_path_buf));
+        let picker = near
             .and_then(|dir| Picker::open(&dir, home).ok())
             .or_else(|| home.and_then(|dir| Picker::open(dir, home).ok()))
             .or_else(|| Picker::open(Path::new("/"), home).ok());
-        self.overlay = picker.map(Overlay::Picker);
+        self.overlay = picker.map(|picker| Overlay::Picker { picker, group });
+    }
+
+    fn open_chosen(&mut self, path: PathBuf, group: Option<u64>, area: Rect) -> Result<()> {
+        if !(vscode::is_workspace(&path) && path.is_file()) {
+            self.overlay = None;
+            return self.open_into(path, group, None, area);
+        }
+        match vscode::read(&path) {
+            Ok(workspace) => {
+                self.overlay = None;
+                self.import_workspace(workspace, group, area)
+            }
+            Err(e) => {
+                if let Some(Overlay::Picker { picker, .. }) = &mut self.overlay {
+                    picker.fail(e.to_string());
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn open_into(&mut self, dir: PathBuf, group: Option<u64>, name: Option<String>, area: Rect) -> Result<()> {
+        let before = self.projects.len();
+        self.open_project(dir, area)?;
+        let added = self.projects.len() > before;
+        let Some(project) = self.projects.get_mut(self.active) else { return Ok(()) };
+        if added && name.is_some() {
+            project.name = name;
+        }
+        if let Some(g) = group {
+            project.group = Some(g);
+            if let Some(entry) = self.group_mut(g) {
+                entry.collapsed = false;
+            }
+        }
+        Ok(())
+    }
+
+    fn import_workspace(&mut self, workspace: vscode::Workspace, group: Option<u64>, area: Rect) -> Result<()> {
+        let existing = group.or_else(|| self.groups.iter().find(|g| g.entry.name == workspace.name).map(|g| g.id));
+        let group = existing.unwrap_or_else(|| self.add_group(workspace.name.clone()));
+        let (mut first, mut opened, mut missing) = (None, 0, 0);
+        for folder in workspace.folders {
+            if !folder.path.is_dir() {
+                missing += 1;
+                continue;
+            }
+            let folder_name = folder.path.file_name().map(|n| n.to_string_lossy().into_owned());
+            let name = folder.name.filter(|n| Some(n) != folder_name.as_ref());
+            self.open_into(folder.path, Some(group), name, area)?;
+            opened += 1;
+            first = first.or_else(|| self.project().map(|p| p.id));
+        }
+        if opened == 0 && existing.is_none() {
+            self.delete_group(group);
+        }
+        if let Some(i) = first.and_then(|id| self.project_index(id)) {
+            self.active = i;
+        }
+        let name = self.group(group).map_or(workspace.name, |g| g.name.clone());
+        self.toast = Some(Toast::new(import_message(&name, opened, missing), ui::ToastIcon::Check));
+        Ok(())
     }
 
     fn picker_rows(area: Rect) -> usize {
@@ -2580,14 +2646,13 @@ impl App {
     }
 
     fn picker_key(&mut self, key: KeyEvent, area: Rect) -> Result<()> {
-        let Some(Overlay::Picker(picker)) = &mut self.overlay else { return Ok(()) };
-        let rows = Self::picker_rows(area);
+        let Some(Overlay::Picker { picker, group }) = &mut self.overlay else { return Ok(()) };
+        let (group, rows) = (*group, Self::picker_rows(area));
         match key.code {
             KeyCode::Esc => self.overlay = None,
             KeyCode::Enter => {
-                if let Some(dir) = picker.submit() {
-                    self.overlay = None;
-                    return self.open_project(dir, area);
+                if let Some(path) = picker.submit() {
+                    return self.open_chosen(path, group, area);
                 }
             }
             KeyCode::Backspace => picker.pop(),
@@ -2602,18 +2667,21 @@ impl App {
     }
 
     fn picker_mouse(&mut self, ev: MouseEvent, pos: Position, area: Rect) -> Result<()> {
-        let Some(Overlay::Picker(picker)) = &mut self.overlay else { return Ok(()) };
-        let rows = Self::picker_rows(area);
+        let Some(Overlay::Picker { picker, group }) = &mut self.overlay else { return Ok(()) };
+        let (group, rows) = (*group, Self::picker_rows(area));
         match ev.kind {
             MouseEventKind::ScrollUp => picker.scroll_by(-WHEEL_ROWS, rows),
             MouseEventKind::ScrollDown => picker.scroll_by(WHEEL_ROWS, rows),
             MouseEventKind::Down(MouseButton::Left) => {
                 match ui::picker_hit(area, PICKER_SUBMIT, picker.items().len(), picker.scroll(), pos) {
-                    Some(PickerHit::Item(i)) => picker.enter(i),
+                    Some(PickerHit::Item(i)) => {
+                        if let Some(path) = picker.choose(i) {
+                            return self.open_chosen(path, group, area);
+                        }
+                    }
                     Some(PickerHit::Submit) => {
                         let dir = picker.dir().to_path_buf();
-                        self.overlay = None;
-                        return self.open_project(dir, area);
+                        return self.open_chosen(dir, group, area);
                     }
                     Some(PickerHit::Cancel) => self.overlay = None,
                     None => {}
@@ -3288,7 +3356,12 @@ impl App {
 
     fn group_menu(&self, g: usize) -> Vec<MenuAction> {
         let id = self.groups[g].id;
-        vec![MenuAction::Rename(Target::Group(id)), MenuAction::GroupStyle(id), MenuAction::DeleteGroup(id)]
+        vec![
+            MenuAction::AddProject(id),
+            MenuAction::Rename(Target::Group(id)),
+            MenuAction::GroupStyle(id),
+            MenuAction::DeleteGroup(id),
+        ]
     }
 
     fn open_tree_menu(&mut self, list: Rect, pos: Position) {
@@ -3366,7 +3439,7 @@ impl App {
     }
 
     fn overlay_mouse(&mut self, ev: MouseEvent, pos: Position, area: Rect) -> Result<()> {
-        if matches!(self.overlay, Some(Overlay::Picker(_))) {
+        if matches!(self.overlay, Some(Overlay::Picker { .. })) {
             return self.picker_mouse(ev, pos, area);
         }
         if matches!(self.overlay, Some(Overlay::Search(_))) {
@@ -3434,6 +3507,7 @@ impl App {
             MenuAction::SetGroup(_, Some(id)) => self.group(id).map(ui::GroupEntry::label).unwrap_or_default(),
             MenuAction::GroupStyle(_) => "icon and colour".into(),
             MenuAction::DeleteGroup(_) => "delete group".into(),
+            MenuAction::AddProject(_) => "add project".into(),
             MenuAction::OpenProject => "open project".into(),
             MenuAction::NewGroup => "new group".into(),
             MenuAction::Pane(_, action) => action.label().into(),
@@ -3467,9 +3541,13 @@ impl App {
             }
             MenuAction::GroupStyle(group) => self.overlay = Some(Overlay::GroupStyle { group }),
             MenuAction::DeleteGroup(group) => self.overlay = Some(Overlay::DeleteGroup { group }),
+            MenuAction::AddProject(group) => {
+                self.nav = None;
+                self.open_picker(Some(group));
+            }
             MenuAction::OpenProject => {
                 self.nav = None;
-                self.open_picker();
+                self.open_picker(None);
             }
             MenuAction::NewGroup => {
                 self.nav = None;
@@ -4140,7 +4218,7 @@ impl App {
     }
 
     fn handle_paste(&mut self, text: &str) {
-        if let Some(Overlay::Picker(picker)) = &mut self.overlay {
+        if let Some(Overlay::Picker { picker, .. }) = &mut self.overlay {
             text.chars().filter(|c| !c.is_control()).for_each(|c| picker.push(c));
             return;
         }
@@ -4403,7 +4481,7 @@ impl App {
                 note: None,
                 submit: overlay.submit_label(),
             }),
-            Overlay::Picker(picker) => Self::picker_view(picker, home),
+            Overlay::Picker { picker, group } => Self::picker_view(picker, group.is_some(), home),
             Overlay::Issues(b) => b.view(area, issues::now()),
             Overlay::Search(search) => self.search_view(search),
             Overlay::Update(step) => self.update_view(step, area),
@@ -4481,22 +4559,26 @@ impl App {
         })
     }
 
-    fn picker_view(picker: &Picker, home: Option<&Path>) -> ui::Overlay {
+    fn picker_view(picker: &Picker, into_group: bool, home: Option<&Path>) -> ui::Overlay {
         let items = picker.items();
         let dir = ui::display_path(picker.dir(), home);
         let hint = match picker.selected().and_then(|i| items.get(i)) {
             Some(item) if item.name == ".." => "enter goes up".into(),
+            Some(item) if item.workspace => format!("enter imports {}", item.name),
             Some(item) => format!("enter goes into {}", item.name),
             None if picker.filter().is_empty() => format!("enter opens {dir}"),
             None => String::new(),
         };
         ui::Overlay::Picker(ui::Picker {
-            title: "open project",
+            title: if into_group { "add project" } else { "open project" },
             path: if dir.ends_with('/') { dir } else { format!("{dir}/") },
             filter: picker.filter().to_string(),
             items: items
                 .iter()
-                .map(|item| ui::Entry { name: item.name.clone(), branch: item.branch.clone() })
+                .map(|item| ui::Entry {
+                    name: item.name.clone(),
+                    branch: if item.workspace { Some(VSCODE_TAG.into()) } else { item.branch.clone() },
+                })
                 .collect(),
             selected: picker.selected(),
             scroll: picker.scroll(),
@@ -4829,6 +4911,14 @@ impl App {
             submit: COMPARE_SUBMIT,
             empty: "no branches",
         })
+    }
+}
+
+fn import_message(group: &str, opened: usize, missing: usize) -> String {
+    let projects = if opened == 1 { "1 project".to_string() } else { format!("{opened} projects") };
+    match missing {
+        0 => format!("{projects} imported into {group}"),
+        _ => format!("{projects} imported into {group}, {missing} not found"),
     }
 }
 
@@ -5234,11 +5324,36 @@ mod tests {
         }
 
         #[test]
+        fn add_project_opens_the_picker_next_to_the_group_and_puts_the_project_in_it() {
+            let tmp = TempDir::new();
+            let root = canonical(&tmp);
+            for folder in ["work/api", "work/web", "home"] {
+                std::fs::create_dir_all(root.join(folder)).expect("create folder");
+            }
+            let (mut app, _rx) = app_in(&root.join("work/api"), no_config());
+            new_group(&mut app, "work");
+            let label = group_label(&app, 0);
+            move_to(&mut app, 0, &label);
+            app.projects.push(Project::new(999, root.join("home"), None));
+            app.active = 1;
+
+            right_click_sidebar(&mut app, SidebarRow::Group(0));
+            pick(&mut app, "add project");
+            let Some(Overlay::Picker { picker, .. }) = &app.overlay else { panic!("the picker is not open") };
+            let starts = picker.dir().to_path_buf();
+            type_text(&mut app, "web/");
+            send_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+            let web = app.projects.iter().find(|p| p.path == root.join("work/web")).expect("web is open");
+            assert_eq!((starts, web.group), (root.join("work"), Some(app.groups[0].id)));
+        }
+
+        #[test]
         fn the_group_menu_offers_rename_icon_and_colour_and_delete() {
             let (mut app, _rx) = app();
             new_group(&mut app, "work");
             right_click_sidebar(&mut app, SidebarRow::Group(0));
-            assert_eq!(menu_labels(&app), ["rename group", "icon and colour", "delete group"]);
+            assert_eq!(menu_labels(&app), ["add project", "rename group", "icon and colour", "delete group"]);
         }
 
         #[test]
@@ -5247,7 +5362,7 @@ mod tests {
             new_group(&mut app, "work");
             let row = ui::entry_row(list(), 1, &app.sidebar_rows(), 0, SidebarRow::Group(0));
             click(&mut app, ui::row_menu_button(row, 1).as_position());
-            assert_eq!(menu_labels(&app), ["rename group", "icon and colour", "delete group"]);
+            assert_eq!(menu_labels(&app), ["add project", "rename group", "icon and colour", "delete group"]);
         }
 
         #[test]
@@ -5548,7 +5663,7 @@ mod tests {
         fn new_button_opens_the_folder_picker() {
             let (mut app, _rx) = app();
             click_new_project(&mut app);
-            assert_eq!((matches!(app.overlay, Some(Overlay::Picker(_))), app.projects.len()), (true, 1));
+            assert_eq!((matches!(app.overlay, Some(Overlay::Picker { .. })), app.projects.len()), (true, 1));
         }
 
         #[test]
@@ -7014,7 +7129,7 @@ mod tests {
         }
 
         fn picker(app: &App) -> &Picker {
-            let Some(Overlay::Picker(picker)) = &app.overlay else { panic!("the picker is not open") };
+            let Some(Overlay::Picker { picker, .. }) = &app.overlay else { panic!("the picker is not open") };
             picker
         }
 
@@ -7027,6 +7142,87 @@ mod tests {
 
         fn button(which: usize) -> Position {
             ui::picker_buttons(ui::picker_area(AREA), PICKER_SUBMIT)[which].as_position()
+        }
+
+        fn import(s: &mut Setup, name: &str, text: &str) {
+            std::fs::write(s.root.join(name), text).expect("write workspace");
+            s.app.overlay = None;
+            click_new_project(&mut s.app);
+            let file = item_pos(&s.app, name);
+            click(&mut s.app, file);
+        }
+
+        fn grouped(app: &App, group: &str) -> Vec<PathBuf> {
+            let id = app.groups.iter().find(|g| g.entry.name == group).map(|g| g.id);
+            app.projects.iter().filter(|p| id.is_some() && p.group == id).map(|p| p.path.clone()).collect()
+        }
+
+        fn toast(app: &App) -> Option<&str> {
+            app.toast.as_ref().map(|t| t.message.as_str())
+        }
+
+        #[test]
+        fn a_vscode_workspace_becomes_a_group_of_its_folders() {
+            let mut s = open_picker();
+
+            import(&mut s, "work.code-workspace", r#"{"folders": [{"path": "api"}, {"path": "web"}]}"#);
+
+            let active = s.app.project().map(|p| p.path.clone());
+            assert_eq!(
+                (grouped(&s.app, "work"), active, s.app.overlay.is_none()),
+                (vec![s.root.join("api"), s.root.join("web")], Some(s.root.join("api")), true)
+            );
+            assert_eq!(toast(&s.app), Some("2 projects imported into work"));
+        }
+
+        #[test]
+        fn importing_moves_an_open_project_and_skips_missing_folders() {
+            let mut s = open_picker();
+
+            import(&mut s, "w.code-workspace", r#"{"folders": [{"path": "active"}, {"path": "gone"}]}"#);
+
+            assert_eq!(
+                (s.app.projects.len(), grouped(&s.app, "w"), toast(&s.app)),
+                (1, vec![s.root.join("active")], Some("1 project imported into w, 1 not found"))
+            );
+        }
+
+        #[test]
+        fn importing_into_a_group_with_the_same_name_reuses_it() {
+            let mut s = open_picker();
+            s.app.add_group("work".into());
+
+            import(&mut s, "work.code-workspace", r#"{"folders": [{"path": "api"}]}"#);
+
+            assert_eq!((s.app.groups.len(), grouped(&s.app, "work")), (1, vec![s.root.join("api")]));
+        }
+
+        #[test]
+        fn a_folder_name_becomes_the_project_name() {
+            let mut s = open_picker();
+
+            import(&mut s, "w.code-workspace", r#"{"folders": [{"path": "api", "name": "Backend"}]}"#);
+
+            assert_eq!(s.app.project().and_then(|p| p.name.as_deref()), Some("Backend"));
+        }
+
+        #[test]
+        fn a_workspace_without_folders_found_makes_no_group() {
+            let mut s = open_picker();
+
+            import(&mut s, "w.code-workspace", r#"{"folders": [{"path": "gone"}]}"#);
+
+            assert_eq!((s.app.groups.len(), toast(&s.app)), (0, Some("0 projects imported into w, 1 not found")));
+        }
+
+        #[test]
+        fn a_broken_workspace_keeps_the_picker_open_with_the_error() {
+            let mut s = open_picker();
+
+            import(&mut s, "w.code-workspace", "{ nope");
+
+            let error = picker(&s.app).error().map(str::to_string).unwrap_or_default();
+            assert!(error.starts_with("cannot read") && s.app.groups.is_empty(), "{error}");
         }
 
         #[test]
@@ -7144,7 +7340,7 @@ mod tests {
             }
             let picker = Picker::open(tmp.path(), None).expect("open picker");
             let (mut app, _rx) = app();
-            app.overlay = Some(Overlay::Picker(picker));
+            app.overlay = Some(Overlay::Picker { picker, group: None });
             let ev =
                 MouseEvent { kind: MouseEventKind::ScrollDown, column: 50, row: 10, modifiers: KeyModifiers::NONE };
 

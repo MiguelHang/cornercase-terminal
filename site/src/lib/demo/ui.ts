@@ -1118,7 +1118,7 @@ export class Painter {
     if (!o || o.kind !== 'picker') return;
     const r = pickerArea(app.cols, app.rows);
     this.backdrop(false);
-    this.box(r, 'open project');
+    this.box(r, o.group === undefined ? 'open project' : 'add project');
     const c = rect(r.x + 2, r.y + 1, r.w - 4, r.h - 2);
     const path = app.pickerPath(o);
     const max = Math.max(0, c.w - INPUT_PROMPT.length - 1);

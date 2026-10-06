@@ -1,13 +1,14 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::git;
+use crate::{git, vscode};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
     pub name: String,
     pub path: PathBuf,
     pub branch: Option<String>,
+    pub workspace: bool,
 }
 
 #[derive(Debug)]
@@ -24,12 +25,13 @@ pub struct Picker {
 
 impl Picker {
     pub fn open(dir: &Path, home: Option<&Path>) -> io::Result<Self> {
-        let parent = dir.parent().map(|p| Item { name: "..".into(), path: p.to_path_buf(), branch: None });
+        let parent =
+            dir.parent().map(|p| Item { name: "..".into(), path: p.to_path_buf(), branch: None, workspace: false });
         Ok(Self {
             dir: dir.to_path_buf(),
             home: home.map(Path::to_path_buf),
             parent,
-            folders: folders(dir)?,
+            folders: entries(dir)?,
             filter: String::new(),
             selected: None,
             scroll: 0,
@@ -118,9 +120,25 @@ impl Picker {
     }
 
     pub fn enter(&mut self, i: usize) {
-        if let Some(path) = self.items().get(i).map(|item| item.path.clone()) {
+        if let Some(path) = self.items().get(i).filter(|item| !item.workspace).map(|item| item.path.clone()) {
             self.go(&path);
         }
+    }
+
+    pub fn choose(&mut self, i: usize) -> Option<PathBuf> {
+        let item = self.items().get(i).map(|item| (item.workspace, item.path.clone()));
+        match item {
+            Some((true, path)) => Some(path),
+            Some((false, path)) => {
+                self.go(&path);
+                None
+            }
+            None => None,
+        }
+    }
+
+    pub fn fail(&mut self, error: String) {
+        self.error = Some(error);
     }
 
     pub fn enter_selected(&mut self) {
@@ -131,10 +149,7 @@ impl Picker {
 
     pub fn submit(&mut self) -> Option<PathBuf> {
         match self.selected {
-            Some(i) => {
-                self.enter(i);
-                None
-            }
+            Some(i) => self.choose(i),
             None if self.filter.is_empty() => Some(self.dir.clone()),
             None => None,
         }
@@ -160,19 +175,27 @@ impl Picker {
     }
 }
 
-fn folders(dir: &Path) -> io::Result<Vec<Item>> {
-    let mut folders: Vec<Item> = std::fs::read_dir(dir)?
+fn entries(dir: &Path) -> io::Result<Vec<Item>> {
+    let mut entries: Vec<Item> = std::fs::read_dir(dir)?
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .map(|path| {
+        .filter_map(|path| {
+            let workspace = vscode::is_workspace(&path) && path.is_file();
+            if !workspace && !path.is_dir() {
+                return None;
+            }
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let branch = if path.join(".git").exists() { git::branch(&path) } else { None };
-            Item { name, path, branch }
+            Some(Item { name, path, branch, workspace })
         })
         .collect();
-    folders.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.name.cmp(&b.name)));
-    Ok(folders)
+    entries.sort_by(|a, b| {
+        a.workspace
+            .cmp(&b.workspace)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(entries)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -255,6 +278,15 @@ mod tests {
         }
 
         #[test]
+        fn lists_vscode_workspaces_after_the_folders() {
+            let tmp = tree(&["src", "z"]);
+            for file in ["a.code-workspace", "notes.json"] {
+                std::fs::write(tmp.path().join(file), "{}").expect("write file");
+            }
+            assert_eq!(names(&open(tmp.path())), ["..", "src", "z", "a.code-workspace"]);
+        }
+
+        #[test]
         fn root_has_no_parent() {
             assert!(open(Path::new("/")).items().iter().all(|item| item.name != ".."));
         }
@@ -277,6 +309,52 @@ mod tests {
         fn subfolders_of_a_repo_show_no_branch() {
             let repo = git_repo(&[("src/main.rs", "")]);
             assert!(open(repo.path()).items().iter().all(|item| item.branch.is_none()));
+        }
+    }
+
+    mod workspaces {
+        use super::*;
+
+        fn with_workspace() -> (TempDir, Picker) {
+            let tmp = tree(&["src"]);
+            std::fs::write(tmp.path().join("w.code-workspace"), "{}").expect("write file");
+            let picker = open(tmp.path());
+            (tmp, picker)
+        }
+
+        #[test]
+        fn choosing_one_returns_it_and_stays() {
+            let (tmp, mut picker) = with_workspace();
+
+            let chosen = picker.choose(2);
+
+            assert_eq!((chosen, picker.dir()), (Some(tmp.path().join("w.code-workspace")), tmp.path()));
+        }
+
+        #[test]
+        fn choosing_a_folder_goes_into_it() {
+            let (tmp, mut picker) = with_workspace();
+
+            let chosen = picker.choose(1);
+
+            assert_eq!((chosen, picker.dir()), (None, tmp.path().join("src").as_path()));
+        }
+
+        #[test]
+        fn going_into_one_does_nothing() {
+            let (tmp, mut picker) = with_workspace();
+
+            picker.enter(2);
+
+            assert_eq!(picker.dir(), tmp.path());
+        }
+
+        #[test]
+        fn submitting_the_selected_one_returns_it() {
+            let (tmp, mut picker) = with_workspace();
+            type_text(&mut picker, "w.");
+
+            assert_eq!(picker.submit(), Some(tmp.path().join("w.code-workspace")));
         }
     }
 

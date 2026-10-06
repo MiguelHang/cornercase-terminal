@@ -81,6 +81,7 @@ export type MenuAction =
   | { kind: 'setGroup'; project: number; group: number | null }
   | { kind: 'groupStyle'; group: number }
   | { kind: 'deleteGroup'; group: number }
+  | { kind: 'addProject'; group: number }
   | { kind: 'openProject' }
   | { kind: 'newGroup' }
   | { kind: 'pane'; pane: number; action: PaneAction }
@@ -140,7 +141,7 @@ export type Overlay =
   | { kind: 'closeProject'; project: number }
   | { kind: 'closeWorkspace'; project: number; workspace: number }
   | { kind: 'closeTab'; project: number; workspace: number; tab: number }
-  | { kind: 'picker'; dir: string[]; filter: string; selected: number | null; scroll: number }
+  | { kind: 'picker'; dir: string[]; filter: string; selected: number | null; scroll: number; group?: number }
   | { kind: 'search'; query: string; selected: number; scroll: number }
   | { kind: 'usage' }
   | { kind: 'restart'; scroll: number }
