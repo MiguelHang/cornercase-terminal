@@ -2,6 +2,11 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.6.1
+
+- The **`usage`** dialog now shows your Codex plan too, under Claude Code's: the five-hour session and the week, how much of each you've used and when it resets, plus your credits when you have some. It asks Codex itself (`codex app-server`), so the numbers are live, cost no tokens and cornercase never reads your login.
+- Only the agents you have installed get a section (with neither installed, both show and say why they couldn't run), and a Codex you haven't signed in to just says `not signed in · run codex login`. If an agent isn't on the server's `PATH`, tell cornercase where it is with `agent_commands`.
+
 ## 0.6.0
 
 - A new setting, **settings → TUI → context line**, hides the line under Claude Code and Codex tabs that shows their model and how full their context is, so every tab takes one row. It is on by default.
