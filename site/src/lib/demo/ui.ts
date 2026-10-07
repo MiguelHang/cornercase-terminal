@@ -411,9 +411,10 @@ export class Painter {
   }
 
   private closeX(row: Rect, pitch: number, bg: Style, act: () => void): void {
-    if (!this.sidebarHovered(row)) return;
+    const hover = this.sidebarHovered(row);
+    if (!hover && pitch === 1) return;
     const r = closeButton(row, pitch);
-    const style = this.hovered(r) ? { ...bg, fg: 1, add: BOLD } : { ...bg, fg: 8 };
+    const style = hover && this.hovered(r) ? { ...bg, fg: 1, add: BOLD } : { ...bg, fg: 8 };
     this.band(r, [seg(centered('×', r.w))], style);
     this.region({ r, click: act, cursor: 'pointer' });
   }
@@ -492,7 +493,7 @@ export class Painter {
     this.band(b.r, line, b.bg);
     const grab: Target = { kind: 'workspace', project: project.id, workspace: ws.id };
     this.region({ r: b.r, click, right: (x, y) => app.openMenu({ x, y }, grab), grab, cursor: 'pointer' });
-    this.closeX(b.r, b.pitch, b.bg, () => app.closeWorkspace(p, w));
+    this.closeX(b.r, b.pitch, b.bg, () => (b.pitch > 1 ? app.askCloseWorkspace(p, w) : app.closeWorkspace(p, w)));
   }
 
   private tabRow(b: Band, p: number, w: number, t: number, active: boolean): void {
@@ -511,7 +512,7 @@ export class Painter {
     if (tabLines(details) > 1) this.details(b.r, b.pitch, details, width(b.lead) + 2 + icon);
     const grab: Target = { kind: 'tab', project: project.id, workspace: ws.id, tab: tab.id };
     this.region({ r: b.r, click: () => app.selectTab(p, w, t), right: (x, y) => app.openMenu({ x, y }, grab), grab, cursor: 'pointer' });
-    this.closeX(b.r, b.pitch, b.bg, () => app.closeTab(p, w, t));
+    this.closeX(b.r, b.pitch, b.bg, () => (b.pitch > 1 ? app.askCloseTab(p, w, t) : app.closeTab(p, w, t)));
   }
 
   private newTab(r: Rect, indent: string, p: number, w: number): void {

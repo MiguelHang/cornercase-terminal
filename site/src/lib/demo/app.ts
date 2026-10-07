@@ -151,6 +151,12 @@ const DETAIL_NOTICES = {
   memory: ['agent tabs show the memory they use', 'agent tabs hide their memory'],
 } as const;
 
+function stoppedTabs(tabs: number): string {
+  if (tabs === 1) return ' Its tab and the programs running in it are stopped.';
+  if (tabs > 1) return ` Its ${tabs} tabs and the programs running in them are stopped.`;
+  return '';
+}
+
 function agentIn(pane: Pane): Agent | null {
   const fg = pane.shell.fg;
   return fg instanceof Agent && WATCHED.includes(fg.name) ? fg : null;
@@ -614,11 +620,47 @@ export class App {
   closeProjectMessage(id: number): string {
     const p = this.projects.find((x) => x.id === id);
     if (!p) return '';
-    const tabs = p.workspaces.reduce((n, w) => n + w.tabs.length, 0);
-    let stopped = '';
-    if (tabs === 1) stopped = ' Its tab and the programs running in it are stopped.';
-    else if (tabs > 1) stopped = ` Its ${tabs} tabs and the programs running in them are stopped.`;
+    const stopped = stoppedTabs(p.workspaces.reduce((n, w) => n + w.tabs.length, 0));
     return `Close the project ${projectLabel(p)}?${stopped} Folders and worktrees stay on disk.`;
+  }
+
+  askCloseWorkspace(p: number, w: number): void {
+    const project = this.projects[p];
+    const ws = project?.workspaces[w];
+    if (!project || !ws) return;
+    if (ws.worktree) return this.closeWorkspace(p, w);
+    this.overlay = { kind: 'closeWorkspace', project: project.id, workspace: ws.id };
+    this.dirty();
+  }
+
+  askCloseTab(p: number, w: number, t: number): void {
+    const project = this.projects[p];
+    const ws = project?.workspaces[w];
+    const tab = ws?.tabs[t];
+    if (!project || !ws || !tab) return;
+    this.overlay = { kind: 'closeTab', project: project.id, workspace: ws.id, tab: tab.id };
+    this.dirty();
+  }
+
+  private closeTarget(project: number, workspace: number, tab?: number): { p: number; w: number; t: number } | null {
+    const p = this.projects.findIndex((x) => x.id === project);
+    const w = this.projects[p]?.workspaces.findIndex((x) => x.id === workspace) ?? -1;
+    const t = tab === undefined ? 0 : (this.projects[p]?.workspaces[w]?.tabs.findIndex((x) => x.id === tab) ?? -1);
+    return p < 0 || w < 0 || t < 0 ? null : { p, w, t };
+  }
+
+  closeWorkspaceMessage(project: number, workspace: number): string {
+    const at = this.closeTarget(project, workspace);
+    const ws = at && this.projects[at.p].workspaces[at.w];
+    if (!ws) return '';
+    return `Close the workspace ${workspaceLabel(ws)}?${stoppedTabs(ws.tabs.length)}`;
+  }
+
+  closeTabMessage(project: number, workspace: number, tab: number): string {
+    const at = this.closeTarget(project, workspace, tab);
+    const t = at && this.projects[at.p].workspaces[at.w].tabs[at.t];
+    if (!t) return '';
+    return `Close the tab ${tabLabel(t)}? The programs running in it are stopped.`;
   }
 
   confirmView(): ConfirmView | null {
@@ -626,6 +668,8 @@ export class App {
     if (o?.kind === 'remove') return { title: 'remove workspace', message: this.removeMessage(o), submit: 'remove', note: o.removing ? 'removing…' : undefined };
     if (o?.kind === 'deleteGroup') return { title: 'delete group', message: this.deleteGroupMessage(o.group), submit: 'delete' };
     if (o?.kind === 'closeProject') return { title: 'close project', message: this.closeProjectMessage(o.project), submit: 'close' };
+    if (o?.kind === 'closeWorkspace') return { title: 'close workspace', message: this.closeWorkspaceMessage(o.project, o.workspace), submit: 'close' };
+    if (o?.kind === 'closeTab') return { title: 'close tab', message: this.closeTabMessage(o.project, o.workspace, o.tab), submit: 'close' };
     return null;
   }
 
@@ -634,7 +678,13 @@ export class App {
     if (o?.kind === 'remove') return this.submitRemove();
     this.closeOverlay();
     if (o?.kind === 'closeProject') this.closeProject(o.project);
-    else if (o?.kind === 'deleteGroup') this.deleteGroup(o.group);
+    else if (o?.kind === 'closeWorkspace') {
+      const at = this.closeTarget(o.project, o.workspace);
+      if (at) this.closeWorkspace(at.p, at.w);
+    } else if (o?.kind === 'closeTab') {
+      const at = this.closeTarget(o.project, o.workspace, o.tab);
+      if (at) this.closeTab(at.p, at.w, at.t);
+    } else if (o?.kind === 'deleteGroup') this.deleteGroup(o.group);
   }
 
   deleteGroup(id: number): void {
@@ -751,6 +801,7 @@ export class App {
       this.dirty();
       return;
     }
+    for (const t of ws.tabs) for (const pane of t.panes) pane.shell.fg?.dispose?.();
     if (project.workspaces.length === 1) {
       ws.tabs = [];
       this.dirty();
