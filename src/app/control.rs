@@ -1008,11 +1008,12 @@ impl App {
     }
 
     pub(super) fn worktree_gone(&mut self, key: u64, project: u64, workspace: u64, result: error::Result<()>) {
+        let found = self.requests.pending.iter().position(|p| p.key == key);
+        let pending = found.map(|i| self.requests.pending.remove(i));
         if result.is_ok() {
             self.drop_workspace(project, workspace);
         }
-        let Some(i) = self.requests.pending.iter().position(|p| p.key == key) else { return };
-        let pending = self.requests.pending.remove(i);
+        let Some(pending) = pending else { return };
         self.answer(pending.client, result.map(|()| json(&Done::default())).map_err(|e| e.to_string()));
     }
 
