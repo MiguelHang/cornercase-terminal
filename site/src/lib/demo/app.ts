@@ -1843,7 +1843,7 @@ export class App {
     const github = !!p?.repo;
     const allowed = (s: string) => (s === 'github' ? github : isRemote(s) && this.config.accounts[s]);
     const f = o.filter.trim().toLowerCase();
-    const project = /\bproject\s*=\s*"?([a-z][a-z0-9_]*)"?/i.exec(this.config.jiraJql)?.[1].toUpperCase();
+    const project = this.config.jiraJql.trim().match(/^project\s*=\s*"?([a-z][a-z0-9_]*)"?$/i)?.[1].toUpperCase();
     return ISSUES.filter((i) => (source === 'all' ? allowed(i.source) : i.source === source && allowed(i.source)))
       .filter((i) => i.source !== 'jira' || !project || i.key.startsWith(`${project}-`))
       .filter((i) => !o.mine || i.mine)
