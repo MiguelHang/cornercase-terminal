@@ -36,9 +36,10 @@ pub fn is_workspace(path: &Path) -> bool {
 }
 
 pub fn read(file: &Path) -> Result<Workspace> {
-    let text = std::fs::read_to_string(file)?;
-    let invalid = |e: serde_json::Error| Error::CodeWorkspace { path: file.to_path_buf(), reason: e.to_string() };
-    let parsed: File = serde_json::from_str(&strip_jsonc(&text)).map_err(invalid)?;
+    let invalid = |reason: String| Error::CodeWorkspace { path: file.to_path_buf(), reason };
+    let text = std::fs::read_to_string(file).map_err(|e| invalid(e.to_string()))?;
+    let text = text.trim_start_matches('\u{feff}');
+    let parsed: File = serde_json::from_str(&strip_jsonc(text)).map_err(|e| invalid(e.to_string()))?;
     let base = file.parent().unwrap_or(Path::new("/"));
     let name = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let folders = parsed
@@ -220,6 +221,25 @@ mod tests {
             let file = write(tmp.path(), "w.code-workspace", text);
 
             assert_eq!(read(&file).expect("read").folders.len(), 2);
+        }
+
+        #[test]
+        fn skips_a_byte_order_mark() {
+            let tmp = TempDir::new();
+            let file = write(tmp.path(), "w.code-workspace", "\u{feff}{\"folders\": [{\"path\": \"api\"}]}");
+
+            assert_eq!(read(&file).expect("read").folders.len(), 1);
+        }
+
+        #[test]
+        fn names_a_file_that_is_not_text() {
+            let tmp = TempDir::new();
+            let file = tmp.path().join("w.code-workspace");
+            std::fs::write(&file, [0xff, 0xfe, 0x00]).expect("write workspace");
+
+            let error = read(&file).expect_err("not text").to_string();
+
+            assert!(error.contains("w.code-workspace"), "{error}");
         }
 
         #[test]

@@ -2587,7 +2587,8 @@ impl App {
         match vscode::read(&path) {
             Ok(workspace) => {
                 self.overlay = None;
-                self.import_workspace(workspace, group, area)
+                self.import_workspace(workspace, group, area);
+                Ok(())
             }
             Err(e) => {
                 if let Some(Overlay::Picker { picker, .. }) = &mut self.overlay {
@@ -2613,10 +2614,10 @@ impl App {
         Ok(())
     }
 
-    fn import_workspace(&mut self, workspace: vscode::Workspace, group: Option<u64>, area: Rect) -> Result<()> {
+    fn import_workspace(&mut self, workspace: vscode::Workspace, group: Option<u64>, area: Rect) {
         let existing = group.or_else(|| self.groups.iter().find(|g| g.entry.name == workspace.name).map(|g| g.id));
         let group = existing.unwrap_or_else(|| self.add_group(workspace.name.clone()));
-        let (mut first, mut opened, mut missing) = (None, 0, 0);
+        let (mut opened, mut missing, mut failed) = (Vec::new(), 0, 0);
         for folder in workspace.folders {
             if !folder.path.is_dir() {
                 missing += 1;
@@ -2624,19 +2625,24 @@ impl App {
             }
             let folder_name = folder.path.file_name().map(|n| n.to_string_lossy().into_owned());
             let name = folder.name.filter(|n| Some(n) != folder_name.as_ref());
-            self.open_into(folder.path, Some(group), name, area)?;
-            opened += 1;
-            first = first.or_else(|| self.project().map(|p| p.id));
+            if let Err(e) = self.open_into(folder.path.clone(), Some(group), name, area) {
+                log::error!("app", "could not import a folder", folder = folder.path.display(), error = e);
+                failed += 1;
+                continue;
+            }
+            if let Some(id) = self.project().map(|p| p.id).filter(|id| !opened.contains(id)) {
+                opened.push(id);
+            }
         }
-        if opened == 0 && existing.is_none() {
+        if opened.is_empty() && existing.is_none() {
             self.delete_group(group);
         }
-        if let Some(i) = first.and_then(|id| self.project_index(id)) {
+        if let Some(i) = opened.first().and_then(|&id| self.project_index(id)) {
             self.active = i;
         }
         let name = self.group(group).map_or(workspace.name, |g| g.name.clone());
-        self.toast = Some(Toast::new(import_message(&name, opened, missing), ui::ToastIcon::Check));
-        Ok(())
+        let icon = if failed == 0 { ui::ToastIcon::Check } else { ui::ToastIcon::Bug };
+        self.toast = Some(Toast::new(import_message(&name, opened.len(), missing, failed), icon));
     }
 
     fn picker_rows(area: Rect) -> usize {
@@ -4912,12 +4918,15 @@ impl App {
     }
 }
 
-fn import_message(group: &str, opened: usize, missing: usize) -> String {
-    let projects = if opened == 1 { "1 project".to_string() } else { format!("{opened} projects") };
-    match missing {
-        0 => format!("{projects} imported into {group}"),
-        _ => format!("{projects} imported into {group}, {missing} not found"),
-    }
+fn import_message(group: &str, opened: usize, missing: usize, failed: usize) -> String {
+    let imported = match opened {
+        0 => format!("nothing imported from {group}"),
+        1 => format!("1 project imported into {group}"),
+        n => format!("{n} projects imported into {group}"),
+    };
+    let missing = (missing > 0).then(|| format!("{missing} not found"));
+    let failed = (failed > 0).then(|| format!("{failed} could not open, see server.log"));
+    [Some(imported), missing, failed].into_iter().flatten().collect::<Vec<_>>().join(", ")
 }
 
 fn copy(host_writes: &mut Vec<Vec<u8>>, toast: &mut Option<Toast>, text: &str) {
@@ -7220,12 +7229,39 @@ mod tests {
         }
 
         #[test]
+        fn a_folder_whose_shell_cannot_start_is_counted_and_the_rest_still_opens() {
+            let mut s = open_picker();
+            let locked = Locked::new();
+            let text = format!(
+                r#"{{"folders": [{{"path": "api"}}, {{"path": "{}"}}, {{"path": "web"}}]}}"#,
+                locked.path().display()
+            );
+
+            import(&mut s, "w.code-workspace", &text);
+
+            assert_eq!(grouped(&s.app, "w"), [s.root.join("api"), s.root.join("web")]);
+            assert_eq!(toast(&s.app), Some("2 projects imported into w, 1 could not open, see server.log"));
+        }
+
+        #[test]
+        fn a_folder_listed_twice_counts_once() {
+            let mut s = open_picker();
+
+            import(&mut s, "w.code-workspace", r#"{"folders": [{"path": "api"}, {"path": "./api"}]}"#);
+
+            assert_eq!(
+                (grouped(&s.app, "w"), toast(&s.app)),
+                (vec![s.root.join("api")], Some("1 project imported into w"))
+            );
+        }
+
+        #[test]
         fn a_workspace_without_folders_found_makes_no_group() {
             let mut s = open_picker();
 
             import(&mut s, "w.code-workspace", r#"{"folders": [{"path": "gone"}]}"#);
 
-            assert_eq!((s.app.groups.len(), toast(&s.app)), (0, Some("0 projects imported into w, 1 not found")));
+            assert_eq!((s.app.groups.len(), toast(&s.app)), (0, Some("nothing imported from w, 1 not found")));
         }
 
         #[test]

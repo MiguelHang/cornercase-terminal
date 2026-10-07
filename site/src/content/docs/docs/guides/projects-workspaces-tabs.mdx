@@ -72,7 +72,7 @@ Coming from VS Code with one workspace per area of work? Open its `.code-workspa
 
 - The group is named after the file: `work.code-workspace` becomes `work`. If a group with that name already exists, the folders go into it, so importing the file again brings in folders added since.
 - Each folder of the workspace opens as a project in the group. A folder with a `name` in the file gets that name, unless you already renamed that project in cornercase. Relative paths are read from where the file is, as VS Code does.
-- A folder that is already open moves into the group instead of opening twice. Folders that don't exist, and remote ones, are skipped; a message says how many projects were imported and how many folders were not found.
+- A folder that is already open moves into the group instead of opening twice. Folders that don't exist, and remote ones, are skipped; a message says how many projects were imported and how many folders were not found. A folder whose shell can't start (one you may not enter, for example) is skipped too and the rest still open; the message counts it, and `server.log` says which folder failed and why.
 
 The import happens once: after that the group is cornercase's, and the `.code-workspace` file is never changed. Comments and trailing commas in the file are fine.
 
