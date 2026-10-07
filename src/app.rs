@@ -2441,6 +2441,9 @@ impl App {
                 .map_err(|e| Error::Api(format!("failed to save the {}: {e}", source.token_name())))?;
             Ok(account)
         });
+        if saved.is_ok() {
+            self.forget_issues(source);
+        }
         if let Some(Overlay::Settings(s)) = &mut self.overlay {
             if let Ok(account) = &saved {
                 self.accounts.insert(source, account.clone());
@@ -8929,6 +8932,25 @@ rm -f "$1/sessions/$$.json"
                 answer(&mut s, |e| matches!(e, AppEvent::TokenChecked { .. }));
 
                 assert_eq!(secrets::read(&secrets_file(&s), "jira_api_token"), None);
+            }
+
+            #[test]
+            fn a_list_asked_with_the_old_token_is_dropped_once_a_new_one_is_saved() {
+                let mut s = setup(false, "echo '[]'");
+                let _server = jira(&mut s);
+                s.app.config.jira_site = "acme.atlassian.net".into();
+                s.app.config.jira_email = "ana@acme.dev".into();
+                secrets::write(&secrets_file(&s), "jira_api_token", "old").expect("save token");
+                open_list(&mut s);
+                let key = s.app.cache_key(Source::Jira, browser(&s.app).project, &browser(&s.app).query(Source::Jira));
+                let account = Account { handle: "Ana".into(), workspace: "acme.atlassian.net".into() };
+
+                s.app
+                    .token_checked(Source::Jira, &Secret("new".into()), Ok(account), AREA)
+                    .expect("save the new token");
+                answer(&mut s, |e| matches!(e, AppEvent::IssuesLoaded { source: Source::Jira, .. }));
+
+                assert_eq!(s.app.issue_cache.get(&key), None);
             }
 
             #[test]
