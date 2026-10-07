@@ -9571,6 +9571,14 @@ rm -f "$s"
             Command::Send(wire::SendText { pane: Some(pane), text, enter, wait, ..wire::SendText::default() })
         }
 
+        fn press_keys(pane: u64, keys: &[&str]) -> Command {
+            Command::Keys(wire::Keys {
+                pane: Some(pane),
+                tab: None,
+                keys: keys.iter().map(ToString::to_string).collect(),
+            })
+        }
+
         mod creating {
             use super::*;
 
@@ -9727,8 +9735,7 @@ rm -f "$s"
                 pump_until(&mut app, &rx, "cat runs", |a| pane_screen(a, id).contains("cat-starts"));
 
                 done(now(&mut app, None, send_text(id, "hello", false, false)));
-                let keys = wire::Keys { pane: Some(id), tab: None, keys: vec!["ctrl+b".into(), "enter".into()] };
-                done(now(&mut app, None, Command::Keys(keys)));
+                done(now(&mut app, None, press_keys(id, &["ctrl+b", "enter"])));
 
                 pump_until(&mut app, &rx, "cat echoes both", |a| pane_screen(a, id).contains("hello^B"));
             }
@@ -9789,9 +9796,14 @@ rm -f "$s"
                 assert!(typed.elapsed() >= Duration::from_millis(1500), "it ended after {:?}", typed.elapsed());
             }
 
-            #[test]
             #[cfg(target_os = "linux")]
-            fn an_enter_a_full_pane_refuses_is_not_reported_as_pressed() {
+            #[rstest::rstest]
+            #[case::send(|pane| send_text(pane, "", true, false), "did not take what was typed")]
+            #[case::keys(|pane| press_keys(pane, &["enter"]), "is not reading its input")]
+            fn an_enter_a_full_pane_refuses_is_not_reported_as_pressed(
+                #[case] enter: fn(u64) -> Command,
+                #[case] refused: &str,
+            ) {
                 let (mut app, rx) = app();
                 let id = first(&app);
                 type_line(&mut app, "stty -echo; sleep 30");
@@ -9799,10 +9811,11 @@ rm -f "$s"
                 let full = vec![b'x'; crate::term::MAX_QUEUED + 1024 * 1024];
                 let filled = app.projects[0].workspaces[0].tabs[0].panes[0].write(&full);
 
-                ask(&mut app, None, send_text(id, "", true, false));
+                ask(&mut app, None, enter(id));
 
                 let message = error(answered(&mut app, &rx, "the enter is refused"));
-                assert!(filled && message.contains("did not take what was typed"), "{message}");
+                assert!(filled && message.contains(refused), "{message}");
+                assert_eq!(pane(&app, id).submitted, None, "the pane counts no Enter");
             }
 
             #[test]

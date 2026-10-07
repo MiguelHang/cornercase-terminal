@@ -933,12 +933,13 @@ impl App {
             return Err("no keys given".into());
         }
         let term = self.pane_by_mut(pane).ok_or_else(|| none("pane", pane))?;
-        if events.iter().any(|key| key.code == KeyCode::Enter) {
-            term.submitted = Some(now);
-        }
+        let enter = events.iter().any(|key| key.code == KeyCode::Enter);
         let bytes: Vec<u8> = events.into_iter().flat_map(|key| term.emulator.encode_key(key)).collect();
         if !term.write(&bytes) {
             return Err(not_reading(pane));
+        }
+        if enter {
+            term.submitted = Some(now);
         }
         Ok(Some(json(&pane_ids(pane))))
     }
