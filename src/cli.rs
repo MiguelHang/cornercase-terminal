@@ -98,8 +98,8 @@ Examples:
   cornercase wait --pane 12 --timeout 600
   cornercase wait --pane 7 --until shell
   cornercase wait --pane 7 --text 'test result: (ok|FAILED)'";
-const CLOSE_HELP: &str = "Its shells stop, as with its ×; a project closes without asking. A worktree's workspace stays
-listed while its worktree exists, and its branch is never deleted.
+const CLOSE_HELP: &str = "Its shells stop, as with its ×, but nothing asks first, not even for a project. A worktree's
+workspace stays listed while its worktree exists, and its branch is never deleted.
 
 Examples:
   cornercase close --tab 9
