@@ -65,6 +65,7 @@ const LIGHT_MUTED: Color = Color::Indexed(245);
 const CLOSE_BUTTON_WIDTH: u16 = 3;
 const COMPACT_CLOSE_WIDTH: u16 = 5;
 const TOAST_ICON: &str = " ✓ ";
+const BUG_ICON: &str = " ✗ ";
 const TOAST_MARGIN: u16 = 1;
 const BEHIND_ICON: &str = "↓";
 const CONTEXT_SEPARATOR: &str = " · ";
@@ -2072,9 +2073,16 @@ pub struct ChangesButton {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastIcon {
+    Check,
+    Agent(Status),
+    Bug,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Toast<'a> {
     pub message: &'a str,
-    pub status: Option<Status>,
+    pub icon: ToastIcon,
     pub undo: bool,
 }
 
@@ -2266,9 +2274,13 @@ pub fn toast_undo(area: Rect, toast: Toast) -> Rect {
 
 fn draw_toast(f: &mut Frame, view: &View, toast: Toast) {
     let r = toast_area(f.area(), toast);
-    let icon = match toast.status.map(|status| status_icon(view.muted, status)) {
-        Some(icon) => Span::styled(format!(" {} ", icon.content), icon.style),
-        None => Span::styled(TOAST_ICON, Style::default().fg(Color::Green)),
+    let icon = match toast.icon {
+        ToastIcon::Check => Span::styled(TOAST_ICON, Style::default().fg(Color::Green)),
+        ToastIcon::Agent(status) => {
+            let icon = status_icon(view.muted, status);
+            Span::styled(format!(" {} ", icon.content), icon.style)
+        }
+        ToastIcon::Bug => Span::styled(BUG_ICON, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
     };
     let border = Style::default().fg(icon.style.fg.unwrap_or(Color::Green));
     f.render_widget(Clear, r);
@@ -3459,11 +3471,13 @@ fn draw_more(f: &mut Frame, muted: Color, [top, bottom]: [Rect; 2], above: Optio
 }
 
 fn draw_row_close(f: &mut Frame, view: &View, row: Rect, pitch: u16, bg: Style) {
-    if !sidebar_hovered(view, row) {
+    let hover = sidebar_hovered(view, row);
+    if !hover && pitch == 1 {
         return;
     }
     let r = row_close_button(row, pitch);
-    let style = if hovered(view, r) { bg.fg(Color::Red).add_modifier(Modifier::BOLD) } else { bg.fg(view.muted) };
+    let style =
+        if hover && hovered(view, r) { bg.fg(Color::Red).add_modifier(Modifier::BOLD) } else { bg.fg(view.muted) };
     draw_band(f, r, Span::styled(centered("×", r.width), style), style);
 }
 
@@ -5023,6 +5037,40 @@ mod tests {
             insta::assert_snapshot!(render_small(&with_groups(in_a_project(Some(Nav::Projects)))).backend());
         }
 
+        fn close_cell(view: &View, row: Rect) -> (String, Color) {
+            let r = row_close_button(row, COMPACT_PITCH);
+            let cell = render_small(view).backend().buffer()[Position::new(r.x + r.width / 2, r.y + 1)].clone();
+            (cell.symbol().to_string(), cell.fg)
+        }
+
+        #[rstest]
+        #[case::workspace(WorkspaceRow::Workspace(0))]
+        #[case::active_tab(WorkspaceRow::Tab(0, 0))]
+        #[case::tab(WorkspaceRow::Tab(0, 1))]
+        fn every_workspace_and_tab_shows_its_close_button_without_hover(#[case] row: WorkspaceRow) {
+            let v = in_a_project(Some(Nav::Workspaces));
+            let r = workspace_row(small().workspaces_list, COMPACT_PITCH, &v.tab_lines(), 0, row);
+            assert_eq!(close_cell(&v, r), ("×".into(), Color::DarkGray));
+        }
+
+        #[rstest]
+        #[case::active(0)]
+        #[case::inactive(1)]
+        fn every_project_shows_its_close_button_without_hover(#[case] p: usize) {
+            let v = in_a_project(Some(Nav::Projects));
+            let r = entry_row(small().list, COMPACT_PITCH, &plain(2), 0, SidebarRow::Project(p));
+            assert_eq!(close_cell(&v, r), ("×".into(), Color::DarkGray));
+        }
+
+        #[test]
+        fn a_close_button_turns_red_on_hover() {
+            let v = in_a_project(Some(Nav::Workspaces));
+            let r = workspace_row(small().workspaces_list, COMPACT_PITCH, &v.tab_lines(), 0, WorkspaceRow::Tab(0, 1));
+            let close = row_close_button(r, COMPACT_PITCH);
+            let hover = Some(Position::new(close.x + 1, close.y + 1));
+            assert_eq!(close_cell(&View { hover, ..v }, r).1, Color::Red);
+        }
+
         #[test]
         fn renders_the_landing_line_between_tabs() {
             let v = in_a_project(Some(Nav::Workspaces));
@@ -5725,7 +5773,11 @@ mod tests {
             let t = render_sized(&v, SMALL.width, SMALL.height);
             assert_eq!(
                 (r.height, line(&t, r, 1), line(&t, r, 2)),
-                (COMPACT_PITCH, "  ▌ ◐ claude".into(), "      Opus 5.5 · 17%".into())
+                (
+                    COMPACT_PITCH,
+                    format!("  ▌ ◐ claude{}×", " ".repeat(usize::from(SMALL.width) - 15)),
+                    "      Opus 5.5 · 17%".into()
+                )
             );
         }
     }
@@ -6040,12 +6092,12 @@ mod tests {
         use super::*;
 
         fn copied() -> Toast<'static> {
-            Toast { message: "copied to clipboard", status: None, undo: false }
+            Toast { message: "copied to clipboard", icon: ToastIcon::Check, undo: false }
         }
 
         #[test]
         fn an_undo_button_sits_at_its_end() {
-            let toast = Toast { message: "deleted", status: None, undo: true };
+            let toast = Toast { message: "deleted", icon: ToastIcon::Check, undo: true };
             let (r, undo) = (toast_area(AREA, toast), toast_undo(AREA, toast));
             let t = render(&View { toast: Some(toast), ..view(&["~"]) });
             let text: String = (undo.x..undo.right()).map(|x| t.backend().buffer()[(x, undo.y)].symbol()).collect();
@@ -6077,10 +6129,15 @@ mod tests {
         }
 
         #[rstest]
-        #[case::waiting(Status::Waiting, "!", WAITING_COLOR)]
-        #[case::done(Status::Done, "✓", Color::Green)]
-        fn about_an_agent_shows_its_status(#[case] status: Status, #[case] glyph: &str, #[case] colour: Color) {
-            let toast = Toast { message: "claude needs you in shop › main", status: Some(status), undo: false };
+        #[case::agent_waiting(ToastIcon::Agent(Status::Waiting), "!", WAITING_COLOR)]
+        #[case::agent_done(ToastIcon::Agent(Status::Done), "✓", Color::Green)]
+        #[case::bug(ToastIcon::Bug, "✗", Color::Red)]
+        fn its_icon_and_border_say_what_it_is_about(
+            #[case] icon: ToastIcon,
+            #[case] glyph: &str,
+            #[case] colour: Color,
+        ) {
+            let toast = Toast { message: "something happened", icon, undo: false };
             let r = toast_area(AREA, toast);
             let v = View { toast: Some(toast), ..view(&["~"]) };
             let t = render(&v);

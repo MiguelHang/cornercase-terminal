@@ -233,12 +233,12 @@ Type the new name and press `Enter`. Leave the name empty to go back to the auto
 
 ## Close
 
-Hover a group, project, workspace or tab row: it gets a lighter background, so you can see what a click will hit, and a `×` appears at its right end. Clicking it closes that item and ends every program inside it, except on a group, whose projects stay open:
+Hover a group, project, workspace or tab row: it gets a lighter background, so you can see what a click will hit, and a `×` appears at its right end. Clicking it closes that item and ends every program inside it, except on a group, whose projects stay open. In the [compact layout](../small-terminals/) the `×` is always there, and closing a tab or a workspace asks first too:
 
 | You close | What happens |
 | --- | --- |
-| A tab | Its panes' programs are ended, then the tab goes away. |
-| A workspace | All its tabs are closed, then the workspace goes away. A workspace with its own worktree asks first, because it also deletes the worktree folder; see [Removing a worktree](../worktrees/#remove-a-worktree). |
+| A tab | Its panes' programs are ended, then the tab goes away. In the compact layout it asks first. |
+| A workspace | All its tabs are closed, then the workspace goes away. In the compact layout it asks first. A workspace with its own worktree asks first, because it also deletes the worktree folder; see [Removing a worktree](../worktrees/#remove-a-worktree). |
 | A project | It asks first, saying how many tabs it stops. Then everything in it is closed and the project goes away; its folder and its worktrees stay on disk. |
 | A group | It asks first, then the group goes away. Its projects stay open, ungrouped, and nothing in them is ended. |
 
