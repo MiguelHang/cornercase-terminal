@@ -14,19 +14,20 @@ use crate::changes::diff::File as ChangedFile;
 use crate::changes::{self, BranchPicker, Checkout, Tints};
 use crate::clipboard;
 use crate::config::{self, Config};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::git;
 use crate::host_theme::HostTheme;
 use crate::issues::browser::{self, Action, Browser, Connection, Place, Screen, Tab as IssueTab};
 use crate::issues::cache::{Cache as IssueCache, Key as CacheKey};
 use crate::issues::{
-    self, Account, Client, Detail, Issue, Listed, People, Person, Query, Secret, Source, linear, shortcut,
+    self, Account, Client, Detail, Issue, Listed, People, Person, Query, Secret, Source, jira, linear, shortcut,
 };
 use crate::launch::{self, Launch, Step};
 use crate::markdown;
 use crate::memory;
 use crate::mouse;
 use crate::notify::{self, Notification};
+use crate::panics;
 use crate::picker::Picker;
 use crate::process;
 use crate::project::{Group, Project, Tab, Workspace, move_before, shift_active};
@@ -44,6 +45,7 @@ use crate::upstream;
 use crate::usage;
 use crate::worktree;
 
+mod control;
 mod todo_panel;
 
 #[derive(Debug)]
@@ -55,31 +57,37 @@ pub enum AppEvent {
         project: u64,
         result: Result<PathBuf>,
         start: Option<Start>,
+        request: Option<u64>,
     },
     WorktreeRemoved {
         project: u64,
         workspace: u64,
         result: Result<()>,
+        request: Option<u64>,
     },
     IssuesLoaded {
         project: u64,
         source: Source,
+        epoch: u64,
         query: Query,
         result: Result<Listed>,
     },
     IssueRead {
         source: Source,
+        epoch: u64,
         key: String,
         result: Result<Detail>,
     },
     TokenChecked {
         source: Source,
+        epoch: u64,
         token: Secret,
         result: Result<Account>,
     },
     PeopleLoaded {
         project: u64,
         source: Source,
+        epoch: u64,
         result: Result<Vec<Person>>,
     },
     Behind {
@@ -189,8 +197,10 @@ const COUNT_BEHIND_EVERY: Duration = Duration::from_secs(3);
 const WATCH_AGENTS_EVERY: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const AUTO_SCROLL_EVERY: Duration = Duration::from_millis(150);
+const LAUNCH_EVERY: Duration = Duration::from_millis(100);
 const TOAST_FOR: Duration = Duration::from_secs(2);
 const UNDO_FOR: Duration = Duration::from_secs(6);
+const BUG_FOR: Duration = Duration::from_secs(6);
 const COPIED: &str = "copied to clipboard";
 const UPDATE_AVAILABLE: &str = "a new cornercase is out";
 const UPDATE_SUBMIT: &str = "update";
@@ -202,6 +212,7 @@ const COMPARE_SUBMIT: &str = "compare";
 const CHANGES_LABEL: &str = "changes";
 const SENT_TO_AGENT: &str = "sent to the agent";
 const NO_AGENT: &str = "no agent here, so the reference is copied";
+const NOT_READING: &str = "the program in this pane is not reading what it gets";
 const EDIT_SCRIPT: &str = "exec ${VISUAL:-${EDITOR:-vi}} \"+$1\" \"$2\"";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,6 +231,8 @@ enum Overlay {
     GroupStyle { group: u64 },
     DeleteGroup { group: u64 },
     CloseProject { project: u64 },
+    CloseWorkspace { project: u64, workspace: u64 },
+    CloseTab { project: u64, workspace: u64, tab: u64 },
     NewWorkspace { project: u64, input: String, worktree: Option<bool>, error: Option<String>, creating: bool },
     Settings(Box<Settings>),
     Rename { target: Target, input: String },
@@ -239,7 +252,7 @@ impl Overlay {
             Self::RemoveWorkspace { force: true, .. } => FORCE_REMOVE_SUBMIT,
             Self::RemoveWorkspace { .. } => REMOVE_SUBMIT,
             Self::DeleteGroup { .. } => DELETE_SUBMIT,
-            Self::CloseProject { .. } => CLOSE_SUBMIT,
+            Self::CloseProject { .. } | Self::CloseWorkspace { .. } | Self::CloseTab { .. } => CLOSE_SUBMIT,
             Self::Update(UpdateStep::Failed(_)) => RETRY_UPDATE_SUBMIT,
             Self::Update(UpdateStep::Installed) => RESTART_SUBMIT,
             Self::Update(UpdateStep::Manual(_)) => COPY_COMMAND_SUBMIT,
@@ -280,6 +293,7 @@ struct RowDrag {
     moved: bool,
     area: Rect,
     scrolled: Option<Instant>,
+    fold: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -292,18 +306,24 @@ struct Focus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Toast {
     message: String,
-    status: Option<activity::Status>,
+    icon: ui::ToastIcon,
     at: Instant,
     undo: Option<todo::Removed>,
 }
 
 impl Toast {
-    fn new(message: impl Into<String>, status: Option<activity::Status>) -> Self {
-        Self { message: message.into(), status, at: Instant::now(), undo: None }
+    fn new(message: impl Into<String>, icon: ui::ToastIcon) -> Self {
+        Self { message: message.into(), icon, at: Instant::now(), undo: None }
     }
 
     fn lasts(&self) -> Duration {
-        if self.undo.is_some() { UNDO_FOR } else { TOAST_FOR }
+        if self.undo.is_some() {
+            UNDO_FOR
+        } else if self.icon == ui::ToastIcon::Bug {
+            BUG_FOR
+        } else {
+            TOAST_FOR
+        }
     }
 }
 
@@ -335,6 +355,14 @@ fn measure_memory(term: &mut Term, measure: bool, now: Instant) {
     }
 }
 
+fn stopped_tabs(tabs: usize) -> String {
+    match tabs {
+        0 => String::new(),
+        1 => " Its tab and the programs running in it are stopped.".into(),
+        n => format!(" Its {n} tabs and the programs running in them are stopped."),
+    }
+}
+
 fn wheel(kind: MouseEventKind) -> Option<isize> {
     match kind {
         MouseEventKind::ScrollUp => Some(-WHEEL_ROWS),
@@ -350,6 +378,7 @@ pub struct App {
     projects_scroll: usize,
     workspaces_scroll: usize,
     followed: Focus,
+    drawn: ui::Areas,
     nav: Option<ui::Nav>,
     next_id: u64,
     detach: bool,
@@ -377,6 +406,7 @@ pub struct App {
     host_writes: Vec<Vec<u8>>,
     notifications: Vec<Notification>,
     accounts: HashMap<Source, Account>,
+    issue_epochs: HashMap<Source, u64>,
     issue_tab: Option<IssueTab>,
     settings_page: Page,
     apis: Apis,
@@ -397,11 +427,13 @@ pub struct App {
     usage_timeout: Duration,
     todos: Todos,
     todo: todo::Panel,
+    requests: control::Requests,
 }
 
 struct Apis {
     shortcut: String,
     linear: String,
+    jira: Option<String>,
 }
 
 impl Apis {
@@ -410,6 +442,7 @@ impl Apis {
         Self {
             shortcut: var(shortcut::API_ENV, shortcut::DEFAULT_API),
             linear: var(linear::API_ENV, linear::DEFAULT_API),
+            jira: std::env::var(jira::API_ENV).ok(),
         }
     }
 }
@@ -437,6 +470,7 @@ impl App {
             projects_scroll: 0,
             workspaces_scroll: 0,
             followed: Focus::default(),
+            drawn: ui::Areas::default(),
             nav: None,
             next_id: 1,
             detach: false,
@@ -464,6 +498,7 @@ impl App {
             host_writes: Vec::new(),
             notifications: Vec::new(),
             accounts: HashMap::new(),
+            issue_epochs: HashMap::new(),
             issue_tab: None,
             settings_page: Page::default(),
             apis: Apis::from_env(),
@@ -484,6 +519,7 @@ impl App {
             usage_timeout: usage::TIMEOUT,
             todos: Todos::default(),
             todo: todo::Panel::default(),
+            requests: control::Requests::default(),
         }
     }
 
@@ -500,6 +536,24 @@ impl App {
 
     pub fn set_theme(&mut self, theme: HostTheme) {
         self.theme = theme;
+    }
+
+    pub fn report_bug(&mut self) {
+        self.toast = Some(Toast::new(Error::Bug.to_string(), ui::ToastIcon::Bug));
+    }
+
+    pub fn reset_interaction(&mut self) {
+        self.overlay = None;
+        self.nav = None;
+        self.hover = None;
+        self.row_drag = None;
+        self.resizing = None;
+        self.divider_drag = None;
+        self.selecting = None;
+        self.todo.field = None;
+        if let Some(filter) = &mut self.changes.filter {
+            filter.focused = false;
+        }
     }
 
     fn sidebar(&self) -> ui::Sidebar {
@@ -546,14 +600,17 @@ impl App {
         self.open_project(here, area)
     }
 
-    pub fn tick(&self) -> Option<Duration> {
-        self.row_drag.filter(|d| d.moved).map(|_| AUTO_SCROLL_EVERY)
+    pub fn tick(&self, now: Instant) -> Option<Duration> {
+        let drag = self.row_drag.filter(|d| d.moved).map(|_| AUTO_SCROLL_EVERY);
+        let launch = (!self.launches.is_empty()).then_some(LAUNCH_EVERY);
+        [drag, launch, self.next_request(now)].into_iter().flatten().min()
     }
 
     pub fn refresh(&mut self, now: Instant) {
         self.reap();
         self.drive_launches(now);
         self.watch_agents(now);
+        self.check_requests(now);
         self.check_updates(now);
         self.refresh_changes(now);
         self.auto_scroll(now);
@@ -571,12 +628,14 @@ impl App {
         if read {
             self.watched = Some(now);
         }
-        let measured = self.project().map(|p| p.id).filter(|_| self.config.memory);
-        let (config, dir) = (&self.config, self.claude_dir.as_deref());
+        let active = self.project().map(|p| p.id);
+        let open = self.tree_open();
+        let (config, dir, tree) = (&self.config, self.claude_dir.as_deref(), self.drawn.tree);
         let mut notices = Vec::new();
-        for project in &mut self.projects {
-            let measure = measured == Some(project.id);
+        for (project, open) in self.projects.iter_mut().zip(open) {
+            let shown = if tree { open } else { active == Some(project.id) };
             for workspace in &mut project.workspaces {
+                let measure = config.memory && shown && !(tree && workspace.collapsed);
                 for tab in &mut workspace.tabs {
                     let seen = visible == Some(tab.id);
                     for term in &mut tab.panes {
@@ -612,7 +671,7 @@ impl App {
         let place = format!("{} › {}", self.project_label(project), project.workspaces[w].label());
         let message = notify::clean(&format!("{agent} {what} in {place}"));
         self.notifications.extend(Notification::new(&message, &self.config.desktop_notifications));
-        self.toast = Some(Toast::new(message, Some(status)));
+        self.toast = Some(Toast::new(message, ui::ToastIcon::Agent(status)));
     }
 
     fn count_behind(&mut self, now: Instant) {
@@ -641,7 +700,8 @@ impl App {
             }
             let (id, repo, tx) = (project.id, project.path.clone(), self.tx.clone());
             std::thread::spawn(move || {
-                let behind = upstream::check(&repo, &workspaces, fetch);
+                let behind = panics::contain(|| upstream::check(&repo, &workspaces, fetch))
+                    .unwrap_or_else(|| workspaces.iter().map(|(id, _)| (*id, 0)).collect());
                 let _ = tx.send(AppEvent::Behind { project: id, behind });
             });
         }
@@ -656,7 +716,7 @@ impl App {
         let Some((generation, request)) = self.changes.request(&target, now) else { return };
         let (tx, workspace) = (self.tx.clone(), target.workspace);
         std::thread::spawn(move || {
-            let result = changes::git::load(&request);
+            let result = panics::job(|| changes::git::load(&request));
             let _ = tx.send(AppEvent::Changes { workspace, generation, request: Box::new(request), result });
         });
     }
@@ -683,7 +743,7 @@ impl App {
         let mut finished = Vec::new();
         for (i, launch) in self.launches.iter_mut().enumerate() {
             let Some(term) = self.projects.iter_mut().flat_map(Project::terms_mut).find(|t| t.id == launch.term) else {
-                finished.push(i);
+                finished.push((i, false));
                 continue;
             };
             let shell_in_foreground = term.shell_in_foreground();
@@ -700,19 +760,28 @@ impl App {
             };
             match launch.step(now, &mut seen) {
                 Step::Wait => {}
-                Step::Write(bytes) => term.write(&bytes),
-                Step::Done(bytes) => {
-                    term.write(&bytes);
-                    finished.push(i);
+                Step::Write(bytes) => {
+                    if !(bytes.is_empty() || term.write(&bytes)) {
+                        finished.push((i, false));
+                    }
+                }
+                Step::Done(bytes) if !(bytes.is_empty() || term.write(&bytes)) => finished.push((i, false)),
+                Step::Done(_) => {
+                    if launch.submits() {
+                        term.submitted = Some(now);
+                    }
+                    finished.push((i, true));
                 }
                 Step::Abandon => {
                     eprintln!("cornercase server: the agent did not start in terminal {}", launch.term);
-                    finished.push(i);
+                    finished.push((i, false));
                 }
             }
         }
-        for i in finished.into_iter().rev() {
-            self.launches.remove(i);
+        for (i, started) in finished.into_iter().rev() {
+            if let Some(key) = self.launches.remove(i).key {
+                self.requests.launched(key, started);
+            }
         }
     }
 
@@ -778,17 +847,20 @@ impl App {
 
     fn open_project(&mut self, dir: PathBuf, area: Rect) -> Result<()> {
         let path = dir.canonicalize().unwrap_or(dir);
-        if let Some(i) = self.projects.iter().position(|p| p.path == path) {
-            self.active = i;
-            return Ok(());
-        }
+        self.active = match self.projects.iter().position(|p| p.path == path) {
+            Some(i) => i,
+            None => self.add_project(path, area)?,
+        };
+        Ok(())
+    }
+
+    fn add_project(&mut self, path: PathBuf, area: Rect) -> Result<usize> {
         let workspace = self.new_workspace(area, path.clone(), None, false)?;
         let mut project = Project::new(self.take_id(), path, None);
         project.workspaces.push(workspace);
         self.projects.push(project);
-        self.active = self.projects.len() - 1;
         self.sync_worktrees();
-        Ok(())
+        Ok(self.projects.len() - 1)
     }
 
     fn project(&self) -> Option<&Project> {
@@ -818,19 +890,28 @@ impl App {
     }
 
     fn follow(&mut self, area: Rect) {
+        let areas = self.layout(area);
+        let relayout = areas.tree != self.drawn.tree;
+        self.drawn = areas;
         let focus = self.focus();
-        if focus == self.followed {
+        let before = std::mem::replace(&mut self.followed, focus);
+        if focus == before && !relayout {
             return;
         }
-        let areas = self.layout(area);
-        if focus.project != self.followed.project {
+        if before.project.is_some() && (focus.project, focus.workspace) != (before.project, before.workspace) {
+            self.unfold_focus();
+        }
+        if areas.tree {
+            self.reveal_in_tree(areas.list);
+            return;
+        }
+        if focus.project != before.project || relayout {
             let sidebar = self.sidebar_rows();
             let rows = ui::project_rows(areas.list, areas.pitch, &sidebar, self.projects_scroll);
             if let Some(i) = self.active_row(&sidebar) {
                 self.projects_scroll = rows.reveal(i);
             }
         }
-        self.followed = focus;
         let Some(project) = self.project() else { return };
         let w = project.active;
         let mut shown = vec![WorkspaceRow::Workspace(w)];
@@ -844,6 +925,32 @@ impl App {
                 let layout = ui::workspace_layout(areas.workspaces_list, areas.pitch, &tabs, self.workspaces_scroll);
                 self.workspaces_scroll = layout.reveal(i);
             }
+        }
+    }
+
+    fn reveal_in_tree(&mut self, list: Rect) {
+        let Some(project) = self.project() else { return };
+        let (p, w) = (self.active, project.active);
+        let t = project.workspace().filter(|w| !w.tabs.is_empty()).map(|w| w.active);
+        let shape = self.tree_shape();
+        let rows = ui::tree_rows(&shape);
+        let shown =
+            [rows.iter().position(|r| *r == ui::TreeRow::Project(p)), ui::tree_active_row(&rows, &shape, (p, w, t))];
+        for i in shown.into_iter().flatten() {
+            self.projects_scroll = ui::tree_layout_rows(list, &shape, &rows, self.projects_scroll).reveal(i);
+        }
+    }
+
+    fn unfold_focus(&mut self) {
+        let tree = self.drawn.tree;
+        let Some(project) = self.projects.get_mut(self.active) else { return };
+        project.collapsed = false;
+        if let Some(workspace) = project.workspace_mut() {
+            workspace.collapsed = false;
+        }
+        let group = project.group;
+        if tree && let Some(entry) = group.and_then(|id| self.group_mut(id)) {
+            entry.collapsed = false;
         }
     }
 
@@ -943,9 +1050,11 @@ impl App {
                             })
                             .collect(),
                         active: w.active,
+                        collapsed: w.collapsed,
                     })
                     .collect(),
                 active: p.active,
+                collapsed: p.collapsed,
             })
             .collect();
         let chosen = self.issue_tab.is_some() || self.issue_closed || self.issue_people != People::default();
@@ -994,6 +1103,7 @@ impl App {
             }
             let mut project = Project::new(self.take_id(), path, saved_project.name.clone());
             project.group = saved_project.group.and_then(|g| self.groups.get(first_group + g)).map(|g| g.id);
+            project.collapsed = saved_project.collapsed;
             for saved_ws in &saved_project.workspaces {
                 if let Some(workspace) = self.restore_workspace(saved_ws, area)? {
                     project.workspaces.push(workspace);
@@ -1016,6 +1126,7 @@ impl App {
         }
         let mut workspace = Workspace::new(self.take_id(), path.clone(), saved.name.clone(), saved.worktree);
         workspace.base.clone_from(&saved.base);
+        workspace.collapsed = saved.collapsed;
         for saved_tab in saved.tabs.iter().filter(|t| !t.panes.is_empty()) {
             let mut panes = Vec::new();
             for pane in &saved_tab.panes {
@@ -1036,6 +1147,18 @@ impl App {
         let Some(p) = self.projects.iter_mut().position(|p| p.remove_term(id)) else { return };
         if self.projects[p].closing && !self.projects[p].has_terms() {
             self.remove_project(p);
+        }
+        if self.closing_gone() {
+            self.overlay = None;
+        }
+    }
+
+    fn closing_gone(&self) -> bool {
+        match self.overlay {
+            Some(Overlay::CloseProject { project }) => self.project_index(project).is_none(),
+            Some(Overlay::CloseWorkspace { project, workspace }) => self.workspace_index(project, workspace).is_none(),
+            Some(Overlay::CloseTab { project, workspace, tab }) => self.tab_index(project, workspace, tab).is_none(),
+            _ => false,
         }
     }
 
@@ -1058,22 +1181,44 @@ impl App {
             AppEvent::Input(Event::Mouse(ev)) => self.handle_mouse(ev, area)?,
             AppEvent::Input(Event::Paste(text)) => self.handle_paste(&text),
             AppEvent::Exited(id) => self.remove(id),
-            AppEvent::WorktreeCreated { project, result, start } => {
+            AppEvent::WorktreeCreated { project, result, request: Some(key), .. } => {
+                self.worktree_ready(key, project, result, area);
+            }
+            AppEvent::WorktreeCreated { project, result, start, request: None } => {
                 self.worktree_created(project, result, start, area)?;
             }
-            AppEvent::WorktreeRemoved { project, workspace, result } => {
+            AppEvent::WorktreeRemoved { project, workspace, result, request: Some(key) } => {
+                self.worktree_gone(key, project, workspace, result);
+            }
+            AppEvent::WorktreeRemoved { project, workspace, result, request: None } => {
                 self.worktree_removed(project, workspace, result);
             }
-            AppEvent::IssuesLoaded { project, source, query, result } => {
-                self.issues_loaded(project, source, &query, result);
+            AppEvent::IssuesLoaded { project, source, epoch, query, result } => {
+                if epoch == self.epoch(source) {
+                    self.issues_loaded(project, source, &query, result);
+                }
             }
-            AppEvent::IssueRead { source, key, result } => {
-                if let Some(Overlay::Issues(b)) = &mut self.overlay {
+            AppEvent::IssueRead { source, epoch, key, result } => {
+                let current = epoch == self.epoch(source);
+                if let Some(Overlay::Issues(b)) = &mut self.overlay
+                    && current
+                {
                     b.read_done(source, &key, result.map_err(|e| e.to_string()));
                 }
             }
-            AppEvent::TokenChecked { source, token, result } => self.token_checked(source, &token, result, area)?,
-            AppEvent::PeopleLoaded { project, source, result } => self.people_loaded(project, source, result),
+            AppEvent::TokenChecked { source, epoch, token, result } => {
+                let result = if epoch == self.epoch(source) {
+                    result
+                } else {
+                    Err(Error::Api(format!("the {} settings changed during the check", source.name())))
+                };
+                self.token_checked(source, &token, result, area)?;
+            }
+            AppEvent::PeopleLoaded { project, source, epoch, result } => {
+                if epoch == self.epoch(source) {
+                    self.people_loaded(project, source, result);
+                }
+            }
             AppEvent::Behind { project, behind } => self.behind_counted(project, &behind),
             AppEvent::Changes { workspace, generation, request, result } => {
                 self.changes.loaded(workspace, generation, &request, result);
@@ -1084,7 +1229,7 @@ impl App {
             AppEvent::Updated(result) => self.updated(result),
             AppEvent::Usage(agent, result) => self.usage.answered(agent, result, Instant::now()),
             AppEvent::Output(id, bytes) => {
-                if let Some(launch) = self.launches.iter_mut().find(|l| l.term == id) {
+                for launch in self.launches.iter_mut().filter(|l| l.term == id) {
                     launch.output(Instant::now());
                 }
                 if let Some(t) = self.projects.iter_mut().flat_map(Project::terms_mut).find(|t| t.id == id) {
@@ -1122,8 +1267,8 @@ impl App {
     fn forward_key(&mut self, key: KeyEvent) {
         let Some(term) = self.term_mut() else { return };
         let bytes = term.emulator.encode_key(key);
-        if !bytes.is_empty() {
-            term.write(&bytes);
+        if !bytes.is_empty() && !term.write(&bytes) {
+            self.toast = Some(Toast::new(NOT_READING, ui::ToastIcon::Bug));
         }
     }
 
@@ -1194,12 +1339,7 @@ impl App {
             return Ok(());
         }
         if areas.list.contains(pos) {
-            if left {
-                self.click_projects(areas.list, areas.pitch, pos, area);
-            } else if right {
-                self.open_project_menu(areas.list, areas.pitch, pos);
-            }
-            return Ok(());
+            return self.list_mouse(&areas, pos, ev.kind, area);
         }
         if areas.issues.contains(pos) {
             if left && self.issues_available() {
@@ -1221,6 +1361,17 @@ impl App {
             return Ok(());
         }
         self.pane_mouse(ev, pos, areas.pane);
+        Ok(())
+    }
+
+    fn list_mouse(&mut self, areas: &ui::Areas, pos: Position, kind: MouseEventKind, area: Rect) -> Result<()> {
+        match (kind, areas.tree) {
+            (MouseEventKind::Down(MouseButton::Left), true) => return self.click_tree(areas.list, pos, area),
+            (MouseEventKind::Down(MouseButton::Right), true) => self.open_tree_menu(areas.list, pos),
+            (MouseEventKind::Down(MouseButton::Left), false) => self.click_projects(areas.list, areas.pitch, pos, area),
+            (MouseEventKind::Down(MouseButton::Right), false) => self.open_project_menu(areas.list, areas.pitch, pos),
+            _ => {}
+        }
         Ok(())
     }
 
@@ -1263,8 +1414,7 @@ impl App {
     fn scroll_column(&mut self, areas: &ui::Areas, pos: Position, delta: isize) -> bool {
         let items = if areas.pitch > 1 { delta.signum() } else { delta };
         if areas.sidebar.contains(pos) {
-            let rows = ui::project_rows(areas.list, areas.pitch, &self.sidebar_rows(), self.projects_scroll);
-            self.projects_scroll = rows.scrolled(items);
+            self.projects_scroll = self.sidebar_layout(areas).scrolled(items);
             true
         } else if areas.workspaces.contains(pos) {
             let tabs = self.tab_lines();
@@ -1405,22 +1555,9 @@ impl App {
     }
 
     fn pane_action(&mut self, pane: u64, action: PaneAction, area: Rect) -> Result<()> {
-        let Some((path, tab)) = self.tab_with_pane(pane) else { return Ok(()) };
+        let Some((_, tab)) = self.tab_with_pane(pane) else { return Ok(()) };
         match action {
-            PaneAction::Split(dir) => {
-                let cwd = tab
-                    .panes
-                    .iter()
-                    .find(|t| t.id == pane)
-                    .and_then(Term::cwd)
-                    .filter(|dir| dir.is_dir())
-                    .unwrap_or_else(|| path.to_path_buf());
-                let term = self.spawn(area, cwd)?;
-                if let Some((_, tab)) = self.tab_with_pane(pane) {
-                    tab.split(pane, dir, term);
-                }
-                self.resize(area);
-            }
+            PaneAction::Split(dir) => return self.split_pane(pane, dir, area, true).map(drop),
             PaneAction::RightClicksToPane | PaneAction::RightClicksToMenu => tab.toggle_right_clicks(pane),
             PaneAction::Close => {
                 if let Some(term) = tab.panes.iter_mut().find(|t| t.id == pane) {
@@ -1429,6 +1566,24 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    fn split_pane(&mut self, pane: u64, dir: Dir, area: Rect, focus: bool) -> Result<Option<u64>> {
+        let Some((path, tab)) = self.tab_with_pane(pane) else { return Ok(None) };
+        let cwd = tab
+            .panes
+            .iter()
+            .find(|t| t.id == pane)
+            .and_then(Term::cwd)
+            .filter(|dir| dir.is_dir())
+            .unwrap_or_else(|| path.to_path_buf());
+        let term = self.spawn(area, cwd)?;
+        let id = term.id;
+        if let Some((_, tab)) = self.tab_with_pane(pane) {
+            tab.split(pane, dir, term, focus);
+        }
+        self.resize(area);
+        Ok(Some(id))
     }
 
     fn press_border(&mut self, border: ui::Border, now: Instant) {
@@ -1463,15 +1618,14 @@ impl App {
         let rect = |row: SidebarRow| ui::entry_row(list, pitch, &rows, self.projects_scroll, row);
         match ui::sidebar_hit(list, pitch, &rows, self.projects_scroll, pos) {
             Some(SidebarHit::Select(i)) => {
-                self.grab(Target::Project(self.projects[i].id), rect(SidebarRow::Project(i)), area);
+                self.grab(Target::Project(self.projects[i].id), rect(SidebarRow::Project(i)), area, false);
             }
-            Some(SidebarHit::Close(i)) => self.overlay = Some(Overlay::CloseProject { project: self.projects[i].id }),
-            Some(SidebarHit::Group(g)) => self.grab(Target::Group(self.groups[g].id), rect(SidebarRow::Group(g)), area),
-            Some(SidebarHit::New) => {
-                self.overlay =
-                    Some(Overlay::Menu { at: pos, actions: vec![MenuAction::OpenProject, MenuAction::NewGroup] });
+            Some(SidebarHit::Close(i)) => self.close_row(ui::TreeRow::Project(i)),
+            Some(SidebarHit::Group(g)) => {
+                self.grab(Target::Group(self.groups[g].id), rect(SidebarRow::Group(g)), area, false);
             }
-            Some(SidebarHit::CloseGroup(g)) => self.overlay = Some(Overlay::DeleteGroup { group: self.groups[g].id }),
+            Some(SidebarHit::New) => self.new_project_menu(pos),
+            Some(SidebarHit::CloseGroup(g)) => self.close_row(ui::TreeRow::Group(g)),
             None => {}
         }
     }
@@ -1486,8 +1640,12 @@ impl App {
         }
     }
 
-    fn grab(&mut self, target: Target, row: Rect, area: Rect) {
-        self.row_drag = Some(RowDrag { target: Grab::Row(target), row, moved: false, area, scrolled: None });
+    fn grab(&mut self, target: Target, row: Rect, area: Rect, fold: bool) {
+        self.row_drag = Some(RowDrag { target: Grab::Row(target), row, moved: false, area, scrolled: None, fold });
+    }
+
+    fn new_project_menu(&mut self, pos: Position) {
+        self.overlay = Some(Overlay::Menu { at: pos, actions: vec![MenuAction::OpenProject, MenuAction::NewGroup] });
     }
 
     fn drag_row(&mut self, drag: RowDrag, ev: MouseEvent, areas: &ui::Areas, area: Rect) {
@@ -1502,6 +1660,7 @@ impl App {
                 let dropped = drag.moved || !drag.row.contains(pos);
                 match drag.target {
                     Grab::Row(target) if dropped => self.drop_row(target, pos, area),
+                    Grab::Row(target) if drag.fold => self.toggle_fold(target),
                     Grab::Row(target) => self.click_row(target),
                     Grab::Todo(id) if dropped => self.drop_todo(id, pos, area),
                     Grab::Todo(id) => self.click_todo(id, drag.row, pos, area),
@@ -1531,6 +1690,7 @@ impl App {
                 if let Some(p) = self.project_index(id) {
                     self.active = p;
                     self.nav = self.nav.map(|_| ui::Nav::Workspaces);
+                    self.unfold_focus();
                 }
             }
             Target::Workspace(project, workspace) => {
@@ -1542,8 +1702,146 @@ impl App {
         }
     }
 
+    fn toggle_fold(&mut self, target: Target) {
+        match target {
+            Target::Project(id) => {
+                if let Some(p) = self.project_index(id) {
+                    self.projects[p].collapsed = !self.projects[p].collapsed;
+                }
+            }
+            Target::Workspace(project, workspace) => {
+                if let Some((p, w)) = self.workspace_index(project, workspace) {
+                    let workspace = &mut self.projects[p].workspaces[w];
+                    workspace.collapsed = !workspace.collapsed;
+                }
+            }
+            Target::Group(_) | Target::Tab(..) => self.click_row(target),
+        }
+    }
+
+    fn tree_open(&self) -> Vec<bool> {
+        let folded = |id: u64| self.group(id).is_some_and(|g| g.collapsed);
+        self.projects.iter().map(|p| !p.collapsed && !p.group.is_some_and(folded)).collect()
+    }
+
+    fn tree_shape(&self) -> ui::TreeShape {
+        let groups = self.groups.iter().map(|g| g.entry.collapsed).collect();
+        let projects =
+            self.projects.iter().zip(self.project_groups()).zip(self.tree_open()).map(|((p, group), open)| {
+                let workspaces = p.workspaces.iter().map(|w| ui::WorkspaceShape {
+                    collapsed: w.collapsed,
+                    tabs: if open && !w.collapsed {
+                        w.tabs.iter().map(|t| self.tab_details(t).lines()).collect()
+                    } else {
+                        Vec::new()
+                    },
+                });
+                ui::ProjectShape { group, collapsed: p.collapsed, workspaces: workspaces.collect() }
+            });
+        ui::TreeShape { groups, projects: projects.collect() }
+    }
+
+    fn sidebar_layout(&self, areas: &ui::Areas) -> ui::Rows {
+        if areas.tree {
+            self.tree_layout(areas.list)
+        } else {
+            ui::project_rows(areas.list, areas.pitch, &self.sidebar_rows(), self.projects_scroll)
+        }
+    }
+
+    fn tree_layout(&self, list: Rect) -> ui::Rows {
+        let shape = self.tree_shape();
+        ui::tree_layout_rows(list, &shape, &ui::tree_rows(&shape), self.projects_scroll)
+    }
+
+    fn tree_target(&self, row: ui::TreeRow) -> Option<Target> {
+        let project = |p: usize| self.projects.get(p);
+        Some(match row {
+            ui::TreeRow::Group(g) => Target::Group(self.groups.get(g)?.id),
+            ui::TreeRow::Project(p) => Target::Project(project(p)?.id),
+            ui::TreeRow::Workspace(p, w) => {
+                let project = project(p)?;
+                Target::Workspace(project.id, project.workspaces.get(w)?.id)
+            }
+            ui::TreeRow::Tab(p, w, t) => {
+                let project = project(p)?;
+                let workspace = project.workspaces.get(w)?;
+                Target::Tab(project.id, workspace.id, workspace.tabs.get(t)?.id)
+            }
+            _ => return None,
+        })
+    }
+
+    fn tree_row_of(&self, target: Target) -> Option<ui::TreeRow> {
+        Some(match target {
+            Target::Group(id) => ui::TreeRow::Group(self.group_index(id)?),
+            Target::Project(id) => ui::TreeRow::Project(self.project_index(id)?),
+            Target::Workspace(project, workspace) => {
+                let (p, w) = self.workspace_index(project, workspace)?;
+                ui::TreeRow::Workspace(p, w)
+            }
+            Target::Tab(project, workspace, tab) => {
+                let (p, w) = self.workspace_index(project, workspace)?;
+                let t = self.projects[p].workspaces[w].tabs.iter().position(|t| t.id == tab)?;
+                ui::TreeRow::Tab(p, w, t)
+            }
+        })
+    }
+
+    fn click_tree(&mut self, list: Rect, pos: Position, area: Rect) -> Result<()> {
+        let shape = self.tree_shape();
+        let scroll = self.projects_scroll;
+        match ui::tree_hit(list, &shape, scroll, pos) {
+            Some(hit @ (ui::TreeHit::Select(row) | ui::TreeHit::Fold(row))) => {
+                if let Some(target) = self.tree_target(row) {
+                    let rect = ui::tree_row(list, &shape, scroll, row);
+                    self.grab(target, rect, area, matches!(hit, ui::TreeHit::Fold(_)));
+                }
+            }
+            Some(ui::TreeHit::Close(row)) => self.close_row(row),
+            Some(ui::TreeHit::NewTab(p, w)) => self.add_tab(p, w, area)?,
+            Some(ui::TreeHit::NewWorkspace(p)) => self.ask_new_workspace(p),
+            Some(ui::TreeHit::NewProject) => self.new_project_menu(pos),
+            None => {}
+        }
+        Ok(())
+    }
+
+    fn close_row(&mut self, row: ui::TreeRow) {
+        match row {
+            ui::TreeRow::Group(g) => self.overlay = Some(Overlay::DeleteGroup { group: self.groups[g].id }),
+            ui::TreeRow::Project(p) => self.overlay = Some(Overlay::CloseProject { project: self.projects[p].id }),
+            ui::TreeRow::Workspace(p, w) => self.close_workspace(p, w),
+            ui::TreeRow::Tab(p, w, t) => self.close_tab(p, w, t),
+            _ => {}
+        }
+    }
+
+    fn close_tab(&mut self, p: usize, w: usize, t: usize) {
+        for term in &mut self.projects[p].workspaces[w].tabs[t].panes {
+            term.kill();
+        }
+    }
+
+    fn ask_new_workspace(&mut self, p: usize) {
+        let project = &self.projects[p];
+        let worktree = git::is_repo_root(&project.path).then_some(true);
+        self.overlay = Some(Overlay::NewWorkspace {
+            project: project.id,
+            input: String::new(),
+            worktree,
+            error: None,
+            creating: false,
+        });
+    }
+
     fn drag_view(&self, target: Target, pos: Position, area: Rect) -> Option<ui::Drag> {
         let areas = self.layout(area).shown(self.nav);
+        let row = self.tree_row_of(target)?;
+        if areas.tree {
+            let shape = self.tree_shape();
+            return Some(ui::Drag::Tree(row, ui::tree_drop(areas.list, &shape, self.projects_scroll, row, pos)));
+        }
         let sidebar = |row: SidebarRow| {
             let rows = self.sidebar_rows();
             ui::Drag::Sidebar(row, ui::sidebar_drop(areas.list, areas.pitch, &rows, self.projects_scroll, row, pos))
@@ -1552,47 +1850,37 @@ impl App {
             let (list, tabs) = (areas.workspaces_list, self.tab_lines());
             ui::Drag::Workspaces(row, ui::workspace_drop(list, areas.pitch, &tabs, self.workspaces_scroll, row, pos))
         };
-        match target {
-            Target::Group(id) => Some(sidebar(SidebarRow::Group(self.group_index(id)?))),
-            Target::Project(id) => Some(sidebar(SidebarRow::Project(self.project_index(id)?))),
-            Target::Workspace(project, workspace) => {
-                let (_, w) = self.workspace_index(project, workspace).filter(|(p, _)| *p == self.active)?;
-                Some(workspaces(WorkspaceRow::Workspace(w)))
-            }
-            Target::Tab(project, workspace, tab) => {
-                let (p, w) = self.workspace_index(project, workspace).filter(|(p, _)| *p == self.active)?;
-                let t = self.projects[p].workspaces[w].tabs.iter().position(|t| t.id == tab)?;
-                Some(workspaces(WorkspaceRow::Tab(w, t)))
-            }
+        match row {
+            ui::TreeRow::Group(g) => Some(sidebar(SidebarRow::Group(g))),
+            ui::TreeRow::Project(p) => Some(sidebar(SidebarRow::Project(p))),
+            ui::TreeRow::Workspace(p, w) if p == self.active => Some(workspaces(WorkspaceRow::Workspace(w))),
+            ui::TreeRow::Tab(p, w, t) if p == self.active => Some(workspaces(WorkspaceRow::Tab(w, t))),
+            _ => None,
         }
     }
 
     fn drop_row(&mut self, target: Target, pos: Position, area: Rect) {
-        let Some(ui::Drag::Sidebar(_, Some(landing)) | ui::Drag::Workspaces(_, Some(landing))) =
-            self.drag_view(target, pos, area)
+        let Some(
+            ui::Drag::Sidebar(_, Some(landing))
+            | ui::Drag::Workspaces(_, Some(landing))
+            | ui::Drag::Tree(_, Some(landing)),
+        ) = self.drag_view(target, pos, area)
         else {
             return;
         };
-        match (target, landing.spot) {
-            (Target::Group(id), ui::Spot::Group(before)) => {
-                if let Some(g) = self.group_index(id) {
-                    move_before(&mut self.groups, g, before, None);
-                }
+        let Some(row) = self.tree_row_of(target) else { return };
+        match (row, landing.spot) {
+            (ui::TreeRow::Group(g), ui::Spot::Group(before)) => move_before(&mut self.groups, g, before, None),
+            (ui::TreeRow::Project(p), ui::Spot::Project { group, before }) => {
+                self.move_project(self.projects[p].id, group, before);
             }
-            (Target::Project(id), ui::Spot::Project { group, before }) => self.move_project(id, group, before),
-            (Target::Workspace(project, workspace), ui::Spot::Workspace(before)) => {
-                if let Some((p, w)) = self.workspace_index(project, workspace) {
-                    let project = &mut self.projects[p];
-                    move_before(&mut project.workspaces, w, before, Some(&mut project.active));
-                }
+            (ui::TreeRow::Workspace(p, w), ui::Spot::Workspace(before)) => {
+                let project = &mut self.projects[p];
+                move_before(&mut project.workspaces, w, before, Some(&mut project.active));
             }
-            (Target::Tab(project, workspace, tab), ui::Spot::Tab(before)) => {
-                if let Some((p, w)) = self.workspace_index(project, workspace) {
-                    let workspace = &mut self.projects[p].workspaces[w];
-                    if let Some(t) = workspace.tabs.iter().position(|t| t.id == tab) {
-                        move_before(&mut workspace.tabs, t, before, Some(&mut workspace.active));
-                    }
-                }
+            (ui::TreeRow::Tab(p, w, t), ui::Spot::Tab(before)) => {
+                let workspace = &mut self.projects[p].workspaces[w];
+                move_before(&mut workspace.tabs, t, before, Some(&mut workspace.active));
             }
             _ => {}
         }
@@ -1625,9 +1913,9 @@ impl App {
             }
             return;
         };
-        let sidebar = matches!(target, Target::Group(_) | Target::Project(_));
+        let sidebar = areas.tree || matches!(target, Target::Group(_) | Target::Project(_));
         let rows = if sidebar {
-            ui::project_rows(areas.list, areas.pitch, &self.sidebar_rows(), self.projects_scroll)
+            self.sidebar_layout(&areas)
         } else {
             ui::workspace_layout(areas.workspaces_list, areas.pitch, &self.tab_lines(), self.workspaces_scroll)
         };
@@ -1661,70 +1949,68 @@ impl App {
             self.nav = None;
         }
         let p = self.active;
+        let ask = pitch > 1;
         let rect = |row: WorkspaceRow| ui::workspace_row(list, pitch, &tabs, self.workspaces_scroll, row);
         let project = &self.projects[p];
         match hit {
             Some(WorkspaceHit::Workspace(w)) => {
                 let target = Target::Workspace(project.id, project.workspaces[w].id);
-                self.grab(target, rect(WorkspaceRow::Workspace(w)), area);
+                self.grab(target, rect(WorkspaceRow::Workspace(w)), area, false);
+            }
+            Some(WorkspaceHit::CloseWorkspace(w)) if ask && !project.workspaces[w].worktree => {
+                self.overlay =
+                    Some(Overlay::CloseWorkspace { project: project.id, workspace: project.workspaces[w].id });
             }
             Some(WorkspaceHit::CloseWorkspace(w)) => self.close_workspace(p, w),
             Some(WorkspaceHit::Tab(w, t)) => {
                 let workspace = &project.workspaces[w];
                 let target = Target::Tab(project.id, workspace.id, workspace.tabs[t].id);
-                self.grab(target, rect(WorkspaceRow::Tab(w, t)), area);
+                self.grab(target, rect(WorkspaceRow::Tab(w, t)), area, false);
             }
-            Some(WorkspaceHit::CloseTab(w, t)) => {
-                for term in &mut self.projects[p].workspaces[w].tabs[t].panes {
-                    term.kill();
-                }
+            Some(WorkspaceHit::CloseTab(w, t)) if ask => {
+                let workspace = &project.workspaces[w];
+                let (project, workspace, tab) = (project.id, workspace.id, workspace.tabs[t].id);
+                self.overlay = Some(Overlay::CloseTab { project, workspace, tab });
             }
+            Some(WorkspaceHit::CloseTab(w, t)) => self.close_tab(p, w, t),
             Some(WorkspaceHit::NewTab(w)) => self.add_tab(p, w, area)?,
-            Some(WorkspaceHit::NewWorkspace) => {
-                let project = &self.projects[p];
-                let worktree = git::is_repo_root(&project.path).then_some(true);
-                self.overlay = Some(Overlay::NewWorkspace {
-                    project: project.id,
-                    input: String::new(),
-                    worktree,
-                    error: None,
-                    creating: false,
-                });
-            }
+            Some(WorkspaceHit::NewWorkspace) => self.ask_new_workspace(p),
             None => {}
         }
         Ok(())
     }
 
+    fn tab_index(&self, project: u64, workspace: u64, tab: u64) -> Option<(usize, usize, usize)> {
+        let (p, w) = self.workspace_index(project, workspace)?;
+        let t = self.projects[p].workspaces[w].tabs.iter().position(|t| t.id == tab)?;
+        Some((p, w, t))
+    }
+
     fn close_workspace(&mut self, p: usize, w: usize) {
-        let project = &mut self.projects[p];
-        let workspace = &mut project.workspaces[w];
-        if workspace.worktree {
-            self.overlay = Some(Overlay::RemoveWorkspace {
-                project: project.id,
-                workspace: workspace.id,
-                error: None,
-                force: false,
-                removing: false,
-            });
+        let (project, workspace) = (self.projects[p].id, self.projects[p].workspaces[w].id);
+        if self.projects[p].workspaces[w].worktree {
+            self.overlay =
+                Some(Overlay::RemoveWorkspace { project, workspace, error: None, force: false, removing: false });
             return;
         }
-        workspace.closing = true;
-        workspace.kill();
-        if workspace.tabs.is_empty() {
-            project.remove_workspace(w);
-        }
+        self.drop_workspace(project, workspace);
     }
 
     fn add_tab(&mut self, p: usize, w: usize, area: Rect) -> Result<()> {
-        let path = self.projects[p].workspaces[w].path.clone();
-        let tab = self.new_tab(area, path, None)?;
+        let t = self.push_tab(p, w, area, None)?;
         let project = &mut self.projects[p];
-        let workspace = &mut project.workspaces[w];
-        workspace.tabs.push(tab);
-        workspace.active = workspace.tabs.len() - 1;
+        project.workspaces[w].active = t;
         project.active = w;
+        self.active = p;
         Ok(())
+    }
+
+    fn push_tab(&mut self, p: usize, w: usize, area: Rect, name: Option<String>) -> Result<usize> {
+        let path = self.projects[p].workspaces[w].path.clone();
+        let tab = self.new_tab(area, path, name)?;
+        let workspace = &mut self.projects[p].workspaces[w];
+        workspace.tabs.push(tab);
+        Ok(workspace.tabs.len() - 1)
     }
 
     fn open_picker(&mut self) {
@@ -1797,6 +2083,25 @@ impl App {
         source.secret_key().and_then(|key| secrets::read(&self.secrets_path, key)).map(|token| (token, false))
     }
 
+    fn jira(&self, token: String) -> Option<jira::Api> {
+        let config = &self.config;
+        if config.jira_site.is_empty() || config.jira_email.is_empty() {
+            return None;
+        }
+        Some(jira::Api {
+            base: self.apis.jira.clone().unwrap_or_else(|| format!("https://{}", config.jira_site)),
+            site: config.jira_site.clone(),
+            email: config.jira_email.clone(),
+            token,
+            jql: config.jira_jql.clone(),
+        })
+    }
+
+    fn connected(&self, source: Source) -> Option<bool> {
+        let (token, from_env) = self.token(source)?;
+        (source != Source::Jira || self.jira(token).is_some()).then_some(from_env)
+    }
+
     fn client(&self, source: Source, project: u64) -> Option<Client> {
         match source {
             Source::Github => {
@@ -1807,6 +2112,7 @@ impl App {
                 Some(Client::Shortcut { base: self.apis.shortcut.clone(), token: self.token(source)?.0 })
             }
             Source::Linear => Some(Client::Linear { url: self.apis.linear.clone(), token: self.token(source)?.0 }),
+            Source::Jira => self.jira(self.token(source)?.0).map(Client::Jira),
         }
     }
 
@@ -1839,7 +2145,7 @@ impl App {
         let connections = Source::REMOTE
             .into_iter()
             .filter_map(|source| {
-                let (_, from_env) = self.token(source)?;
+                let from_env = self.connected(source)?;
                 Some((source, Connection { from_env, account: self.accounts.get(&source).cloned() }))
             })
             .collect();
@@ -1856,6 +2162,8 @@ impl App {
             lists: HashMap::new(),
             connections,
             forms: HashMap::new(),
+            jira_site: self.config.jira_site.clone(),
+            jira_email: self.config.jira_email.clone(),
             screen: Screen::List,
             starting: false,
             error: None,
@@ -1938,6 +2246,7 @@ impl App {
                 }
             }
             Action::CheckToken(source, token) => self.check_token(source, token),
+            Action::SaveJira { site, email } => return self.save_jira(site, email, area),
             Action::Disconnect(source) => self.disconnect(source),
             Action::Copy(url) => {
                 self.host_writes.push(clipboard::osc52(&url));
@@ -1986,10 +2295,10 @@ impl App {
     fn load_people(&mut self, source: Source) {
         let Some(project) = self.browser_project() else { return };
         let Some(client) = self.client(source, project) else { return };
-        let tx = self.tx.clone();
+        let (tx, epoch) = (self.tx.clone(), self.epoch(source));
         std::thread::spawn(move || {
-            let result = client.people();
-            let _ = tx.send(AppEvent::PeopleLoaded { project, source, result });
+            let result = panics::job(|| client.people());
+            let _ = tx.send(AppEvent::PeopleLoaded { project, source, epoch, result });
         });
     }
 
@@ -2021,10 +2330,10 @@ impl App {
             b.loaded(source, &query, Err(format!("{} is not connected", source.name())));
             return;
         };
-        let tx = self.tx.clone();
+        let (tx, epoch) = (self.tx.clone(), self.epoch(source));
         std::thread::spawn(move || {
-            let result = client.list(&query);
-            let _ = tx.send(AppEvent::IssuesLoaded { project, source, query, result });
+            let result = panics::job(|| client.list(&query));
+            let _ = tx.send(AppEvent::IssuesLoaded { project, source, epoch, query, result });
         });
     }
 
@@ -2055,16 +2364,52 @@ impl App {
             }
             return;
         };
-        let tx = self.tx.clone();
+        let (tx, epoch) = (self.tx.clone(), self.epoch(issue.source));
         std::thread::spawn(move || {
-            let result = client.read(&issue);
-            if let Ok(detail) = &result {
+            let result = panics::job(|| {
+                let detail = client.read(&issue)?;
                 std::iter::once(&detail.body).chain(detail.comments.iter().map(|c| &c.body)).for_each(|body| {
                     markdown::warm(body);
                 });
-            }
-            let _ = tx.send(AppEvent::IssueRead { source: issue.source, key: issue.key, result });
+                Ok(detail)
+            });
+            let _ = tx.send(AppEvent::IssueRead { source: issue.source, epoch, key: issue.key, result });
         });
+    }
+
+    fn save_jira(&mut self, site: String, email: String, area: Rect) -> Result<()> {
+        let config = Config { jira_site: site, jira_email: email, ..self.config.clone() };
+        let saved = config::save(&self.config_path, &config);
+        let Some(Overlay::Issues(b)) = &mut self.overlay else { return Ok(()) };
+        if let Err(e) = saved {
+            b.token_rejected(Source::Jira, format!("failed to save the settings: {e}"));
+            return Ok(());
+        }
+        self.set_config(config);
+        let Some(from_env) = self.connected(Source::Jira) else { return Ok(()) };
+        let Some(Overlay::Issues(b)) = &mut self.overlay else { return Ok(()) };
+        b.connected(Source::Jira, Connection { from_env, account: None });
+        let action = b.needs_load();
+        self.act(action, area)
+    }
+
+    fn set_config(&mut self, config: Config) {
+        let jira = |c: &Config| (c.jira_site.clone(), c.jira_email.clone(), c.jira_jql.clone());
+        if jira(&config) != jira(&self.config) {
+            self.forget_issues(Source::Jira);
+        }
+        self.config = config;
+    }
+
+    fn epoch(&self, source: Source) -> u64 {
+        self.issue_epochs.get(&source).copied().unwrap_or(0)
+    }
+
+    fn forget_issues(&mut self, source: Source) {
+        self.accounts.remove(&source);
+        self.issue_cache.forget(source);
+        self.people_cache.retain(|(s, _), _| *s != source);
+        *self.issue_epochs.entry(source).or_default() += 1;
     }
 
     fn check_token(&mut self, source: Source, token: Secret) {
@@ -2072,21 +2417,33 @@ impl App {
             Source::Github => return,
             Source::Shortcut => Client::Shortcut { base: self.apis.shortcut.clone(), token: token.0.clone() },
             Source::Linear => Client::Linear { url: self.apis.linear.clone(), token: token.0.clone() },
+            Source::Jira => {
+                let Some(api) = self.jira(token.0.clone()) else {
+                    let error = Err(Error::Api("set the Jira site and email first".into()));
+                    let epoch = self.epoch(source);
+                    let _ = self.tx.send(AppEvent::TokenChecked { source, epoch, token, result: error });
+                    return;
+                };
+                Client::Jira(api)
+            }
         };
-        let tx = self.tx.clone();
+        let (tx, epoch) = (self.tx.clone(), self.epoch(source));
         std::thread::spawn(move || {
-            let result = client.whoami();
-            let _ = tx.send(AppEvent::TokenChecked { source, token, result });
+            let result = panics::job(|| client.whoami());
+            let _ = tx.send(AppEvent::TokenChecked { source, epoch, token, result });
         });
     }
 
     fn token_checked(&mut self, source: Source, token: &Secret, result: Result<Account>, area: Rect) -> Result<()> {
         let saved = result.and_then(|account| {
-            let key = source.secret_key().ok_or_else(|| crate::error::Error::Api("nothing to save".into()))?;
+            let key = source.secret_key().ok_or_else(|| Error::Api("nothing to save".into()))?;
             secrets::write(&self.secrets_path, key, &token.0)
-                .map_err(|e| crate::error::Error::Api(format!("failed to save the {}: {e}", source.token_name())))?;
+                .map_err(|e| Error::Api(format!("failed to save the {}: {e}", source.token_name())))?;
             Ok(account)
         });
+        if saved.is_ok() {
+            self.forget_issues(source);
+        }
         if let Some(Overlay::Settings(s)) = &mut self.overlay {
             if let Ok(account) = &saved {
                 self.accounts.insert(source, account.clone());
@@ -2116,9 +2473,8 @@ impl App {
             b.error = Some(format!("failed to remove the {}: {e}", source.token_name()));
             return;
         }
-        self.accounts.remove(&source);
-        self.issue_cache.forget(source);
         b.disconnected(source);
+        self.forget_issues(source);
     }
 
     fn issues_key(&mut self, key: KeyEvent, area: Rect) -> Result<()> {
@@ -2145,7 +2501,7 @@ impl App {
             name: issues::workspace_name(issue),
             spec: launch::Spec {
                 command: agents::command_line(&self.config, agent),
-                prompt: issues::prompt(&self.config.prompt, issue, &branch),
+                prompt: Some(issues::prompt(&self.config.prompt, issue, &branch)),
                 submit: self.config.submit,
             },
         };
@@ -2164,13 +2520,7 @@ impl App {
             self.overlay = None;
             return self.open_workspace(p, w, Some(start), area);
         }
-        let repo = self.projects[p].path.clone();
-        let path = worktree::checkout_path(&self.config.worktrees_dir(self.home.as_deref()), &repo, &branch);
-        let tx = self.tx.clone();
-        std::thread::spawn(move || {
-            let result = worktree::create(&repo, &branch, &path).map(|()| path);
-            let _ = tx.send(AppEvent::WorktreeCreated { project, result, start: Some(start) });
-        });
+        self.spawn_worktree(p, branch, Some(start), None);
         if let Some(Overlay::Issues(b)) = &mut self.overlay {
             b.starting = true;
             b.error = None;
@@ -2178,13 +2528,28 @@ impl App {
         Ok(())
     }
 
-    fn open_tab_with(&mut self, p: usize, w: Option<usize>, start: Start, area: Rect) -> Result<()> {
+    fn spawn_worktree(&self, p: usize, branch: String, start: Option<Start>, request: Option<u64>) {
+        let project = &self.projects[p];
+        let (id, repo, tx) = (project.id, project.path.clone(), self.tx.clone());
+        let path = worktree::checkout_path(&self.config.worktrees_dir(self.home.as_deref()), &repo, &branch);
+        std::thread::spawn(move || {
+            let result = panics::job(|| worktree::create(&repo, &branch, &path).map(|()| path));
+            let _ = tx.send(AppEvent::WorktreeCreated { project: id, result, start, request });
+        });
+    }
+
+    fn ensure_workspace(&mut self, p: usize) -> usize {
         if self.projects[p].workspaces.is_empty() {
             let id = self.take_id();
             let path = self.projects[p].path.clone();
             self.projects[p].workspaces.push(Workspace::new(id, path, None, false));
         }
-        let w = w.unwrap_or(self.projects[p].active).min(self.projects[p].workspaces.len() - 1);
+        self.projects[p].active.min(self.projects[p].workspaces.len() - 1)
+    }
+
+    fn open_tab_with(&mut self, p: usize, w: Option<usize>, start: Start, area: Rect) -> Result<()> {
+        let active = self.ensure_workspace(p);
+        let w = w.unwrap_or(active).min(self.projects[p].workspaces.len() - 1);
         self.add_tab(p, w, area)?;
         if let Some(tab) = self.projects[p].workspaces[w].tab_mut() {
             tab.name = Some(start.name);
@@ -2192,7 +2557,6 @@ impl App {
                 self.launches.push(Launch::new(term.id, start.spec, Instant::now()));
             }
         }
-        self.active = p;
         Ok(())
     }
 
@@ -2313,28 +2677,49 @@ impl App {
         let Some(p) = self.project_index(project) else { return };
         self.active = p;
         let project = &mut self.projects[p];
-        let Some(w) = workspace.and_then(|id| project.workspaces.iter().position(|w| w.id == id)) else { return };
-        project.active = w;
-        let workspace = &mut project.workspaces[w];
-        if let Some(t) = tab.and_then(|id| workspace.tabs.iter().position(|t| t.id == id)) {
-            workspace.active = t;
+        if let Some(w) = workspace.and_then(|id| project.workspaces.iter().position(|w| w.id == id)) {
+            project.active = w;
+            let workspace = &mut project.workspaces[w];
+            if let Some(t) = tab.and_then(|id| workspace.tabs.iter().position(|t| t.id == id)) {
+                workspace.active = t;
+            }
         }
+        self.unfold_focus();
     }
 
     fn open_project_menu(&mut self, list: Rect, pitch: u16, pos: Position) {
         let actions = match ui::sidebar_hit(list, pitch, &self.sidebar_rows(), self.projects_scroll, pos) {
-            Some(SidebarHit::Select(i) | SidebarHit::Close(i)) => {
-                let id = self.projects[i].id;
-                let mut actions = vec![MenuAction::Rename(Target::Project(id))];
-                if !self.groups.is_empty() {
-                    actions.push(MenuAction::MoveToGroup(id));
-                }
-                actions
-            }
-            Some(SidebarHit::Group(g) | SidebarHit::CloseGroup(g)) => {
-                let id = self.groups[g].id;
-                vec![MenuAction::Rename(Target::Group(id)), MenuAction::GroupStyle(id), MenuAction::DeleteGroup(id)]
-            }
+            Some(SidebarHit::Select(i) | SidebarHit::Close(i)) => self.project_menu(i),
+            Some(SidebarHit::Group(g) | SidebarHit::CloseGroup(g)) => self.group_menu(g),
+            _ => return,
+        };
+        self.overlay = Some(Overlay::Menu { at: pos, actions });
+    }
+
+    fn project_menu(&self, p: usize) -> Vec<MenuAction> {
+        let id = self.projects[p].id;
+        let mut actions = vec![MenuAction::Rename(Target::Project(id))];
+        if !self.groups.is_empty() {
+            actions.push(MenuAction::MoveToGroup(id));
+        }
+        actions
+    }
+
+    fn group_menu(&self, g: usize) -> Vec<MenuAction> {
+        let id = self.groups[g].id;
+        vec![MenuAction::Rename(Target::Group(id)), MenuAction::GroupStyle(id), MenuAction::DeleteGroup(id)]
+    }
+
+    fn open_tree_menu(&mut self, list: Rect, pos: Position) {
+        let Some(ui::TreeHit::Fold(row) | ui::TreeHit::Select(row) | ui::TreeHit::Close(row)) =
+            ui::tree_hit(list, &self.tree_shape(), self.projects_scroll, pos)
+        else {
+            return;
+        };
+        let actions = match (row, self.tree_target(row)) {
+            (ui::TreeRow::Group(g), _) => self.group_menu(g),
+            (ui::TreeRow::Project(p), _) => self.project_menu(p),
+            (_, Some(target)) => vec![MenuAction::Rename(target)],
             _ => return,
         };
         self.overlay = Some(Overlay::Menu { at: pos, actions });
@@ -2606,6 +2991,18 @@ impl App {
                 self.close_project(project);
                 None
             }
+            Overlay::CloseWorkspace { project, workspace } => {
+                if let Some((p, w)) = self.workspace_index(project, workspace) {
+                    self.close_workspace(p, w);
+                }
+                None
+            }
+            Overlay::CloseTab { project, workspace, tab } => {
+                if let Some((p, w, t)) = self.tab_index(project, workspace, tab) {
+                    self.close_tab(p, w, t);
+                }
+                None
+            }
             Overlay::Update(step) => self.submit_update(step),
             busy => Some(busy),
         };
@@ -2637,8 +3034,10 @@ impl App {
         self.updates.checked = Some(now);
         let (url, tx) = (self.updates.url.clone(), self.tx.clone());
         std::thread::spawn(move || {
-            let found = update::check(&url, update::CURRENT);
-            let found = found.map(|release| release.map(|release| update::with_changelog(release, update::CURRENT)));
+            let found = panics::job(|| {
+                let found = update::check(&url, update::CURRENT)?;
+                Ok(found.map(|release| update::with_changelog(release, update::CURRENT)))
+            });
             let _ = tx.send(AppEvent::UpdateChecked(found));
         });
     }
@@ -2647,7 +3046,7 @@ impl App {
         match result {
             Ok(Some(release)) if !self.updates.installed => {
                 if self.updates.available.as_ref().is_none_or(|known| known.version != release.version) {
-                    self.toast = Some(Toast::new(UPDATE_AVAILABLE, None));
+                    self.toast = Some(Toast::new(UPDATE_AVAILABLE, ui::ToastIcon::Check));
                 }
                 self.updates.available = Some(release);
             }
@@ -2718,7 +3117,7 @@ impl App {
                 };
                 let tx = self.tx.clone();
                 std::thread::spawn(move || {
-                    let _ = tx.send(AppEvent::Updated(update::update(&release, target, &exe)));
+                    let _ = tx.send(AppEvent::Updated(panics::job(|| update::update(&release, target, &exe))));
                 });
                 Some(Overlay::Update(UpdateStep::Updating))
             }
@@ -2790,7 +3189,7 @@ impl App {
             let command = agents::command(&self.config, agent.kind());
             let (timeout, tx) = (self.usage_timeout, self.tx.clone());
             std::thread::spawn(move || {
-                let _ = tx.send(AppEvent::Usage(agent, usage::probe(agent, &command, timeout)));
+                let _ = tx.send(AppEvent::Usage(agent, panics::job(|| usage::probe(agent, &command, timeout))));
             });
         }
     }
@@ -2890,7 +3289,7 @@ impl App {
                     }
                     return;
                 }
-                self.config = *config;
+                self.set_config(*config);
             }
             settings::Action::CheckToken(source, token) => self.check_token(source, token),
             settings::Action::RemoveToken(source) => {
@@ -2900,9 +3299,8 @@ impl App {
                     s.notice = Some(format!("failed to remove the {}: {e}", source.token_name()));
                     return;
                 }
-                self.accounts.remove(&source);
-                self.issue_cache.forget(source);
                 s.removed(source);
+                self.forget_issues(source);
             }
         }
     }
@@ -2915,21 +3313,17 @@ impl App {
             self.overlay = Some(Overlay::NewWorkspace { project, input, worktree, error, creating: false });
             return Ok(());
         }
-        let repo = self.projects[p].path.clone();
         if worktree == Some(true) {
-            let path = worktree::checkout_path(&self.config.worktrees_dir(self.home.as_deref()), &repo, &name);
-            let tx = self.tx.clone();
-            std::thread::spawn(move || {
-                let result = worktree::create(&repo, &name, &path).map(|()| path);
-                let _ = tx.send(AppEvent::WorktreeCreated { project, result, start: None });
-            });
+            self.spawn_worktree(p, name, None, None);
             self.overlay = Some(Overlay::NewWorkspace { project, input, worktree, error: None, creating: true });
             return Ok(());
         }
+        let repo = self.projects[p].path.clone();
         let workspace = self.new_workspace(area, repo, Some(name), false)?;
         let project = &mut self.projects[p];
         project.workspaces.push(workspace);
         project.active = project.workspaces.len() - 1;
+        self.active = p;
         Ok(())
     }
 
@@ -2961,14 +3355,17 @@ impl App {
             self.overlay = None;
         }
         let Some(p) = self.project_index(project) else { return Ok(()) };
-        let w = if let Some(w) = self.projects[p].workspaces.iter().position(|w| w.path == path) {
-            w
-        } else {
-            let id = self.take_id();
-            self.projects[p].workspaces.push(Workspace::new(id, path, None, true));
-            self.projects[p].workspaces.len() - 1
-        };
+        let w = self.worktree_workspace(p, path);
         self.open_workspace(p, w, start, area)
+    }
+
+    fn worktree_workspace(&mut self, p: usize, path: PathBuf) -> usize {
+        if let Some(w) = self.projects[p].workspaces.iter().position(|w| w.path == path) {
+            return w;
+        }
+        let id = self.take_id();
+        self.projects[p].workspaces.push(Workspace::new(id, path, None, true));
+        self.projects[p].workspaces.len() - 1
     }
 
     fn open_workspace(&mut self, p: usize, w: usize, start: Option<Start>, area: Rect) -> Result<()> {
@@ -2992,14 +3389,18 @@ impl App {
 
     fn remove_worktree(&mut self, project: u64, workspace: u64, force: bool) -> Option<Overlay> {
         let (p, w) = self.workspace_index(project, workspace)?;
-        let repo = self.projects[p].path.clone();
-        let path = self.projects[p].workspaces[w].path.clone();
-        let tx = self.tx.clone();
-        std::thread::spawn(move || {
-            let result = worktree::remove(&repo, &path, force);
-            let _ = tx.send(AppEvent::WorktreeRemoved { project, workspace, result });
-        });
+        self.spawn_removal(p, w, force, None);
         Some(Overlay::RemoveWorkspace { project, workspace, error: None, force, removing: true })
+    }
+
+    fn spawn_removal(&self, p: usize, w: usize, force: bool, request: Option<u64>) {
+        let project = &self.projects[p];
+        let (id, workspace) = (project.id, project.workspaces[w].id);
+        let (repo, path, tx) = (project.path.clone(), project.workspaces[w].path.clone(), self.tx.clone());
+        std::thread::spawn(move || {
+            let result = panics::job(|| worktree::remove(&repo, &path, force));
+            let _ = tx.send(AppEvent::WorktreeRemoved { project: id, workspace, result, request });
+        });
     }
 
     fn worktree_removed(&mut self, project: u64, workspace: u64, result: Result<()>) {
@@ -3014,6 +3415,10 @@ impl App {
         if matches!(self.overlay, Some(Overlay::RemoveWorkspace { .. })) {
             self.overlay = None;
         }
+        self.drop_workspace(project, workspace);
+    }
+
+    fn drop_workspace(&mut self, project: u64, workspace: u64) {
         let Some((p, w)) = self.workspace_index(project, workspace) else { return };
         let workspace = &mut self.projects[p].workspaces[w];
         workspace.closing = true;
@@ -3061,20 +3466,18 @@ impl App {
             self.changes.scroll = 0;
             return;
         }
-        let Some(term) = self.term_mut() else { return };
-        let bracketed = term.emulator.bracketed_paste();
-        if bracketed {
-            term.write(format!("\x1b[200~{text}\x1b[201~").as_bytes());
-        } else {
-            term.write(text.as_bytes());
+        if let Some(term) = self.term_mut()
+            && !term.paste(text)
+        {
+            self.toast = Some(Toast::new(NOT_READING, ui::ToastIcon::Bug));
         }
     }
 
     pub fn draw(&mut self, f: &mut Frame) {
-        if !self.layout(f.area()).compact() {
+        self.follow(f.area());
+        if !self.drawn.compact() {
             self.nav = None;
         }
-        self.follow(f.area());
         let projects = self
             .projects
             .iter()
@@ -3090,22 +3493,11 @@ impl App {
         let (has_project, workspaces, active_workspace, active_tab) = match self.project() {
             Some(p) => (
                 true,
-                p.workspaces
-                    .iter()
-                    .map(|w| ui::WorkspaceEntry {
-                        name: w.label(),
-                        tabs: w
-                            .tabs
-                            .iter()
-                            .map(|t| ui::TabEntry {
-                                name: t.label(&self.config),
-                                status: t.status(),
-                                details: self.tab_details(t),
-                            })
-                            .collect(),
-                        behind: w.behind,
-                    })
-                    .collect(),
+                if self.drawn.tree {
+                    Vec::new()
+                } else {
+                    p.workspaces.iter().map(|w| self.workspace_entry(w)).collect()
+                },
                 p.active,
                 p.workspace().filter(|w| !w.tabs.is_empty()).map(|w| w.active),
             ),
@@ -3130,7 +3522,9 @@ impl App {
             Grab::Row(target) => self.drag_view(target, pos, area),
             Grab::Todo(id) => Some(ui::Drag::Todo(id)),
         });
+        let tree = self.drawn.tree.then(|| self.tree_view());
         let view = ui::View {
+            tree,
             groups,
             projects,
             active: self.active,
@@ -3146,13 +3540,10 @@ impl App {
             sidebar: self.sidebar(),
             resizing: self.resizing,
             light: self.theme.is_light() == Some(true),
+            muted: ui::muted(&self.theme),
             tab,
             overlay,
-            toast: self.toast.as_ref().map(|t| ui::Toast {
-                message: &t.message,
-                status: t.status,
-                undo: t.undo.is_some(),
-            }),
+            toast: self.toast.as_ref().map(|t| ui::Toast { message: &t.message, icon: t.icon, undo: t.undo.is_some() }),
             nav: self.nav,
             update: self.update_label(),
             changes: if self.changes_shown() { self.panel_view() } else { None },
@@ -3162,6 +3553,45 @@ impl App {
             drag,
         };
         ui::draw(f, &view);
+    }
+
+    fn tab_entry(&self, t: &Tab) -> ui::TabEntry {
+        ui::TabEntry { name: t.label(&self.config), status: t.status(), details: self.tab_details(t) }
+    }
+
+    fn workspace_entry(&self, w: &Workspace) -> ui::WorkspaceEntry {
+        ui::WorkspaceEntry {
+            name: w.label(),
+            tabs: w.tabs.iter().map(|t| self.tab_entry(t)).collect(),
+            behind: w.behind,
+        }
+    }
+
+    fn tree_view(&self) -> ui::TreeView {
+        let shape = self.tree_shape();
+        let rows = ui::tree_rows(&shape);
+        let (above, below) = ui::tree_layout_rows(self.drawn.list, &shape, &rows, self.projects_scroll).hidden();
+        let shown = &rows[above.end..below.start];
+        let open = self.tree_open();
+        let workspaces = self.projects.iter().enumerate().map(|(p, project)| {
+            let entry = |(w, workspace): (usize, &Workspace)| {
+                let tab = |(t, tab): (usize, &Tab)| {
+                    if shown.contains(&ui::TreeRow::Tab(p, w, t)) {
+                        self.tab_entry(tab)
+                    } else {
+                        ui::TabEntry { status: tab.status(), ..ui::TabEntry::from("") }
+                    }
+                };
+                let named = shown.contains(&ui::TreeRow::Workspace(p, w));
+                ui::WorkspaceEntry {
+                    name: if named { workspace.label() } else { String::new() },
+                    tabs: workspace.tabs.iter().enumerate().map(tab).collect(),
+                    behind: workspace.behind,
+                }
+            };
+            if open[p] { project.workspaces.iter().enumerate().map(entry).collect() } else { Vec::new() }
+        });
+        ui::TreeView { workspaces: workspaces.collect(), shape }
     }
 
     fn overlay_view(&self, overlay: &Overlay, area: Rect) -> Option<ui::Overlay> {
@@ -3235,6 +3665,18 @@ impl App {
                 note: None,
                 submit: overlay.submit_label(),
             }),
+            Overlay::CloseWorkspace { project, workspace } => ui::Overlay::Confirm(ui::Confirm {
+                title: "close workspace",
+                message: self.close_workspace_message(*project, *workspace)?,
+                note: None,
+                submit: overlay.submit_label(),
+            }),
+            Overlay::CloseTab { project, workspace, tab } => ui::Overlay::Confirm(ui::Confirm {
+                title: "close tab",
+                message: self.close_tab_message(*project, *workspace, *tab)?,
+                note: None,
+                submit: overlay.submit_label(),
+            }),
             Overlay::Picker(picker) => Self::picker_view(picker, home),
             Overlay::Issues(b) => b.view(area, issues::now()),
             Overlay::Search(search) => self.search_view(search),
@@ -3255,12 +3697,20 @@ impl App {
 
     fn close_project_message(&self, id: u64) -> Option<String> {
         let project = &self.projects[self.project_index(id)?];
-        let stopped = match project.workspaces.iter().map(|w| w.tabs.len()).sum::<usize>() {
-            0 => String::new(),
-            1 => " Its tab and the programs running in it are stopped.".into(),
-            n => format!(" Its {n} tabs and the programs running in them are stopped."),
-        };
+        let stopped = stopped_tabs(project.workspaces.iter().map(|w| w.tabs.len()).sum());
         Some(format!("Close the project {}?{stopped} Folders and worktrees stay on disk.", self.project_label(project)))
+    }
+
+    fn close_workspace_message(&self, project: u64, workspace: u64) -> Option<String> {
+        let (p, w) = self.workspace_index(project, workspace)?;
+        let workspace = &self.projects[p].workspaces[w];
+        Some(format!("Close the workspace {}?{}", workspace.label(), stopped_tabs(workspace.tabs.len())))
+    }
+
+    fn close_tab_message(&self, project: u64, workspace: u64, tab: u64) -> Option<String> {
+        let (p, w, t) = self.tab_index(project, workspace, tab)?;
+        let name = self.projects[p].workspaces[w].tabs[t].label(&self.config);
+        Some(format!("Close the tab {name}? The programs running in it are stopped."))
     }
 
     fn search_view(&self, search: &Search) -> ui::Overlay {
@@ -3380,6 +3830,7 @@ impl App {
             scroll: self.changes.scroll,
             live: model.is_some_and(|m| m.live(Instant::now())),
             light: self.theme.is_light() == Some(true),
+            muted: ui::muted(&self.theme),
             tints: Tints::of(&self.theme),
             filter,
         })
@@ -3505,19 +3956,19 @@ impl App {
         });
         let Some((t, id)) = found else {
             self.host_writes.push(clipboard::osc52(text.trim_end()));
-            self.toast = Some(Toast::new(NO_AGENT, None));
+            self.toast = Some(Toast::new(NO_AGENT, ui::ToastIcon::Check));
             return;
         };
         let ws = &mut self.projects[p].workspaces[w];
         ws.active = t;
         let tab = &mut ws.tabs[t];
         tab.focus(id);
-        if let Some(term) = tab.panes.iter_mut().find(|term| term.id == id) {
-            let bytes =
-                if term.emulator.bracketed_paste() { format!("\x1b[200~{text}\x1b[201~") } else { text.to_string() };
-            term.write(bytes.as_bytes());
-        }
-        self.toast = Some(Toast::new(SENT_TO_AGENT, None));
+        let sent = tab.panes.iter_mut().find(|term| term.id == id).is_some_and(|term| term.paste(text));
+        self.toast = Some(if sent {
+            Toast::new(SENT_TO_AGENT, ui::ToastIcon::Check)
+        } else {
+            Toast::new(NOT_READING, ui::ToastIcon::Bug)
+        });
     }
 
     fn open_branches(&mut self, target: &Checkout) {
@@ -3621,7 +4072,7 @@ impl App {
 
 fn copy(host_writes: &mut Vec<Vec<u8>>, toast: &mut Option<Toast>, text: &str) {
     host_writes.push(clipboard::osc52(text));
-    *toast = Some(Toast::new(COPIED, None));
+    *toast = Some(Toast::new(COPIED, ui::ToastIcon::Check));
 }
 
 fn pane_cell(pane: Rect, ev: MouseEvent) -> Option<Position> {
@@ -3652,9 +4103,15 @@ mod tests {
         std::env::temp_dir().join("cornercase-test-no-config").join("config.json")
     }
 
-    fn empty_app() -> (App, Receiver<AppEvent>) {
+    fn new_app(config_path: PathBuf) -> (App, Receiver<AppEvent>) {
         let (tx, rx) = mpsc::channel();
-        (App::new("/bin/sh".into(), HostTheme::default(), no_config(), tx), rx)
+        let mut app = App::new("/bin/sh".into(), HostTheme::default(), config_path, tx);
+        app.config.sidebar = ui::Sidebar::SideBySide.id().into();
+        (app, rx)
+    }
+
+    fn empty_app() -> (App, Receiver<AppEvent>) {
+        new_app(no_config())
     }
 
     fn app() -> (App, Receiver<AppEvent>) {
@@ -3673,8 +4130,7 @@ mod tests {
     }
 
     fn app_in(dir: &Path, config_path: PathBuf) -> (App, Receiver<AppEvent>) {
-        let (tx, rx) = mpsc::channel();
-        let mut app = App::new("/bin/sh".into(), HostTheme::default(), config_path, tx);
+        let (mut app, rx) = new_app(config_path);
         app.open_project(dir.to_path_buf(), AREA).expect("open project");
         (app, rx)
     }
@@ -5248,11 +5704,12 @@ mod tests {
                 tabs: tabs.collect(),
                 active: 0,
                 base: None,
+                collapsed: false,
             }
         }
 
         fn project(path: &Path, workspaces: Vec<WorkspaceState>) -> ProjectState {
-            ProjectState { path: path.to_path_buf(), name: None, group: None, workspaces, active: 0 }
+            ProjectState { path: path.to_path_buf(), name: None, group: None, workspaces, active: 0, collapsed: false }
         }
 
         fn saved(projects: Vec<ProjectState>, active: usize) -> State {
@@ -5286,6 +5743,39 @@ mod tests {
             assert_eq!((app.projects.len(), app.active, app.projects[0].active), (2, 0, 1));
             assert_eq!(workspace_labels(&app), ["default", "other"]);
             wait_until("the active tab starts in its folder", || term(&app, 0).cwd() == Some(a_path.join("sub")));
+        }
+
+        #[test]
+        fn what_was_folded_stays_folded() {
+            let (a, b) = (TempDir::new(), TempDir::new());
+            let (a_path, b_path) = (canonical(&a), canonical(&b));
+            let (mut app, _rx) = empty_app();
+            let mut folded = workspace(&a_path, vec![None]);
+            folded.collapsed = true;
+            let mut other = project(&b_path, vec![workspace(&b_path, vec![None])]);
+            other.collapsed = true;
+            let state = saved(vec![project(&a_path, vec![folded, workspace(&a_path, vec![None])]), other], 0);
+
+            app.restore(&state, AREA).expect("restore");
+            let again = app.state();
+
+            let folds = |s: &State| -> Vec<(bool, Vec<bool>)> {
+                s.projects.iter().map(|p| (p.collapsed, p.workspaces.iter().map(|w| w.collapsed).collect())).collect()
+            };
+            assert_eq!(folds(&again), folds(&state));
+        }
+
+        #[test]
+        fn the_first_draw_keeps_a_folded_active_project_folded() {
+            let dir = TempDir::new();
+            let (mut app, _rx) = empty_app();
+            let mut folded = project(&canonical(&dir), vec![workspace(&canonical(&dir), vec![None])]);
+            folded.collapsed = true;
+            app.restore(&saved(vec![folded], 0), AREA).expect("restore");
+
+            app.follow(AREA);
+
+            assert!(app.projects[0].collapsed);
         }
 
         #[test]
@@ -5771,6 +6261,23 @@ rm -f "$1/sessions/$$.json"
         }
 
         #[test]
+        fn the_tree_measures_the_agents_of_every_open_project() {
+            let (mut app, rx, _dirs) = app_with(2);
+            app.config.memory = true;
+            app.config.sidebar = ui::Sidebar::Tree.id().into();
+            let claude = Claude::running(SILENT_CLAUDE);
+            for p in 0..2 {
+                app.active = p;
+                claude.start(&mut app);
+            }
+            rendered(&mut app, Rect::new(0, 0, 100, 30));
+
+            let measured = |a: &App| a.projects.iter().all(|p| p.workspaces[0].tabs[0].memory().is_some());
+            watch_until(&mut app, &rx, "the agents of both projects are measured", measured);
+            claude.signal("quit");
+        }
+
+        #[test]
         fn concurrent_codex_sessions_in_one_directory_keep_their_own_context_and_cleanup() {
             let (mut app, rx, _dirs) = app_with(1);
             let first = FakeCodex::new("019a1234-5678-7000-8000-000000000001", "gpt-5.4", false);
@@ -6030,6 +6537,7 @@ rm -f "$1/sessions/$$.json"
     mod compact {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use rstest::rstest;
 
         use super::*;
 
@@ -6167,6 +6675,116 @@ rm -f "$1/sessions/$$.json"
             let (mut app, _rx) = app();
             app.resize(SMALL);
             assert_eq!(term(&app, 0).emulator.size().expect("size"), (SMALL.height - ui::COMPACT_PITCH, SMALL.width));
+        }
+
+        fn with_workspace(worktree: bool) -> (App, Receiver<AppEvent>, Vec<TempDir>) {
+            let (mut app, rx, dirs) = app_with(1);
+            let path = app.projects[0].path.clone();
+            let other = app.new_workspace(AREA, path, Some("other".into()), worktree).expect("workspace");
+            app.projects[0].workspaces.push(other);
+            open_menu(&mut app);
+            (app, rx, dirs)
+        }
+
+        fn click_close(app: &mut App, row: WorkspaceRow) {
+            let r =
+                ui::workspace_row(small().workspaces_list, small().pitch, &app.tab_lines(), app.workspaces_scroll, row);
+            press(app, ui::row_close_button(r, small().pitch).as_position());
+        }
+
+        fn confirm(app: &mut App) {
+            press(app, ui::form_buttons(ui::form_area(SMALL), CLOSE_SUBMIT)[0].as_position());
+        }
+
+        #[test]
+        fn closing_a_tab_asks_first() {
+            let (mut app, _rx, _dirs) = with_workspace(false);
+            let name = app.projects[0].workspaces[1].tabs[0].label(&app.config);
+
+            click_close(&mut app, WorkspaceRow::Tab(1, 0));
+
+            let expected = format!("Close the tab {name}? The programs running in it are stopped.");
+            assert_eq!(confirmation(&app), Some(expected));
+        }
+
+        #[test]
+        fn confirming_closes_the_tab() {
+            let (mut app, rx, _dirs) = with_workspace(false);
+            click_close(&mut app, WorkspaceRow::Tab(1, 0));
+
+            confirm(&mut app);
+
+            pump_until(&mut app, &rx, "the tab closes", |a| a.projects[0].workspaces[1].tabs.is_empty());
+        }
+
+        #[test]
+        fn the_question_goes_when_its_tab_exits_by_itself() {
+            let (mut app, rx, _dirs) = with_workspace(false);
+            click_close(&mut app, WorkspaceRow::Tab(1, 0));
+            let asked = confirmation(&app).is_some();
+
+            app.close_tab(0, 1, 0);
+
+            pump_until(&mut app, &rx, "the question goes", |a| a.overlay.is_none());
+            assert!(asked);
+        }
+
+        #[test]
+        fn closing_a_workspace_asks_first() {
+            let (mut app, _rx, _dirs) = with_workspace(false);
+
+            click_close(&mut app, WorkspaceRow::Workspace(1));
+
+            let expected = "Close the workspace other? Its tab and the programs running in it are stopped.";
+            assert_eq!(confirmation(&app).as_deref(), Some(expected));
+        }
+
+        #[test]
+        fn confirming_closes_the_workspace() {
+            let (mut app, rx, _dirs) = with_workspace(false);
+            click_close(&mut app, WorkspaceRow::Workspace(1));
+
+            confirm(&mut app);
+
+            pump_until(&mut app, &rx, "the workspace closes", |a| a.projects[0].workspaces.len() == 1);
+        }
+
+        #[rstest]
+        #[case::workspace(WorkspaceRow::Workspace(1))]
+        #[case::tab(WorkspaceRow::Tab(1, 0))]
+        fn cancelling_keeps_everything_running(#[case] row: WorkspaceRow) {
+            let (mut app, rx, _dirs) = with_workspace(false);
+            click_close(&mut app, row);
+            let asked = confirmation(&app).is_some();
+
+            send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            app.nav = None;
+            app.projects[0].active = 1;
+            type_in_pane(&mut app, &rx, "still");
+
+            assert_eq!((asked, app.projects[0].workspaces[1].closing), (true, false));
+        }
+
+        #[test]
+        fn removing_a_worktree_shows_only_its_own_dialog() {
+            let (mut app, _rx, _dirs) = with_workspace(true);
+            click_close(&mut app, WorkspaceRow::Workspace(1));
+            assert!(matches!(app.overlay, Some(Overlay::RemoveWorkspace { .. })));
+        }
+
+        #[test]
+        fn closing_a_project_asks_first() {
+            let (mut app, _rx, _dirs) = app_with(2);
+            open_menu(&mut app);
+            press(&mut app, small().back.as_position());
+            let rows = app.sidebar_rows();
+
+            press(
+                &mut app,
+                ui::close_button(small().list, small().pitch, &rows, 0, SidebarRow::Project(1)).as_position(),
+            );
+
+            assert!(matches!(app.overlay, Some(Overlay::CloseProject { .. })));
         }
     }
 
@@ -6790,7 +7408,9 @@ rm -f "$1/sessions/$$.json"
         #[test]
         fn the_toast_goes_away_after_a_while() {
             let (mut app, _rx) = showing("hello world");
-            app.toast = Instant::now().checked_sub(TOAST_FOR).map(|at| Toast { at, ..Toast::new(COPIED, None) });
+            app.toast = Instant::now()
+                .checked_sub(TOAST_FOR)
+                .map(|at| Toast { at, ..Toast::new(COPIED, ui::ToastIcon::Check) });
             let mut t = Terminal::new(TestBackend::new(AREA.width, AREA.height)).expect("test backend");
 
             t.draw(|f| app.draw(f)).expect("draw");
@@ -7137,6 +7757,7 @@ rm -f "$1/sessions/$$.json"
                 tabs: vec![tab],
                 active: 0,
                 base: None,
+                collapsed: false,
             };
             let project = ProjectState {
                 path: dir.path().to_path_buf(),
@@ -7144,6 +7765,7 @@ rm -f "$1/sessions/$$.json"
                 group: None,
                 workspaces: vec![workspace],
                 active: 0,
+                collapsed: false,
             };
             let saved = State {
                 version: state::VERSION,
@@ -7298,8 +7920,14 @@ rm -f "$1/sessions/$$.json"
             let dir = TempDir::new();
             let (mut app, _rx) = empty_app();
             let widths = ui::Widths { projects: 40, workspaces: 20, ..ui::Widths::default() };
-            let project =
-                ProjectState { path: dir.path().to_path_buf(), name: None, group: None, workspaces: vec![], active: 0 };
+            let project = ProjectState {
+                path: dir.path().to_path_buf(),
+                name: None,
+                group: None,
+                workspaces: vec![],
+                active: 0,
+                collapsed: false,
+            };
             let saved = State {
                 groups: Vec::new(),
                 version: state::VERSION,
@@ -7314,6 +7942,208 @@ rm -f "$1/sessions/$$.json"
             app.restore(&saved, AREA).expect("restore");
 
             assert_eq!(app.widths, widths);
+        }
+    }
+
+    mod muted_text {
+        use libghostty_vt::style::RgbColor;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::style::Color;
+
+        use super::*;
+
+        #[test]
+        fn a_terminal_that_keeps_its_palette_to_itself_gets_a_grey_that_shows() {
+            let (mut app, _rx) = empty_app();
+            app.set_theme(HostTheme {
+                background: Some(RgbColor { r: 0x1d, g: 0x20, b: 0x22 }),
+                ..HostTheme::default()
+            });
+            let mut t = Terminal::new(TestBackend::new(AREA.width, AREA.height)).expect("test backend");
+
+            t.draw(|f| app.draw(f)).expect("draw");
+
+            let settings = areas().settings;
+            assert_eq!(t.backend().buffer()[(settings.x + 2, settings.y)].fg, Color::Indexed(243));
+        }
+    }
+
+    mod tree_sidebar {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        use super::*;
+        use crate::ui::TreeRow;
+
+        const TALL: Rect = Rect { x: 0, y: 0, width: 100, height: 30 };
+
+        fn drawn(app: &mut App) {
+            let mut t = Terminal::new(TestBackend::new(TALL.width, TALL.height)).expect("test backend");
+            t.draw(|f| app.draw(f)).expect("draw");
+        }
+
+        fn tree(n: usize) -> (App, Receiver<AppEvent>, Vec<TempDir>) {
+            let (mut app, rx, dirs) = app_with(n);
+            app.config.sidebar = ui::Sidebar::Tree.id().into();
+            drawn(&mut app);
+            (app, rx, dirs)
+        }
+
+        fn list() -> Rect {
+            ui::layout_with(TALL, ui::Widths::default(), false, ui::Sidebar::Tree).list
+        }
+
+        fn row(app: &App, row: TreeRow) -> Rect {
+            ui::tree_row(list(), &app.tree_shape(), app.projects_scroll, row)
+        }
+
+        fn click_at(app: &mut App, pos: Position) {
+            click_in(app, pos, TALL);
+            drawn(app);
+        }
+
+        fn click_name(app: &mut App, r: TreeRow) {
+            let r = row(app, r);
+            click_at(app, Position::new(r.x + 10, r.y));
+        }
+
+        fn click_arrow(app: &mut App, r: TreeRow) {
+            let arrow = ui::tree_arrow(list(), &app.tree_shape(), app.projects_scroll, r);
+            click_at(app, arrow.as_position());
+        }
+
+        fn ids(app: &App, p: usize) -> (u64, u64, u64) {
+            let project = &app.projects[p];
+            let workspace = &project.workspaces[0];
+            (project.id, workspace.id, workspace.tabs[0].id)
+        }
+
+        #[test]
+        fn the_arrow_folds_a_project_and_its_name_opens_it() {
+            let (mut app, _rx, _dirs) = tree(2);
+            click_arrow(&mut app, TreeRow::Project(0));
+            let folded = (app.projects[0].collapsed, app.active);
+
+            click_name(&mut app, TreeRow::Project(0));
+
+            assert_eq!((folded, app.projects[0].collapsed, app.active), ((true, 1), false, 0));
+        }
+
+        #[test]
+        fn the_arrow_folds_a_workspace() {
+            let (mut app, _rx, _dirs) = tree(1);
+            click_arrow(&mut app, TreeRow::Workspace(0, 0));
+            assert!(app.projects[0].workspaces[0].collapsed);
+        }
+
+        #[test]
+        fn a_tab_of_another_project_is_one_click_away() {
+            let (mut app, _rx, _dirs) = tree(2);
+            click_name(&mut app, TreeRow::Tab(0, 0, 0));
+            assert_eq!(app.active, 0);
+        }
+
+        #[test]
+        fn adding_a_tab_under_another_project_switches_to_it() {
+            let (mut app, _rx, _dirs) = tree(2);
+            click_name(&mut app, TreeRow::NewTab(0, 0));
+            let workspace = &app.projects[0].workspaces[0];
+            assert_eq!((app.active, workspace.tabs.len(), workspace.active), (0, 2, 1));
+        }
+
+        #[test]
+        fn a_new_workspace_under_another_project_is_asked_for_that_project() {
+            let (mut app, _rx, _dirs) = tree(2);
+            click_name(&mut app, TreeRow::NewWorkspace(0));
+            let asked =
+                matches!(app.overlay, Some(Overlay::NewWorkspace { project, .. }) if project == app.projects[0].id);
+            assert_eq!((asked, app.active), (true, 1));
+        }
+
+        #[test]
+        fn a_plain_workspace_created_under_another_project_is_shown() {
+            let (mut app, _rx, _dirs) = tree(2);
+            click_name(&mut app, TreeRow::NewWorkspace(0));
+
+            submit_text(&mut app, "spike");
+
+            assert_eq!((app.active, app.projects[0].workspaces.len(), app.projects[0].active), (0, 2, 1));
+        }
+
+        #[test]
+        fn closing_a_project_asks_first() {
+            let (mut app, _rx, _dirs) = tree(2);
+            let close = ui::tree_close(list(), &app.tree_shape(), 0, TreeRow::Project(0));
+            click_at(&mut app, close.as_position());
+            assert!(matches!(app.overlay, Some(Overlay::CloseProject { project }) if project == app.projects[0].id));
+        }
+
+        #[test]
+        fn a_tab_of_another_project_can_be_renamed_from_its_menu() {
+            let (mut app, _rx, _dirs) = tree(2);
+            let r = row(&app, TreeRow::Tab(0, 0, 0));
+            mouse_in(&mut app, MouseEventKind::Down(MouseButton::Right), Position::new(r.x + 10, r.y), TALL);
+            assert_eq!(menu_labels(&app), ["rename tab"]);
+        }
+
+        #[test]
+        fn a_tab_dragged_in_another_project_moves_there() {
+            let (mut app, _rx, _dirs) = tree(2);
+            app.add_tab(0, 0, AREA).expect("add a tab");
+            app.active = 1;
+            drawn(&mut app);
+            let tabs = |app: &App| -> Vec<u64> { app.projects[0].workspaces[0].tabs.iter().map(|t| t.id).collect() };
+            let before = tabs(&app);
+            let (from, to) = (row(&app, TreeRow::Tab(0, 0, 1)), row(&app, TreeRow::Tab(0, 0, 0)));
+
+            mouse_in(&mut app, MouseEventKind::Down(MouseButton::Left), Position::new(from.x + 10, from.y), TALL);
+            mouse_in(&mut app, MouseEventKind::Drag(MouseButton::Left), Position::new(to.x + 10, to.y), TALL);
+            mouse_in(&mut app, MouseEventKind::Up(MouseButton::Left), Position::new(to.x + 10, to.y), TALL);
+
+            assert_eq!(tabs(&app), [before[1], before[0]]);
+        }
+
+        #[test]
+        fn a_search_result_unfolds_the_way_to_it() {
+            let (mut app, _rx, _dirs) = tree(2);
+            let id = app.take_id();
+            app.groups.push(Group {
+                id,
+                entry: ui::GroupEntry { name: "work".into(), icon: '●', colour: 4, collapsed: true },
+            });
+            app.projects[0].group = Some(id);
+            app.projects[0].collapsed = true;
+            app.projects[0].workspaces[0].collapsed = true;
+            let (project, workspace, tab) = ids(&app, 0);
+
+            app.goto(Goto::Place { project, workspace: Some(workspace), tab: Some(tab) });
+
+            let folds =
+                (app.groups[0].entry.collapsed, app.projects[0].collapsed, app.projects[0].workspaces[0].collapsed);
+            assert_eq!(folds, (false, false, false));
+        }
+
+        #[test]
+        fn a_search_result_for_the_folded_active_project_unfolds_it() {
+            let (mut app, _rx, _dirs) = tree(1);
+            app.projects[0].collapsed = true;
+            let project = app.projects[0].id;
+
+            app.goto(Goto::Place { project, workspace: None, tab: None });
+
+            assert!(!app.projects[0].collapsed);
+        }
+
+        #[test]
+        fn switching_to_the_tree_shows_the_active_tab() {
+            let (mut app, _rx, _dirs) = app_with(10);
+            drawn(&mut app);
+            app.config.sidebar = ui::Sidebar::Tree.id().into();
+
+            drawn(&mut app);
+
+            assert!(!row(&app, TreeRow::Tab(9, 0, 0)).is_empty());
         }
     }
 
@@ -7988,6 +8818,150 @@ rm -f "$1/sessions/$$.json"
 
                 assert_eq!(secrets::read(&secrets_file(&s), "shortcut_token"), None);
                 assert!(!browser(&s.app).connections.contains_key(&Source::Shortcut));
+            }
+        }
+
+        mod jira {
+            use super::*;
+
+            const MYSELF: &str = r#"{"accountId":"a1","displayName":"Ana"}"#;
+            const SEARCH: &str = r#"{"issues":[{"key":"SHOP-482","fields":{"summary":"Returns page crashes",
+                "updated":"2026-09-30T00:00:00.000+0000"}}],"isLast":true}"#;
+
+            fn jira(s: &mut Setup) -> FakeHttp {
+                let server = FakeHttp::start(vec![
+                    ("GET /rest/api/3/myself", 200, MYSELF),
+                    ("GET /rest/api/3/search/jql", 200, SEARCH),
+                ]);
+                s.app.apis.jira = Some(server.url());
+                server
+            }
+
+            fn type_site_and_email(s: &mut Setup) {
+                open_list(s);
+                to_tab(s, IssueTab::One(Source::Jira));
+                type_text(&mut s.app, "acme");
+                enter(s);
+                type_text(&mut s.app, "ana@acme.dev");
+                enter(s);
+            }
+
+            fn answer(s: &mut Setup, wanted: impl Fn(&AppEvent) -> bool) {
+                loop {
+                    let event = s.rx.recv_timeout(Duration::from_secs(10)).expect("the answer arrives");
+                    let found = wanted(&event);
+                    s.app.handle_event(event, AREA).expect("handle event");
+                    if found {
+                        return;
+                    }
+                }
+            }
+
+            fn saved_config(s: &Setup) -> Config {
+                config::load(&s.config.path().join("config.json"))
+            }
+
+            #[test]
+            fn connecting_saves_the_site_and_the_email_then_the_token_and_lists() {
+                let mut s = setup(false, "echo '[]'");
+                let server = jira(&mut s);
+
+                type_site_and_email(&mut s);
+                let config = saved_config(&s);
+                type_text(&mut s.app, "t0k");
+                enter(&mut s);
+
+                pump_until(&mut s.app, &s.rx, "the issues load", |a| loaded(a, Source::Jira));
+                assert_eq!(shown(&s.app), ["SHOP-482"]);
+                assert_eq!(
+                    (config.jira_site.as_str(), config.jira_email.as_str()),
+                    ("acme.atlassian.net", "ana@acme.dev")
+                );
+                assert_eq!(secrets::read(&secrets_file(&s), "jira_api_token").as_deref(), Some("t0k"));
+                let basic = clipboard::base64(b"ana@acme.dev:t0k").to_lowercase();
+                assert!(server.request(0).to_lowercase().contains(&format!("authorization: basic {basic}")));
+            }
+
+            #[test]
+            fn a_token_from_the_environment_connects_once_the_email_is_typed() {
+                let mut s = setup(false, "echo '[]'");
+                let _server = jira(&mut s);
+                s.app.env_tokens.insert(Source::Jira, "env-token".into());
+
+                type_site_and_email(&mut s);
+
+                pump_until(&mut s.app, &s.rx, "the issues load", |a| loaded(a, Source::Jira));
+                assert_eq!(shown(&s.app), ["SHOP-482"]);
+            }
+
+            #[test]
+            fn a_token_without_a_site_is_not_connected() {
+                let mut s = setup(false, "echo '[]'");
+                secrets::write(&secrets_file(&s), "jira_api_token", "t0k").expect("save token");
+
+                open_list(&mut s);
+
+                assert!(!browser(&s.app).connections.contains_key(&Source::Jira));
+            }
+
+            #[test]
+            fn a_list_asked_before_the_site_changed_is_dropped() {
+                let mut s = setup(false, "echo '[]'");
+                let _server = jira(&mut s);
+                s.app.config.jira_site = "acme.atlassian.net".into();
+                s.app.config.jira_email = "ana@acme.dev".into();
+                secrets::write(&secrets_file(&s), "jira_api_token", "t0k").expect("save token");
+                open_list(&mut s);
+                let key = s.app.cache_key(Source::Jira, browser(&s.app).project, &browser(&s.app).query(Source::Jira));
+
+                s.app.set_config(Config { jira_site: "other.atlassian.net".into(), ..s.app.config.clone() });
+                answer(&mut s, |e| matches!(e, AppEvent::IssuesLoaded { source: Source::Jira, .. }));
+
+                assert_eq!((s.app.accounts.get(&Source::Jira), s.app.issue_cache.get(&key)), (None, None));
+            }
+
+            #[test]
+            fn a_token_checked_against_the_old_email_is_not_saved() {
+                let mut s = setup(false, "echo '[]'");
+                let _server = jira(&mut s);
+                s.app.config.jira_site = "acme.atlassian.net".into();
+                s.app.config.jira_email = "ana@acme.dev".into();
+
+                s.app.check_token(Source::Jira, Secret("t0k".into()));
+                s.app.set_config(Config { jira_email: "bo@acme.dev".into(), ..s.app.config.clone() });
+                answer(&mut s, |e| matches!(e, AppEvent::TokenChecked { .. }));
+
+                assert_eq!(secrets::read(&secrets_file(&s), "jira_api_token"), None);
+            }
+
+            #[test]
+            fn a_list_asked_with_the_old_token_is_dropped_once_a_new_one_is_saved() {
+                let mut s = setup(false, "echo '[]'");
+                let _server = jira(&mut s);
+                s.app.config.jira_site = "acme.atlassian.net".into();
+                s.app.config.jira_email = "ana@acme.dev".into();
+                secrets::write(&secrets_file(&s), "jira_api_token", "old").expect("save token");
+                open_list(&mut s);
+                let key = s.app.cache_key(Source::Jira, browser(&s.app).project, &browser(&s.app).query(Source::Jira));
+                let account = Account { handle: "Ana".into(), workspace: "acme.atlassian.net".into() };
+
+                s.app
+                    .token_checked(Source::Jira, &Secret("new".into()), Ok(account), AREA)
+                    .expect("save the new token");
+                answer(&mut s, |e| matches!(e, AppEvent::IssuesLoaded { source: Source::Jira, .. }));
+
+                assert_eq!(s.app.issue_cache.get(&key), None);
+            }
+
+            #[test]
+            fn another_site_forgets_the_account_and_the_lists_of_the_old_one() {
+                let mut s = setup(false, "echo '[]'");
+                s.app.accounts.insert(Source::Jira, Account { handle: "Ana".into(), workspace: "a".into() });
+                s.app.accounts.insert(Source::Linear, Account { handle: "ana".into(), workspace: "b".into() });
+
+                s.app.set_config(Config { jira_site: "other.atlassian.net".into(), ..s.app.config.clone() });
+
+                assert_eq!(s.app.accounts.keys().collect::<Vec<_>>(), [&Source::Linear]);
             }
         }
     }
@@ -8717,7 +9691,10 @@ rm -f "$1/sessions/$$.json"
         }
 
         fn undo(app: &mut App, message: &str) {
-            click(app, ui::toast_undo(AREA, ui::Toast { message, status: None, undo: true }).as_position());
+            click(
+                app,
+                ui::toast_undo(AREA, ui::Toast { message, icon: ui::ToastIcon::Check, undo: true }).as_position(),
+            );
         }
 
         fn opened() -> (App, Receiver<AppEvent>, Vec<TempDir>) {
@@ -8899,6 +9876,786 @@ rm -f "$1/sessions/$$.json"
             back.set_todos(Todos::from(saved));
             back.restore(&state, AREA).expect("restore");
             assert_eq!((state.todo, back.todo.open, texts(&back)), (true, true, vec!["a".into()]));
+        }
+    }
+
+    mod control_requests {
+        use serde_json::Value;
+
+        use super::*;
+        use crate::control::{self as wire, Command, Done, Item, Report, Response, Until};
+        use crate::test_util::write_executable;
+
+        const CLIENT: u64 = 9;
+        const AGENT: &str = r#"#!/bin/sh
+s="$1/sessions/$$.json"
+printf '{"pid":%s,"status":"idle"}' $$ > "$s"
+while printf 'agent> ' && IFS= read -r line; do
+  printf '{"pid":%s,"status":"busy"}' $$ > "$s"
+  while [ ! -e "$1/finish" ]; do sleep 0.02; done
+  rm -f "$1/finish"
+  case "$line" in *ask*) printf '{"pid":%s,"status":"waiting"}' $$ > "$s"; read answer ;; esac
+  printf 'done: %s\n' "$line"
+  printf '{"pid":%s,"status":"idle"}' $$ > "$s"
+done
+rm -f "$s"
+"#;
+
+        fn request(app: &mut App, caller: Option<u64>, command: Command, area: Option<Rect>) {
+            let server = caller.map(|_| wire::server_token().to_string());
+            let text = serde_json::to_string(&wire::Request { caller, server, command }).expect("json");
+            app.request(CLIENT, &text, area, Instant::now());
+        }
+
+        fn ask(app: &mut App, caller: Option<u64>, command: Command) {
+            request(app, caller, command, Some(AREA));
+        }
+
+        fn answers(app: &mut App) -> Vec<Response> {
+            let answers = app.take_answers();
+            assert!(answers.iter().all(|(client, _)| *client == CLIENT), "{answers:?}");
+            answers.into_iter().map(|(_, text)| serde_json::from_str(&text).expect("a response")).collect()
+        }
+
+        fn answered(app: &mut App, rx: &Receiver<AppEvent>, what: &str) -> Response {
+            let mut got = Vec::new();
+            wait_until(what, || {
+                while let Ok(ev) = rx.try_recv() {
+                    app.handle_event(ev, AREA).expect("handle event");
+                }
+                app.refresh(Instant::now());
+                got = answers(app);
+                !got.is_empty()
+            });
+            got.remove(0)
+        }
+
+        fn done(response: Response) -> Done {
+            match response {
+                Response::Ok(value) => serde_json::from_value(value).expect("an answer"),
+                Response::Error(message) => panic!("the request failed: {message}"),
+            }
+        }
+
+        fn error(response: Response) -> String {
+            match response {
+                Response::Error(message) => message,
+                Response::Ok(value) => panic!("the request did not fail: {value}"),
+            }
+        }
+
+        fn now(app: &mut App, caller: Option<u64>, command: Command) -> Response {
+            ask(app, caller, command);
+            let mut answers = answers(app);
+            assert_eq!(answers.len(), 1, "an answer at once");
+            answers.remove(0)
+        }
+
+        fn value(app: &mut App, caller: Option<u64>, command: Command) -> Value {
+            match now(app, caller, command) {
+                Response::Ok(value) => value,
+                Response::Error(message) => panic!("the request failed: {message}"),
+            }
+        }
+
+        fn pane(app: &App, id: u64) -> &Term {
+            app.projects
+                .iter()
+                .flat_map(|p| &p.workspaces)
+                .flat_map(Workspace::terms)
+                .find(|t| t.id == id)
+                .expect("the pane")
+        }
+
+        fn pane_screen(app: &App, id: u64) -> String {
+            pane(app, id).emulator.screen_text().expect("the screen")
+        }
+
+        fn first(app: &App) -> u64 {
+            term(app, app.active).id
+        }
+
+        fn new_tab(command: Option<&str>) -> Command {
+            Command::NewTab(wire::NewTab { command: command.map(str::to_string), ..wire::NewTab::default() })
+        }
+
+        fn wait_for(pane: u64, until: Until, timeout: Option<f64>) -> Command {
+            Command::Wait(wire::Wait { pane: Some(pane), tab: None, until, timeout })
+        }
+
+        fn send_text(pane: u64, text: &str, enter: bool, wait: bool) -> Command {
+            let text = Some(text.to_string()).filter(|t| !t.is_empty());
+            Command::Send(wire::SendText { pane: Some(pane), text, enter, wait, ..wire::SendText::default() })
+        }
+
+        fn press_keys(pane: u64, keys: &[&str]) -> Command {
+            Command::Keys(wire::Keys {
+                pane: Some(pane),
+                tab: None,
+                keys: keys.iter().map(ToString::to_string).collect(),
+            })
+        }
+
+        mod creating {
+            use super::*;
+
+            #[test]
+            fn status_lists_every_pane_and_marks_the_caller() {
+                let (mut app, _rx, _dirs) = app_with(2);
+                let (caller, other) = (term(&app, 0).id, term(&app, 1).id);
+
+                let report: Report =
+                    serde_json::from_value(value(&mut app, Some(caller), Command::Status(wire::Status {})))
+                        .expect("a report");
+
+                let panes: Vec<(u64, bool)> = report
+                    .projects
+                    .iter()
+                    .flat_map(|p| &p.workspaces)
+                    .flat_map(|w| &w.tabs)
+                    .flat_map(|t| &t.panes)
+                    .map(|p| (p.id, p.caller))
+                    .collect();
+                assert_eq!(panes, [(caller, true), (other, false)]);
+                assert_eq!((report.caller, report.shown.pane), (Some(caller), Some(other)));
+            }
+
+            #[test]
+            fn a_pane_of_another_server_is_not_the_caller() {
+                let (mut app, _rx, _dirs) = app_with(1);
+                let caller = Some(term(&app, 0).id);
+                let status = Command::Status(wire::Status {});
+                let text =
+                    serde_json::to_string(&wire::Request { caller, server: Some("another".into()), command: status })
+                        .expect("json");
+
+                app.request(CLIENT, &text, Some(AREA), Instant::now());
+
+                let report: Report = serde_json::from_value(match answers(&mut app).remove(0) {
+                    Response::Ok(value) => value,
+                    Response::Error(message) => panic!("{message}"),
+                })
+                .expect("a report");
+                assert_eq!(report.caller, None);
+            }
+
+            #[test]
+            fn a_project_being_closed_is_opened_again() {
+                let (mut app, _rx, dirs) = app_with(1);
+                let old = app.projects[0].id;
+                app.close_project(old);
+                let open = Command::Open(wire::Open { path: dirs[0].path().to_path_buf(), focus: false });
+
+                let opened = done(now(&mut app, None, open));
+
+                assert!(opened.ids.project.is_some_and(|id| id != old), "{opened:?}");
+            }
+
+            #[test]
+            fn open_adds_a_folder_once_and_leaves_the_window_as_it_is() {
+                let (mut app, _rx, _dirs) = app_with(1);
+                let dir = TempDir::new();
+                let open = || Command::Open(wire::Open { path: dir.path().to_path_buf(), focus: false });
+
+                let opened = done(now(&mut app, None, open()));
+                let found = done(now(&mut app, None, open()));
+
+                assert_eq!((app.projects.len(), app.active), (2, 0));
+                assert_eq!(
+                    (opened.ids.project, found.ids.project),
+                    (Some(app.projects[1].id), Some(app.projects[1].id))
+                );
+            }
+
+            #[test]
+            fn a_new_tab_leaves_the_window_as_it_is() {
+                let (mut app, _rx, _dirs) = app_with(2);
+                let before = app.focus();
+                let workspace = app.projects[0].workspaces[0].id;
+                let named =
+                    wire::NewTab { workspace: Some(workspace), name: Some("tests".into()), ..wire::NewTab::default() };
+
+                let made = done(now(&mut app, None, Command::NewTab(named)));
+
+                let tabs = &app.projects[0].workspaces[0].tabs;
+                assert_eq!(app.focus(), before);
+                assert_eq!((tabs.len(), tabs[1].name.as_deref()), (2, Some("tests")));
+                assert_eq!(made.ids.pane, tabs[1].pane().map(|t| t.id));
+            }
+
+            #[test]
+            fn a_command_is_typed_into_the_new_tab_before_the_answer() {
+                let (mut app, rx) = app();
+
+                ask(&mut app, None, new_tab(Some("echo typed-$((40+2))")));
+                assert_eq!(answers(&mut app), []);
+                let made = done(answered(&mut app, &rx, "the command is typed"));
+
+                let id = made.ids.pane.expect("the new pane");
+                pump_until(&mut app, &rx, "the command runs", |a| pane_screen(a, id).contains("typed-42"));
+            }
+
+            #[test]
+            fn focus_shows_what_it_names() {
+                let (mut app, _rx, _dirs) = app_with(2);
+                let id = term(&app, 0).id;
+
+                done(now(&mut app, None, Command::Focus(wire::Focus { item: Item::Pane(id) })));
+
+                assert_eq!((app.active, app.term().map(|t| t.id)), (0, Some(id)));
+            }
+
+            #[test]
+            fn a_split_keeps_the_focus_where_it_was() {
+                let (mut app, _rx) = app();
+                let was = first(&app);
+
+                let made =
+                    done(now(&mut app, None, Command::Split(wire::Split { down: true, ..wire::Split::default() })));
+
+                let tab = app.tab().expect("a tab");
+                assert_eq!((tab.panes.len(), tab.pane().map(|t| t.id)), (2, Some(was)));
+                assert_eq!(made.ids.pane, Some(tab.panes[1].id));
+            }
+
+            #[test]
+            fn new_terminals_need_a_window_to_take_their_size_from() {
+                let (mut app, _rx) = app();
+
+                request(&mut app, None, new_tab(None), None);
+
+                assert!(error(answers(&mut app).remove(0)).contains("has not opened a window yet"));
+            }
+
+            #[test]
+            fn an_unknown_command_names_the_version_of_the_server() {
+                let (mut app, _rx) = app();
+
+                app.request(CLIENT, r#"{"command": "teleport", "args": {}}"#, Some(AREA), Instant::now());
+
+                let message = error(answers(&mut app).remove(0));
+                assert!(
+                    message.contains("has no `teleport` command") && message.contains(update::CURRENT),
+                    "{message}"
+                );
+            }
+        }
+
+        mod talking {
+            use super::*;
+
+            #[test]
+            fn send_pastes_and_keys_press_keys() {
+                let (mut app, rx) = app();
+                let id = first(&app);
+                type_line(&mut app, "echo cat-\"\"starts; cat -v");
+                pump_until(&mut app, &rx, "cat runs", |a| pane_screen(a, id).contains("cat-starts"));
+
+                done(now(&mut app, None, send_text(id, "hello", false, false)));
+                done(now(&mut app, None, press_keys(id, &["ctrl+b", "enter"])));
+
+                pump_until(&mut app, &rx, "cat echoes both", |a| pane_screen(a, id).contains("hello^B"));
+            }
+
+            #[test]
+            fn read_gives_the_screen_or_its_last_lines() {
+                let (mut app, rx) = app();
+                let id = first(&app);
+                type_line(&mut app, "printf 'one\\ntwo\\nthree-%s\\n' $((1+1))");
+                pump_until(&mut app, &rx, "the lines show", |a| pane_screen(a, id).contains("three-2"));
+
+                let read = |lines| Command::Read(wire::Read { pane: Some(id), tab: None, lines });
+                let screen = done(now(&mut app, None, read(None))).text.expect("the screen");
+                let last = done(now(&mut app, None, read(Some(3)))).text.expect("the lines");
+
+                assert!(screen.contains("one\ntwo\nthree-2"), "{screen}");
+                assert_eq!((last.lines().count(), last.contains("three-2")), (3, true), "{last}");
+            }
+
+            #[test]
+            fn wait_until_shell_ends_once_the_program_does() {
+                let (mut app, rx) = app();
+                let id = first(&app);
+                type_line(&mut app, "sleep 1");
+                pump_until(&mut app, &rx, "sleep runs", |a| !pane(a, id).shell_in_foreground());
+
+                ask(&mut app, None, wait_for(id, Until::Shell, None));
+                app.refresh(Instant::now());
+                let early = answers(&mut app);
+
+                let ended = done(answered(&mut app, &rx, "sleep ends"));
+                assert_eq!((early, ended.ended.as_deref()), (Vec::new(), Some("shell")));
+            }
+
+            #[test]
+            fn wait_until_shell_right_after_typing_waits_for_the_program() {
+                let (mut app, rx) = app();
+                ask(&mut app, None, new_tab(Some("sleep 1")));
+                let id = done(answered(&mut app, &rx, "the command is typed")).ids.pane.expect("the pane");
+                let typed = Instant::now();
+
+                ask(&mut app, None, wait_for(id, Until::Shell, None));
+                done(answered(&mut app, &rx, "sleep ends"));
+
+                assert!(typed.elapsed() >= Duration::from_millis(900), "it ended after {:?}", typed.elapsed());
+            }
+
+            #[test]
+            fn a_shell_busy_before_its_program_starts_is_not_back_yet() {
+                let (mut app, rx) = app();
+                ask(&mut app, None, new_tab(Some("x=$(sleep 0.6); sleep 1")));
+                let id = done(answered(&mut app, &rx, "the command is typed")).ids.pane.expect("the pane");
+                let typed = Instant::now();
+
+                ask(&mut app, None, wait_for(id, Until::Shell, None));
+                done(answered(&mut app, &rx, "the program ends"));
+
+                assert!(typed.elapsed() >= Duration::from_millis(1500), "it ended after {:?}", typed.elapsed());
+            }
+
+            #[cfg(target_os = "linux")]
+            #[rstest::rstest]
+            #[case::send(|pane| send_text(pane, "", true, false), "did not take what was typed")]
+            #[case::keys(|pane| press_keys(pane, &["enter"]), "is not reading its input")]
+            fn an_enter_a_full_pane_refuses_is_not_reported_as_pressed(
+                #[case] enter: fn(u64) -> Command,
+                #[case] refused: &str,
+            ) {
+                let (mut app, rx) = app();
+                let id = first(&app);
+                type_line(&mut app, "stty -echo; sleep 30");
+                pump_until(&mut app, &rx, "sleep runs", |a| pane(a, id).program(&a.config).as_deref() == Some("sleep"));
+                let full = vec![b'x'; crate::term::MAX_QUEUED + 1024 * 1024];
+                let filled = app.projects[0].workspaces[0].tabs[0].panes[0].write(&full);
+
+                ask(&mut app, None, enter(id));
+
+                let message = error(answered(&mut app, &rx, "the enter is refused"));
+                assert!(filled && message.contains(refused), "{message}");
+                assert_eq!(pane(&app, id).submitted, None, "the pane counts no Enter");
+            }
+
+            #[test]
+            fn wait_for_text_takes_a_line_already_on_the_screen() {
+                let (mut app, rx) = app();
+                let id = first(&app);
+                type_line(&mut app, "echo ready-$((1+1))");
+                pump_until(&mut app, &rx, "the line shows", |a| pane_screen(a, id).contains("ready-2"));
+
+                ask(&mut app, None, wait_for(id, Until::Text(r"ready-\d".into()), None));
+
+                let ended = done(answered(&mut app, &rx, "the line matches"));
+                let line = ended.line.unwrap_or_default();
+                assert_eq!((ended.ended.as_deref(), line.ends_with("ready-2")), (Some("text"), true), "{line}");
+            }
+
+            #[test]
+            fn a_wait_times_out_saying_what_it_waited_for() {
+                let (mut app, rx) = app();
+                let id = first(&app);
+
+                ask(&mut app, None, wait_for(id, Until::Text("never".into()), Some(0.05)));
+
+                let message = error(answered(&mut app, &rx, "the wait times out"));
+                assert_eq!(
+                    message,
+                    format!("timed out after 0.05s: no line on the screen of pane {id} matches `never`")
+                );
+            }
+
+            #[test]
+            fn a_timeout_past_the_clock_is_refused_and_a_long_quiet_is_kept() {
+                let (mut app, _rx) = app();
+                let id = first(&app);
+
+                let message = error(now(&mut app, None, wait_for(id, Until::Quiet(1e19), Some(1e19))));
+                ask(&mut app, None, wait_for(id, Until::Quiet(1e19), None));
+                let tick = app.tick(Instant::now());
+
+                assert_eq!((message.as_str(), answers(&mut app), tick), ("--timeout is too long", Vec::new(), None));
+            }
+
+            #[test]
+            fn waiting_for_an_agent_needs_one() {
+                let (mut app, _rx) = app();
+                let id = first(&app);
+
+                let message = error(now(&mut app, None, wait_for(id, Until::Stops, None)));
+
+                assert!(message.contains(&format!("pane {id} runs no agent")), "{message}");
+            }
+
+            #[test]
+            fn waiting_for_an_agent_cornercase_cannot_follow_says_so() {
+                let (mut app, rx) = app();
+                let bin = TempDir::new();
+                let gemini = bin.path().join("gemini");
+                write_executable(&gemini, "#!/bin/sh\nsleep 30\n");
+                let id = first(&app);
+                type_line(&mut app, &gemini.display().to_string());
+                pump_until(&mut app, &rx, "gemini runs", |a| {
+                    crate::agents::detect(&a.config, &pane(a, id).foreground_args()).is_some()
+                });
+
+                let message = error(now(&mut app, None, wait_for(id, Until::Stops, None)));
+
+                assert!(message.contains(&format!("pane {id} runs gemini")), "{message}");
+            }
+
+            #[test]
+            fn a_pane_does_not_wait_for_its_own_shell() {
+                let (mut app, _rx) = app();
+                let id = first(&app);
+
+                let message = error(now(&mut app, Some(id), wait_for(id, Until::Shell, None)));
+
+                assert!(message.contains("it would wait for itself"), "{message}");
+            }
+
+            #[test]
+            fn a_client_that_leaves_takes_its_wait_with_it() {
+                let (mut app, rx) = app();
+                let id = first(&app);
+                ask(&mut app, None, wait_for(id, Until::Text("gone-\\d".into()), None));
+
+                app.forget(CLIENT);
+                type_line(&mut app, "echo gone-$((1+1))");
+                pump_until(&mut app, &rx, "the line shows", |a| pane_screen(a, id).contains("gone-2"));
+                app.refresh(Instant::now());
+
+                assert_eq!(answers(&mut app), []);
+            }
+        }
+
+        mod agents {
+            use super::*;
+
+            struct Agent {
+                app: App,
+                rx: Receiver<AppEvent>,
+                dir: TempDir,
+                _config: TempDir,
+                _project: TempDir,
+            }
+
+            impl Agent {
+                fn new() -> Self {
+                    let (dir, config, project) = (TempDir::new(), TempDir::new(), TempDir::new());
+                    std::fs::create_dir(dir.path().join("sessions")).expect("create the sessions folder");
+                    let script = config.path().join("claude");
+                    write_executable(&script, AGENT);
+                    let settings = Config {
+                        agent_commands: [("claude".to_string(), script.display().to_string())].into(),
+                        agent_args: [("claude".to_string(), vec![dir.path().display().to_string()])].into(),
+                        ..Config::default()
+                    };
+                    let config_path = config.path().join("config.json");
+                    config::save(&config_path, &settings).expect("write config");
+                    let (mut app, rx) = app_in(project.path(), config_path);
+                    app.claude_dir = Some(dir.path().to_path_buf());
+                    Self { app, rx, dir, _config: config, _project: project }
+                }
+
+                fn start(&mut self, prompt: Option<&str>) -> u64 {
+                    let start = wire::Start {
+                        agent: Some("claude".into()),
+                        name: Some("fixer".into()),
+                        prompt: prompt.map(str::to_string),
+                        ..wire::Start::default()
+                    };
+                    ask(&mut self.app, None, Command::Start(start));
+                    let started = done(answered(&mut self.app, &self.rx, "the agent is ready"));
+                    started.ids.pane.expect("the agent's pane")
+                }
+
+                fn finish(&self) {
+                    std::fs::write(self.dir.path().join("finish"), "").expect("finish");
+                }
+
+                fn until(&mut self, what: &str, cond: impl Fn(&App) -> bool) {
+                    let (app, rx) = (&mut self.app, &self.rx);
+                    pump_until(app, rx, what, |a| cond(a));
+                }
+
+                fn status(&self, id: u64) -> Option<activity::Status> {
+                    pane(&self.app, id).agent.status()
+                }
+
+                fn answered(&mut self, what: &str) -> Response {
+                    answered(&mut self.app, &self.rx, what)
+                }
+            }
+
+            fn refreshing(app: &mut App, rx: &Receiver<AppEvent>, what: &str, cond: impl Fn(&App) -> bool) {
+                wait_until(what, || {
+                    while let Ok(ev) = rx.try_recv() {
+                        app.handle_event(ev, AREA).expect("handle event");
+                    }
+                    app.refresh(Instant::now());
+                    cond(app)
+                });
+            }
+
+            #[test]
+            fn start_types_the_agent_and_submits_its_prompt_in_a_tab_of_its_own() {
+                let mut agent = Agent::new();
+                let before = agent.app.focus();
+
+                let id = agent.start(Some("fix the login"));
+
+                agent.until("the agent reads the prompt", |a| pane_screen(a, id).contains("agent> fix the login"));
+                let tab = &agent.app.projects[0].workspaces[0].tabs[1];
+                assert_eq!((tab.name.as_deref(), agent.app.focus()), (Some("fixer"), before));
+                agent.finish();
+            }
+
+            #[test]
+            fn send_and_wait_follows_the_agent_until_it_stops() {
+                let mut agent = Agent::new();
+                let id = agent.start(None);
+
+                ask(&mut agent.app, None, send_text(id, "next step", true, true));
+                let (app, rx) = (&mut agent.app, &agent.rx);
+                refreshing(app, rx, "the agent works", |a| {
+                    pane(a, id).agent.status() == Some(activity::Status::Working)
+                });
+                let early = answers(&mut agent.app);
+                agent.finish();
+
+                let ended = done(agent.answered("the agent stops"));
+                assert_eq!((early, ended.ended.as_deref()), (Vec::new(), Some("done")));
+            }
+
+            #[test]
+            fn a_wait_after_a_prompt_waits_for_the_agent_to_take_it() {
+                let mut agent = Agent::new();
+                let id = agent.start(None);
+                ask(&mut agent.app, None, send_text(id, "next step", true, false));
+                done(agent.answered("the enter is pressed"));
+
+                ask(&mut agent.app, None, wait_for(id, Until::Stops, None));
+                let (app, rx) = (&mut agent.app, &agent.rx);
+                refreshing(app, rx, "the agent works", |a| {
+                    pane(a, id).agent.status() == Some(activity::Status::Working)
+                });
+                let early = answers(&mut agent.app);
+                agent.finish();
+
+                let ended = done(agent.answered("the agent stops"));
+                assert_eq!((early, ended.ended.is_some()), (Vec::new(), true));
+            }
+
+            #[test]
+            fn send_refuses_an_agent_waiting_for_an_answer() {
+                let mut agent = Agent::new();
+                let id = agent.start(Some("please ask"));
+                agent.finish();
+                let (app, rx) = (&mut agent.app, &agent.rx);
+                refreshing(app, rx, "the agent asks", |a| {
+                    pane(a, id).agent.status() == Some(activity::Status::Waiting)
+                });
+
+                let message = error(now(&mut agent.app, None, send_text(id, "yes", true, false)));
+
+                assert!(message.contains("waiting for an answer"), "{message}");
+                assert_eq!(agent.status(id), Some(activity::Status::Waiting));
+            }
+        }
+
+        mod arranging {
+            use super::*;
+
+            #[test]
+            fn close_stops_the_shells_of_a_tab() {
+                let (mut app, rx) = app();
+                let made = done(now(&mut app, None, new_tab(None)));
+                let tab = made.ids.tab.expect("the new tab");
+
+                done(now(
+                    &mut app,
+                    None,
+                    Command::Close(wire::Close { item: Item::Tab(tab), remove_worktree: false, force: false }),
+                ));
+
+                pump_until(&mut app, &rx, "the tab closes", |a| a.projects[0].workspaces[0].tabs.len() == 1);
+            }
+
+            #[test]
+            fn a_project_closes_without_asking() {
+                let (mut app, rx, _dirs) = app_with(2);
+                let id = app.projects[0].id;
+
+                done(now(
+                    &mut app,
+                    None,
+                    Command::Close(wire::Close { item: Item::Project(id), remove_worktree: false, force: false }),
+                ));
+
+                pump_until(&mut app, &rx, "the project closes", |a| a.projects.len() == 1);
+                assert!(app.overlay.is_none());
+            }
+
+            #[test]
+            fn rename_without_a_target_names_the_callers_tab() {
+                let (mut app, _rx, _dirs) = app_with(2);
+                let caller = term(&app, 0).id;
+                let rename = |name: &str| Command::Rename(wire::Rename { item: None, name: name.into() });
+
+                done(now(&mut app, Some(caller), rename("mine")));
+                let named = app.projects[0].workspaces[0].tabs[0].name.clone();
+                done(now(&mut app, Some(caller), rename("")));
+
+                assert_eq!(
+                    (named.as_deref(), app.projects[0].workspaces[0].tabs[0].name.as_deref()),
+                    (Some("mine"), None)
+                );
+            }
+
+            #[test]
+            fn a_group_keeps_a_name() {
+                let (mut app, _rx) = app();
+                let group = app.add_group("work".into());
+
+                let message = error(now(
+                    &mut app,
+                    None,
+                    Command::Rename(wire::Rename { item: Some(Item::Group(group)), name: " ".into() }),
+                ));
+
+                assert_eq!((message.as_str(), app.groups[0].entry.name.as_str()), ("a group needs a name", "work"));
+            }
+
+            #[test]
+            fn notify_shows_a_toast_and_asks_for_a_desktop_notification() {
+                let (mut app, _rx) = app();
+
+                done(now(&mut app, None, Command::Notify(wire::Notify { text: "the build\u{7} is ready".into() })));
+
+                let sent: Vec<String> = app.take_notifications().into_iter().map(|n| n.text).collect();
+                assert_eq!((toast(&app), sent), (Some("the build is ready"), vec!["the build is ready".to_string()]));
+            }
+
+            #[test]
+            fn the_todo_list_follows_its_commands() {
+                let (mut app, _rx) = app();
+                let todo = |app: &mut App, todo| now(app, None, Command::Todo(todo));
+
+                let milk = done(todo(&mut app, wire::Todo::Add("buy milk".into()))).todo.expect("an id");
+                let docs = done(todo(&mut app, wire::Todo::Add("write docs".into()))).todo.expect("an id");
+                done(todo(&mut app, wire::Todo::Done(milk)));
+                done(todo(&mut app, wire::Todo::Rm(docs)));
+                let Response::Ok(list) = todo(&mut app, wire::Todo::List) else { panic!("no list") };
+
+                let list: wire::TodoList = serde_json::from_value(list).expect("a list");
+                assert_eq!(list.todos, [wire::TodoItem { id: milk, text: "buy milk".into(), done: true }]);
+            }
+        }
+
+        mod worktrees {
+            use super::*;
+
+            fn repo() -> (App, Receiver<AppEvent>, TempDir, TempDir, TempDir) {
+                let repo = git_repo(&[("README", "hi")]);
+                let (worktrees, config, config_path) = with_worktrees_config();
+                let (app, rx) = app_in(repo.path(), config_path);
+                (app, rx, repo, worktrees, config)
+            }
+
+            fn worktree(name: &str) -> Command {
+                Command::NewWorkspace(wire::NewWorkspace {
+                    name: name.into(),
+                    worktree: true,
+                    ..wire::NewWorkspace::default()
+                })
+            }
+
+            #[test]
+            fn a_worktree_opens_with_a_tab_and_leaves_the_window_as_it_is() {
+                let (mut app, rx, _repo, worktrees, _config) = repo();
+                let before = app.focus();
+
+                ask(&mut app, None, worktree("feat/x"));
+                let made = done(answered(&mut app, &rx, "git makes the worktree"));
+
+                let workspace =
+                    app.projects[0].workspaces.iter().find(|w| Some(w.id) == made.ids.workspace).expect("it");
+                assert_eq!((workspace.worktree, workspace.tabs.len(), app.focus()), (true, 1, before));
+                assert!(workspace.path.starts_with(worktrees.path()), "{}", workspace.path.display());
+            }
+
+            #[test]
+            fn removing_it_deletes_the_checkout() {
+                let (mut app, rx, _repo, _worktrees, _config) = repo();
+                ask(&mut app, None, worktree("feat/x"));
+                let made = done(answered(&mut app, &rx, "git makes the worktree"));
+                let id = made.ids.workspace.expect("the workspace");
+                let path = app.projects[0].workspaces.iter().find(|w| w.id == id).map(|w| w.path.clone()).expect("it");
+
+                let close = wire::Close { item: Item::Workspace(id), remove_worktree: true, force: false };
+                ask(&mut app, None, Command::Close(close));
+                done(answered(&mut app, &rx, "git removes the worktree"));
+
+                pump_until(&mut app, &rx, "the workspace goes", |a| {
+                    a.projects[0].workspaces.iter().all(|w| w.id != id)
+                });
+                assert!(!path.exists());
+            }
+
+            #[test]
+            fn only_a_repository_root_has_worktrees() {
+                let (mut app, _rx, _dirs) = app_with(1);
+
+                let message = error(now(&mut app, None, worktree("feat/x")));
+
+                assert!(message.contains("is not the root of a git repository"), "{message}");
+            }
+        }
+    }
+
+    mod bugs {
+        use super::*;
+
+        #[test]
+        fn a_bug_says_where_to_look_and_stays_a_while() {
+            let (mut app, _rx) = empty_app();
+            app.report_bug();
+            let shown = app.toast.as_ref().map(|t| (t.message.as_str(), t.icon, t.lasts()));
+            assert_eq!(shown, Some(("cornercase hit a bug, see server.log", ui::ToastIcon::Bug, BUG_FOR)));
+        }
+
+        #[test]
+        fn resetting_the_interaction_closes_dialogs_and_ends_drags() {
+            let (mut app, _rx) = app();
+            let row = sidebar_pos(&app, SidebarRow::Project(0));
+            press(&mut app, row);
+            app.overlay = Some(Overlay::Usage);
+            app.nav = Some(ui::Nav::Projects);
+            app.resizing = Some(ui::Border::Projects);
+            app.divider_drag = Some((1, vec![true]));
+            app.selecting = Some(1);
+            assert!(app.row_drag.is_some() && app.hover.is_some());
+
+            app.reset_interaction();
+
+            assert!(app.overlay.is_none());
+            assert_eq!(
+                (app.nav, app.hover, app.row_drag, app.resizing, app.divider_drag, app.selecting),
+                (None, None, None, None, None, None)
+            );
+        }
+
+        #[test]
+        fn resetting_the_interaction_drops_the_todo_field_and_gives_the_filter_keys_back() {
+            let (mut app, _rx) = app();
+            let mut filter = changes::filter::Filter::default();
+            filter.push('a');
+            app.changes.filter = Some(filter);
+            app.todo.field = Some(todo::Field::default());
+
+            app.reset_interaction();
+
+            let filter = app.changes.filter.as_ref().map(|f| (f.query(), f.focused));
+            assert_eq!((app.todo.field.is_none(), filter), (true, Some(("a", false))));
         }
     }
 }

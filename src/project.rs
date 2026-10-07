@@ -62,10 +62,12 @@ impl Tab {
         }
     }
 
-    pub fn split(&mut self, target: u64, dir: Dir, term: Term) {
+    pub fn split(&mut self, target: u64, dir: Dir, term: Term, focus: bool) {
         if self.layout.split(target, dir, term.id) {
             self.panes.push(term);
-            self.active = self.panes.len() - 1;
+            if focus {
+                self.active = self.panes.len() - 1;
+            }
         }
     }
 
@@ -113,11 +115,23 @@ pub struct Workspace {
     pub closing: bool,
     pub behind: u32,
     pub base: Option<String>,
+    pub collapsed: bool,
 }
 
 impl Workspace {
     pub fn new(id: u64, path: PathBuf, name: Option<String>, worktree: bool) -> Self {
-        Self { id, path, name, worktree, tabs: Vec::new(), active: 0, closing: false, behind: 0, base: None }
+        Self {
+            id,
+            path,
+            name,
+            worktree,
+            tabs: Vec::new(),
+            active: 0,
+            closing: false,
+            behind: 0,
+            base: None,
+            collapsed: false,
+        }
     }
 
     pub fn tab(&self) -> Option<&Tab> {
@@ -171,11 +185,12 @@ pub struct Project {
     pub workspaces: Vec<Workspace>,
     pub active: usize,
     pub closing: bool,
+    pub collapsed: bool,
 }
 
 impl Project {
     pub fn new(id: u64, path: PathBuf, name: Option<String>) -> Self {
-        Self { id, path, name, group: None, workspaces: Vec::new(), active: 0, closing: false }
+        Self { id, path, name, group: None, workspaces: Vec::new(), active: 0, closing: false, collapsed: false }
     }
 
     pub fn workspace(&self) -> Option<&Workspace> {

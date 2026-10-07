@@ -42,6 +42,7 @@ export interface Workspace {
   active: number;
   flags: Place['flags'];
   behind?: number;
+  collapsed?: boolean;
 }
 
 export interface Group {
@@ -62,6 +63,7 @@ export interface Project {
   tree: Tree;
   workspaces: Workspace[];
   active: number;
+  collapsed?: boolean;
 }
 
 export type Target =
@@ -114,7 +116,7 @@ export interface IssuesOverlay {
   loading: boolean;
   busy?: string;
   notice?: string;
-  token: { input: string; checking: boolean; error?: string };
+  token: { input: string; checking: boolean; error?: string; step?: 'site' | 'email' | 'token' };
   agentPick: { selected: number; filter: string } | null;
   chosen: string | null;
 }
@@ -135,6 +137,8 @@ export type Overlay =
   | { kind: 'remove'; project: number; workspace: number; removing?: boolean }
   | { kind: 'deleteGroup'; group: number }
   | { kind: 'closeProject'; project: number }
+  | { kind: 'closeWorkspace'; project: number; workspace: number }
+  | { kind: 'closeTab'; project: number; workspace: number; tab: number }
   | { kind: 'picker'; dir: string[]; filter: string; selected: number | null; scroll: number }
   | { kind: 'search'; query: string; selected: number; scroll: number }
   | { kind: 'usage' }
@@ -156,7 +160,10 @@ export interface Config {
   updates: boolean;
   agentArgs: Record<string, string[]>;
   sources: string[];
-  accounts: { shortcut: boolean; linear: boolean };
+  accounts: { shortcut: boolean; linear: boolean; jira: boolean };
+  jiraSite: string;
+  jiraEmail: string;
+  jiraJql: string;
 }
 
 export const defaultConfig = (): Config => ({
@@ -165,7 +172,7 @@ export const defaultConfig = (): Config => ({
   agent: 'claude',
   submit: false,
   trust: true,
-  sidebar: 'side_by_side',
+  sidebar: 'projects_on_top',
   dim: true,
   model: true,
   context: true,
@@ -173,8 +180,11 @@ export const defaultConfig = (): Config => ({
   notify: 'auto',
   updates: true,
   agentArgs: { claude: ['--permission-mode', 'plan'] },
-  sources: ['all', 'github', 'shortcut', 'linear'],
-  accounts: { shortcut: false, linear: false },
+  sources: ['all', 'github', 'shortcut', 'linear', 'jira'],
+  accounts: { shortcut: false, linear: false, jira: false },
+  jiraSite: '',
+  jiraEmail: '',
+  jiraJql: '',
 });
 
 export const projectLabel = (p: Project) => p.name || p.folder;

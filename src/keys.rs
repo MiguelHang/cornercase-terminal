@@ -1,6 +1,63 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use libghostty_vt::key::{self, Action, Encoder, KittyKeyFlags, Mods};
 
+const MODIFIERS: [(&str, KeyModifiers); 3] =
+    [("ctrl+", KeyModifiers::CONTROL), ("alt+", KeyModifiers::ALT), ("shift+", KeyModifiers::SHIFT)];
+const NAMED: [(&str, KeyCode); 20] = [
+    ("enter", KeyCode::Enter),
+    ("return", KeyCode::Enter),
+    ("esc", KeyCode::Esc),
+    ("escape", KeyCode::Esc),
+    ("tab", KeyCode::Tab),
+    ("backspace", KeyCode::Backspace),
+    ("space", KeyCode::Char(' ')),
+    ("up", KeyCode::Up),
+    ("down", KeyCode::Down),
+    ("left", KeyCode::Left),
+    ("right", KeyCode::Right),
+    ("home", KeyCode::Home),
+    ("end", KeyCode::End),
+    ("pageup", KeyCode::PageUp),
+    ("page-up", KeyCode::PageUp),
+    ("pagedown", KeyCode::PageDown),
+    ("page-down", KeyCode::PageDown),
+    ("delete", KeyCode::Delete),
+    ("del", KeyCode::Delete),
+    ("insert", KeyCode::Insert),
+];
+
+pub fn named(name: &str) -> Option<KeyEvent> {
+    let mut mods = KeyModifiers::NONE;
+    let mut rest = name;
+    while let Some((prefix, modifier)) = MODIFIERS.iter().find(|(prefix, _)| {
+        rest.len() > prefix.len() && rest.get(..prefix.len()).is_some_and(|p| p.eq_ignore_ascii_case(prefix))
+    }) {
+        mods |= *modifier;
+        rest = &rest[prefix.len()..];
+    }
+    let mut chars = rest.chars();
+    let code = match (chars.next(), chars.next()) {
+        (Some(c), None) => {
+            if c.is_ascii_uppercase() {
+                mods |= KeyModifiers::SHIFT;
+            }
+            if mods.contains(KeyModifiers::SHIFT) { KeyCode::Char(c.to_ascii_uppercase()) } else { KeyCode::Char(c) }
+        }
+        _ => NAMED
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(rest))
+            .map(|(_, code)| *code)
+            .or_else(|| function(rest))?,
+    };
+    let code = if code == KeyCode::Tab && mods.contains(KeyModifiers::SHIFT) { KeyCode::BackTab } else { code };
+    Some(KeyEvent::new(code, mods))
+}
+
+fn function(name: &str) -> Option<KeyCode> {
+    let n: u8 = name.strip_prefix(['f', 'F'])?.parse().ok()?;
+    (1..=12).contains(&n).then_some(KeyCode::F(n))
+}
+
 pub fn encode(event: KeyEvent, encoder: &mut Encoder<'_>, kitty: KittyKeyFlags, app_cursor: bool) -> Vec<u8> {
     if prefers_legacy(&event, kitty) {
         return legacy(event, app_cursor);
@@ -390,5 +447,43 @@ mod tests {
         #[case] expected: &[u8],
     ) {
         assert_eq!(encode_normal(code, mods), expected);
+    }
+
+    mod named {
+        use super::*;
+
+        #[rstest]
+        #[case::enter("enter", KeyCode::Enter, NONE)]
+        #[case::any_case("Esc", KeyCode::Esc, NONE)]
+        #[case::ctrl_c("ctrl+c", KeyCode::Char('c'), CTRL)]
+        #[case::two_modifiers("ctrl+alt+x", KeyCode::Char('x'), CTRL.union(ALT))]
+        #[case::shift_tab("shift+tab", KeyCode::BackTab, SHIFT)]
+        #[case::a_capital("A", KeyCode::Char('A'), SHIFT)]
+        #[case::a_shifted_letter("shift+a", KeyCode::Char('A'), SHIFT)]
+        #[case::a_symbol("?", KeyCode::Char('?'), NONE)]
+        #[case::a_plus("ctrl++", KeyCode::Char('+'), CTRL)]
+        #[case::space("space", KeyCode::Char(' '), NONE)]
+        #[case::an_arrow("up", KeyCode::Up, NONE)]
+        #[case::a_function_key("f12", KeyCode::F(12), NONE)]
+        fn reads_a_key(#[case] name: &str, #[case] code: KeyCode, #[case] mods: KeyModifiers) {
+            assert_eq!(named(name), Some(KeyEvent::new(code, mods)));
+        }
+
+        #[rstest]
+        #[case::a_word("hello")]
+        #[case::a_modifier_alone("ctrl+")]
+        #[case::a_missing_function_key("f13")]
+        #[case::nothing("")]
+        fn refuses_what_is_not_a_key(#[case] name: &str) {
+            assert_eq!(named(name), None);
+        }
+
+        #[test]
+        fn ctrl_c_reaches_the_program_as_an_interrupt() {
+            let key = named("ctrl+c").expect("a key");
+            let mut encoder = Encoder::new().expect("key encoder");
+
+            assert_eq!(encode(key, &mut encoder, NO_KITTY, false), [0x03]);
+        }
     }
 }

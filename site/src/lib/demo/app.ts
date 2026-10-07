@@ -12,6 +12,8 @@ import {
   SIDEBARS,
   type Sidebar,
   type SidebarRow,
+  type TreeRow,
+  type TreeShape,
   type Widths,
   type WorkspaceRow,
   activeRow,
@@ -24,6 +26,10 @@ import {
   sidebarRows,
   type Details,
   tabLines,
+  treeActiveRow,
+  treeDrop,
+  treeLayout,
+  treeRows,
   workspaceDrop,
   workspaceLayout,
   workspaceRows,
@@ -85,7 +91,7 @@ export interface IssuesView {
   hint: string;
   buttons: string[];
   detail?: Line[];
-  token?: { label: string; help: string[] };
+  token?: { label: string; input: string; help: string[] };
   picking: boolean;
   error?: boolean;
 }
@@ -100,13 +106,58 @@ export interface SearchResult {
 
 type Listener = (event: string, detail?: string) => void;
 
-const SOURCE_NAMES: Record<string, string> = { all: 'All', github: 'GitHub', shortcut: 'Shortcut', linear: 'Linear' };
+const SOURCE_NAMES: Record<string, string> = { all: 'All', github: 'GitHub', shortcut: 'Shortcut', linear: 'Linear', jira: 'Jira' };
+
+type Remote = 'shortcut' | 'linear' | 'jira';
+const REMOTES: Record<Remote, { name: string; token: string; env: string; help: string }> = {
+  shortcut: {
+    name: 'Shortcut',
+    token: 'API token',
+    env: 'SHORTCUT_API_TOKEN',
+    help: 'Create a token in Shortcut under Settings → Your account → API Tokens, paste it here and press Enter.',
+  },
+  linear: {
+    name: 'Linear',
+    token: 'API key',
+    env: 'LINEAR_API_KEY',
+    help: 'Create a personal API key in Linear under Settings → Security & access → Personal API keys, paste it here and press Enter.',
+  },
+  jira: {
+    name: 'Jira',
+    token: 'API token',
+    env: 'JIRA_API_TOKEN',
+    help: 'Create an API token at id.atlassian.com under Security → Create and manage API tokens, paste it here and press Enter.',
+  },
+};
+const isRemote = (s: string): s is Remote => Object.hasOwn(REMOTES, s);
+const tokenName = (s: Remote) => `${REMOTES[s].name} ${REMOTES[s].token}`;
+
+function checkSite(input: string): [string, string?] {
+  const host = (input.trim().split('://').pop() ?? '').split('/')[0].replace(/\.+$/, '').toLowerCase();
+  if (!host) return ['', 'type your site, such as acme.atlassian.net'];
+  if (!/^[a-z0-9.-]+$/.test(host)) return ['', 'a site is a host name, such as acme.atlassian.net'];
+  return [host.includes('.') ? host : `${host}.atlassian.net`];
+}
+
+function checkEmail(input: string): [string, string?] {
+  const email = input.trim();
+  const at = email.indexOf('@');
+  return at > 0 && at < email.length - 1 && !/\s/.test(email) ? [email] : ['', 'type the email of your Atlassian account'];
+}
 const DOUBLE_CLICK = 400;
 const AUTO_SCROLL_EVERY = 150;
 
+interface Focus {
+  project: number | null;
+  workspace: number | null;
+  tab: number | null;
+  tree: boolean;
+}
+
 export type RowDragView =
   | { list: 'sidebar'; row: SidebarRow; landing: Landing | null }
-  | { list: 'workspaces'; row: WorkspaceRow; landing: Landing | null };
+  | { list: 'workspaces'; row: WorkspaceRow; landing: Landing | null }
+  | { list: 'tree'; row: TreeRow; landing: Landing | null };
 
 function moveBefore<T>(items: T[], from: number, before: number, active: number): number {
   const to = before > from ? before - 1 : before;
@@ -136,6 +187,12 @@ const DETAIL_NOTICES = {
   context: ['agent tabs show how full their context is', 'agent tabs hide their context'],
   memory: ['agent tabs show the memory they use', 'agent tabs hide their memory'],
 } as const;
+
+function stoppedTabs(tabs: number): string {
+  if (tabs === 1) return ' Its tab and the programs running in it are stopped.';
+  if (tabs > 1) return ` Its ${tabs} tabs and the programs running in them are stopped.`;
+  return '';
+}
 
 function agentIn(pane: Pane): Agent | null {
   const fg = pane.shell.fg;
@@ -190,7 +247,7 @@ export class App {
   private frame: Frame | null = null;
   private grid = new Grid(this.cols, this.rows);
   private lastClick: { at: number; border: string } | null = null;
-  private followed: number | null = null;
+  private followed: Focus = { project: null, workspace: null, tab: null, tree: false };
   private needsDraw = true;
 
   on(listener: Listener): void {
@@ -287,17 +344,19 @@ export class App {
 
   private watchAgents(): void {
     const visible = this.visibleTab();
-    const measured = this.config.memory ? this.project() : undefined;
+    const tree = this.areas().tree;
+    const shown = (p: Project) => (tree ? !p.collapsed && !this.group(p.group)?.collapsed : p === this.project());
     const now = this.now();
     for (const p of this.projects) {
       for (const w of p.workspaces) {
+        const measured = this.config.memory && shown(p) && !(tree && w.collapsed);
         for (const t of w.tabs) {
           for (const pane of t.panes) {
             const agent = agentIn(pane);
             const fg = pane.shell.fg;
             pane.context = fg instanceof Agent ? fg.context : null;
             if (!agent) pane.memory = null;
-            else if (p === measured) pane.memory = agent.memory;
+            else if (measured) pane.memory = agent.memory;
             followAgent(pane, agent?.name ?? null);
             const status = watchPane(pane, agentActivity(agent), t === visible, now);
             if (status && agent) this.notify(`${agent.name} ${status === 'waiting' ? 'needs you' : 'finished'} in ${projectLabel(p)} › ${workspaceLabel(w)}`, status);
@@ -409,7 +468,37 @@ export class App {
   }
 
   tabLines(): number[][] {
-    return this.project()?.workspaces.map((w) => w.tabs.map((t) => tabLines(this.tabDetails(t)))) ?? [];
+    return this.project()?.workspaces.map((w) => this.workspaceLines(w)) ?? [];
+  }
+
+  private workspaceLines(w: Workspace): number[] {
+    return w.tabs.map((t) => tabLines(this.tabDetails(t)));
+  }
+
+  treeShape(): TreeShape {
+    return {
+      groups: this.groups.map((g) => g.collapsed),
+      projects: this.projects.map((p) => ({
+        group: this.groupIndex(p.group),
+        collapsed: !!p.collapsed,
+        workspaces: p.workspaces.map((w) => ({ collapsed: !!w.collapsed, tabs: p.collapsed || w.collapsed ? [] : this.workspaceLines(w) })),
+      })),
+    };
+  }
+
+  private treeRowOf(t: Target): TreeRow | null {
+    if (t.kind === 'group') {
+      const g = this.groupIndex(t.group);
+      return g === null ? null : { kind: 'group', g };
+    }
+    const p = this.projects.findIndex((x) => x.id === t.project);
+    if (p < 0) return null;
+    if (t.kind === 'project') return { kind: 'project', p };
+    const w = this.projects[p].workspaces.findIndex((x) => x.id === t.workspace);
+    if (w < 0) return null;
+    if (t.kind === 'workspace') return { kind: 'ws', p, w };
+    const tab = this.projects[p].workspaces[w].tabs.findIndex((x) => x.id === t.tab);
+    return tab < 0 ? null : { kind: 'tab', p, w, t: tab };
   }
 
   tabDetails(t: Tab): Details {
@@ -431,33 +520,30 @@ export class App {
     const h = this.hover;
     if (!d?.moved || !h) return null;
     const areas = this.areas();
-    const t = d.target;
-    if (t.kind === 'group' || t.kind === 'project') {
-      const i = t.kind === 'group' ? (this.groupIndex(t.group) ?? -1) : this.projects.findIndex((p) => p.id === t.project);
-      if (i < 0) return null;
-      const row: SidebarRow = t.kind === 'group' ? { kind: 'group', g: i } : { kind: 'project', p: i };
+    const row = this.treeRowOf(d.target);
+    if (!row) return null;
+    if (areas.tree) return { list: 'tree', row, landing: treeDrop(areas.list, this.treeShape(), this.projectsScroll, row, h.x, h.y) };
+    if (row.kind === 'group' || row.kind === 'project') {
       return { list: 'sidebar', row, landing: sidebarDrop(areas.list, areas.pitch, this.sidebarRows(), this.projectsScroll, row, h.x, h.y) };
     }
-    const p = this.project();
-    const w = p && p.id === t.project ? p.workspaces.findIndex((x) => x.id === t.workspace) : -1;
-    if (!p || w < 0) return null;
-    const row: WorkspaceRow = t.kind === 'workspace' ? { kind: 'ws', w } : { kind: 'tab', w, t: p.workspaces[w].tabs.findIndex((x) => x.id === t.tab) };
-    if (row.kind === 'tab' && row.t < 0) return null;
-    const landing = workspaceDrop(areas.workspacesList, areas.pitch, this.tabLines(), this.workspacesScroll, row, h.x, h.y);
-    return { list: 'workspaces', row, landing };
+    if ((row.kind !== 'ws' && row.kind !== 'tab') || row.p !== this.active) return null;
+    const listed: WorkspaceRow = row.kind === 'ws' ? { kind: 'ws', w: row.w } : { kind: 'tab', w: row.w, t: row.t };
+    const landing = workspaceDrop(areas.workspacesList, areas.pitch, this.tabLines(), this.workspacesScroll, listed, h.x, h.y);
+    return { list: 'workspaces', row: listed, landing };
   }
 
   private dropRow(target: Target): void {
     const spot = this.rowDragView()?.landing?.spot;
-    const p = this.project();
-    const w = p?.workspaces.findIndex((x) => 'workspace' in target && x.id === target.workspace) ?? -1;
-    if (!spot) return;
-    if (target.kind === 'group' && spot.kind === 'group') moveBefore(this.groups, this.groupIndex(target.group) ?? -1, spot.before, 0);
-    else if (target.kind === 'project' && spot.kind === 'project') this.moveProject(target.project, spot.group, spot.before);
-    else if (p && target.kind === 'workspace' && spot.kind === 'workspace') p.active = moveBefore(p.workspaces, w, spot.before, p.active);
-    else if (p && w >= 0 && target.kind === 'tab' && spot.kind === 'tab') {
-      const ws = p.workspaces[w];
-      ws.active = moveBefore(ws.tabs, ws.tabs.findIndex((x) => x.id === target.tab), spot.before, ws.active);
+    const row = this.treeRowOf(target);
+    if (!spot || !row) return;
+    if (row.kind === 'group' && spot.kind === 'group') moveBefore(this.groups, row.g, spot.before, 0);
+    else if (row.kind === 'project' && spot.kind === 'project') this.moveProject(this.projects[row.p].id, spot.group, spot.before);
+    else if (row.kind === 'ws' && spot.kind === 'workspace') {
+      const p = this.projects[row.p];
+      p.active = moveBefore(p.workspaces, row.w, spot.before, p.active);
+    } else if (row.kind === 'tab' && spot.kind === 'tab') {
+      const w = this.projects[row.p].workspaces[row.w];
+      w.active = moveBefore(w.tabs, row.t, spot.before, w.active);
     }
   }
 
@@ -480,10 +566,13 @@ export class App {
     const h = this.hover;
     if (!d?.moved || !h || this.now() - d.scrolled < AUTO_SCROLL_EVERY) return;
     const areas = this.areas();
-    const sidebar = d.target.kind === 'group' || d.target.kind === 'project';
-    const rows = sidebar
-      ? sidebarLayout(areas.list, areas.pitch, this.sidebarRows(), this.projectsScroll)
-      : workspaceLayout(areas.workspacesList, areas.pitch, workspaceRows(this.tabLines()), this.tabLines(), this.workspacesScroll);
+    const shape = this.treeShape();
+    const sidebar = areas.tree || d.target.kind === 'group' || d.target.kind === 'project';
+    const rows = areas.tree
+      ? treeLayout(areas.list, shape, treeRows(shape), this.projectsScroll)
+      : sidebar
+        ? sidebarLayout(areas.list, areas.pitch, this.sidebarRows(), this.projectsScroll)
+        : workspaceLayout(areas.workspacesList, areas.pitch, workspaceRows(this.tabLines()), this.tabLines(), this.workspacesScroll);
     const delta = rows.edge(h.x, h.y);
     if (!delta) return;
     if (sidebar) this.projectsScroll = rows.scrolled(delta);
@@ -495,12 +584,45 @@ export class App {
 
   private follow(): void {
     const p = this.project();
-    if (!p || p.id === this.followed) return;
-    this.followed = p.id;
-    const { list, pitch } = layout(this.cols, this.rows, this.widths, 'projects', false, this.sidebar());
+    const { list, pitch, tree } = layout(this.cols, this.rows, this.widths, 'projects', false, this.sidebar());
+    const focus: Focus = { project: p?.id ?? null, workspace: this.workspace()?.id ?? null, tab: this.tab()?.id ?? null, tree };
+    const before = this.followed;
+    if (focus.project === before.project && focus.workspace === before.workspace && focus.tab === before.tab && tree === before.tree) return;
+    this.followed = focus;
+    if (before.project !== null && (focus.project !== before.project || focus.workspace !== before.workspace)) this.unfoldFocus();
+    if (tree) return this.revealInTree(list);
+    if (!p || (focus.project === before.project && !before.tree)) return;
     const sidebar = this.sidebarRows();
     const i = activeRow(sidebar, this.active, this.groupIndex(p.group));
     if (i >= 0) this.projectsScroll = sidebarLayout(list, pitch, sidebar, this.projectsScroll).reveal(i);
+  }
+
+  private revealInTree(list: Rect): void {
+    const p = this.project();
+    if (!p) return;
+    const w = p.workspaces[p.active];
+    const shape = this.treeShape();
+    const rows = treeRows(shape);
+    const shown = [rows.findIndex((r) => r.kind === 'project' && r.p === this.active), treeActiveRow(rows, shape, this.active, p.active, w?.tabs.length ? w.active : null)];
+    for (const i of shown) if (i >= 0) this.projectsScroll = treeLayout(list, shape, rows, this.projectsScroll).reveal(i);
+  }
+
+  private unfoldFocus(): void {
+    const p = this.project();
+    if (!p) return;
+    p.collapsed = false;
+    const w = p.workspaces[p.active];
+    if (w) w.collapsed = false;
+    const g = this.group(p.group);
+    if (this.followed.tree && g) g.collapsed = false;
+  }
+
+  toggleFold(p: number, w?: number): void {
+    const project = this.projects[p];
+    const folded = w === undefined ? project : project?.workspaces[w];
+    if (!folded) return;
+    folded.collapsed = !folded.collapsed;
+    this.dirty();
   }
 
   toggleGroup(g: number): void {
@@ -535,11 +657,47 @@ export class App {
   closeProjectMessage(id: number): string {
     const p = this.projects.find((x) => x.id === id);
     if (!p) return '';
-    const tabs = p.workspaces.reduce((n, w) => n + w.tabs.length, 0);
-    let stopped = '';
-    if (tabs === 1) stopped = ' Its tab and the programs running in it are stopped.';
-    else if (tabs > 1) stopped = ` Its ${tabs} tabs and the programs running in them are stopped.`;
+    const stopped = stoppedTabs(p.workspaces.reduce((n, w) => n + w.tabs.length, 0));
     return `Close the project ${projectLabel(p)}?${stopped} Folders and worktrees stay on disk.`;
+  }
+
+  askCloseWorkspace(p: number, w: number): void {
+    const project = this.projects[p];
+    const ws = project?.workspaces[w];
+    if (!project || !ws) return;
+    if (ws.worktree) return this.closeWorkspace(p, w);
+    this.overlay = { kind: 'closeWorkspace', project: project.id, workspace: ws.id };
+    this.dirty();
+  }
+
+  askCloseTab(p: number, w: number, t: number): void {
+    const project = this.projects[p];
+    const ws = project?.workspaces[w];
+    const tab = ws?.tabs[t];
+    if (!project || !ws || !tab) return;
+    this.overlay = { kind: 'closeTab', project: project.id, workspace: ws.id, tab: tab.id };
+    this.dirty();
+  }
+
+  private closeTarget(project: number, workspace: number, tab?: number): { p: number; w: number; t: number } | null {
+    const p = this.projects.findIndex((x) => x.id === project);
+    const w = this.projects[p]?.workspaces.findIndex((x) => x.id === workspace) ?? -1;
+    const t = tab === undefined ? 0 : (this.projects[p]?.workspaces[w]?.tabs.findIndex((x) => x.id === tab) ?? -1);
+    return p < 0 || w < 0 || t < 0 ? null : { p, w, t };
+  }
+
+  closeWorkspaceMessage(project: number, workspace: number): string {
+    const at = this.closeTarget(project, workspace);
+    const ws = at && this.projects[at.p].workspaces[at.w];
+    if (!ws) return '';
+    return `Close the workspace ${workspaceLabel(ws)}?${stoppedTabs(ws.tabs.length)}`;
+  }
+
+  closeTabMessage(project: number, workspace: number, tab: number): string {
+    const at = this.closeTarget(project, workspace, tab);
+    const t = at && this.projects[at.p].workspaces[at.w].tabs[at.t];
+    if (!t) return '';
+    return `Close the tab ${tabLabel(t)}? The programs running in it are stopped.`;
   }
 
   confirmView(): ConfirmView | null {
@@ -547,6 +705,8 @@ export class App {
     if (o?.kind === 'remove') return { title: 'remove workspace', message: this.removeMessage(o), submit: 'remove', note: o.removing ? 'removing…' : undefined };
     if (o?.kind === 'deleteGroup') return { title: 'delete group', message: this.deleteGroupMessage(o.group), submit: 'delete' };
     if (o?.kind === 'closeProject') return { title: 'close project', message: this.closeProjectMessage(o.project), submit: 'close' };
+    if (o?.kind === 'closeWorkspace') return { title: 'close workspace', message: this.closeWorkspaceMessage(o.project, o.workspace), submit: 'close' };
+    if (o?.kind === 'closeTab') return { title: 'close tab', message: this.closeTabMessage(o.project, o.workspace, o.tab), submit: 'close' };
     return null;
   }
 
@@ -555,7 +715,13 @@ export class App {
     if (o?.kind === 'remove') return this.submitRemove();
     this.closeOverlay();
     if (o?.kind === 'closeProject') this.closeProject(o.project);
-    else if (o?.kind === 'deleteGroup') this.deleteGroup(o.group);
+    else if (o?.kind === 'closeWorkspace') {
+      const at = this.closeTarget(o.project, o.workspace);
+      if (at) this.closeWorkspace(at.p, at.w);
+    } else if (o?.kind === 'closeTab') {
+      const at = this.closeTarget(o.project, o.workspace, o.tab);
+      if (at) this.closeTab(at.p, at.w, at.t);
+    } else if (o?.kind === 'deleteGroup') this.deleteGroup(o.group);
   }
 
   deleteGroup(id: number): void {
@@ -598,6 +764,7 @@ export class App {
 
   selectProject(i: number): void {
     this.active = i;
+    this.unfoldFocus();
     if (this.nav) this.nav = 'workspaces';
     this.workspacesScroll = 0;
     this.emit('select', 'project');
@@ -616,65 +783,69 @@ export class App {
     this.dirty();
   }
 
-  selectWorkspace(w: number): void {
-    const p = this.project();
-    if (!p) return;
-    p.active = w;
+  private goto(p: number, w: number, t?: number): void {
+    const project = this.projects[p];
+    const ws = project?.workspaces[w];
+    if (!ws) return;
     this.nav = null;
+    this.active = p;
+    project.active = w;
+    if (t !== undefined && ws.tabs[t]) ws.active = t;
+    this.unfoldFocus();
+  }
+
+  selectWorkspace(p: number, w: number): void {
+    this.goto(p, w);
     this.dirty();
   }
 
-  selectTab(w: number, t: number): void {
-    const p = this.project();
-    if (!p) return;
-    p.active = w;
-    p.workspaces[w].active = t;
-    this.nav = null;
+  selectTab(p: number, w: number, t: number): void {
+    this.goto(p, w, t);
     this.selection = null;
     this.emit('select', 'tab');
     this.dirty();
   }
 
-  addTab(w: number): void {
-    const p = this.project();
-    if (!p) return;
-    const ws = p.workspaces[w];
-    ws.tabs.push(this.newTab([this.newPane(p, ws)]));
-    p.active = w;
+  addTab(p: number, w: number): void {
+    const project = this.projects[p];
+    const ws = project?.workspaces[w];
+    if (!ws) return;
+    ws.tabs.push(this.newTab([this.newPane(project, ws)]));
+    this.active = p;
+    project.active = w;
     ws.active = ws.tabs.length - 1;
     this.nav = null;
     this.emit('narrate', 'A fresh tab. Type `help` to see what this little demo shell can do.');
     this.dirty();
   }
 
-  closeTab(w: number, t: number): void {
-    const p = this.project();
-    if (!p) return;
-    const ws = p.workspaces[w];
-    const tab = ws.tabs[t];
-    if (!tab) return;
+  closeTab(p: number, w: number, t: number): void {
+    const ws = this.projects[p]?.workspaces[w];
+    const tab = ws?.tabs[t];
+    if (!ws || !tab) return;
     for (const pane of tab.panes) pane.shell.fg?.dispose?.();
     ws.tabs.splice(t, 1);
     ws.active = Math.max(0, Math.min(ws.active, ws.tabs.length - 1));
     this.dirty();
   }
 
-  closeWorkspace(w: number): void {
-    const p = this.project();
-    if (!p) return;
-    const ws = p.workspaces[w];
+  closeWorkspace(p: number, w: number): void {
+    const project = this.projects[p];
+    const ws = project?.workspaces[w];
+    if (!ws) return;
     if (ws.worktree) {
-      this.overlay = { kind: 'remove', project: p.id, workspace: ws.id };
+      this.overlay = { kind: 'remove', project: project.id, workspace: ws.id };
       this.dirty();
       return;
     }
-    if (p.workspaces.length === 1) {
+    for (const t of ws.tabs) for (const pane of t.panes) pane.shell.fg?.dispose?.();
+    if (project.workspaces.length === 1) {
       ws.tabs = [];
       this.dirty();
       return;
     }
-    p.workspaces.splice(w, 1);
-    p.active = Math.max(0, Math.min(p.active, p.workspaces.length - 1));
+    project.workspaces.splice(w, 1);
+    project.active = Math.max(0, Math.min(project.active, project.workspaces.length - 1));
     this.dirty();
   }
 
@@ -730,7 +901,7 @@ export class App {
   }
 
   sidebar(): Sidebar {
-    return SIDEBARS.find(([id]) => id === this.config.sidebar)?.[0] ?? 'side_by_side';
+    return SIDEBARS.find(([id]) => id === this.config.sidebar)?.[0] ?? 'projects_on_top';
   }
 
   toggleNav(): void {
@@ -1088,10 +1259,10 @@ export class App {
     this.dirty();
   }
 
-  openNewWorkspace(): void {
-    const p = this.project();
-    if (!p) return;
-    this.overlay = { kind: 'newWorkspace', project: p.id, input: '', worktree: p.repo ? true : null };
+  openNewWorkspace(p: number): void {
+    const project = this.projects[p];
+    if (!project) return;
+    this.overlay = { kind: 'newWorkspace', project: project.id, input: '', worktree: project.repo ? true : null };
     this.emit('narrate', 'Name it. In a repository it gets its own branch and folder, so nothing collides.');
     this.dirty();
   }
@@ -1146,6 +1317,7 @@ export class App {
       const w = o.worktree ? this.addWorkspace(p, name, true) : this.addWorkspace(p, p.workspaces[0]?.branch ?? 'main', false, name);
       w.tabs.push(this.newTab([this.newPane(p, w)]));
       p.active = p.workspaces.length - 1;
+      this.active = this.projects.indexOf(p);
       this.overlay = null;
       this.emit('narrate', o.worktree ? `A fresh copy of the repo on ${name}, .env included.` : 'A new workspace in the project folder.');
       this.dirty();
@@ -1272,10 +1444,7 @@ export class App {
           name: label,
           context: project,
           keys,
-          go: () => {
-            this.active = pi;
-            p.active = wi;
-          },
+          go: () => this.goto(pi, wi),
           order: order++,
         });
         w.tabs.forEach((t, ti) => {
@@ -1285,11 +1454,7 @@ export class App {
             name,
             context: `${project} › ${label}`,
             keys: [name, ...keys],
-            go: () => {
-              this.active = pi;
-              p.active = wi;
-              w.active = ti;
-            },
+            go: () => this.goto(pi, wi, ti),
             order: order++,
           });
         });
@@ -1407,21 +1572,26 @@ export class App {
       return rows;
     }
     if (page === 2) {
-      const account = (on: boolean): [string, string] => (on ? ['@you in acme', 'saved'] : ['not connected', 'enter pastes one']);
-      const [sv, sn] = account(c.accounts.shortcut);
-      const [lv, ln] = account(c.accounts.linear);
+      const token = (s: Remote, section: string): SettingsRow => {
+        const on = c.accounts[s];
+        return { id: `token:${s}`, section, label: tokenName(s), value: on ? this.accountOf(s) : 'not connected', note: on ? 'saved' : 'enter pastes one' };
+      };
       const rows: SettingsRow[] = [
-        { id: 'token:shortcut', section: 'Accounts', label: 'Shortcut API token', value: sv, note: sn },
-        { id: 'token:linear', section: 'Accounts', label: 'Linear API key', value: lv, note: ln },
+        token('shortcut', 'Accounts'),
+        token('linear', 'Accounts'),
+        { id: 'jira-site', section: 'Jira', label: 'Jira site', value: c.jiraSite || 'not set', note: 'such as acme.atlassian.net' },
+        { id: 'jira-email', section: 'Jira', label: 'Jira email', value: c.jiraEmail || 'not set', note: 'the one you sign in with' },
+        token('jira', 'Jira'),
+        { id: 'jira-jql', section: 'Jira', label: 'Jira filter', value: c.jiraJql || 'none', note: 'JQL, such as project = SHOP' },
       ];
-      const hidden = ['all', 'github', 'shortcut', 'linear'].filter((s) => !c.sources.includes(s));
+      const hidden = ['all', 'github', 'shortcut', 'linear', 'jira'].filter((s) => !c.sources.includes(s));
       for (const s of [...c.sources, ...hidden]) {
         rows.push({ id: `src:${s}`, section: 'Sources shown', label: `${c.sources.includes(s) ? '[x]' : '[ ]'} ${SOURCE_NAMES[s]}`, value: '', note: s === 'all' ? 'every source together' : '' });
       }
       return rows;
     }
     return [
-      { id: 'sidebar', section: '', label: 'sidebar', value: this.sidebar(), note: 'where the workspaces column goes' },
+      { id: 'sidebar', section: '', label: 'sidebar', value: this.sidebar(), note: 'how projects, workspaces and tabs are laid out' },
       { id: 'dim', section: '', label: 'inactive panes', value: c.dim ? '[x] dimmed' : '[ ] as bright as the active one', note: 'in a split tab' },
       ...DETAILS.map(([id, note]) => ({ id, section: '', label: id, value: c[id] ? '[x] shown' : '[ ] hidden', note })),
       { id: 'notify', section: '', label: 'desktop notifications', value: c.notify, note: 'when an agent in another tab needs you or finishes' },
@@ -1468,7 +1638,7 @@ export class App {
       o.notice = c.updates ? 'cornercase looks for new versions' : 'cornercase no longer looks for new versions';
     } else if (row.id === 'sidebar') {
       const items = SIDEBARS.map(([value, note]) => ({ value, note }));
-      o.pick = { row: row.id, title: 'Where should the workspaces column go?', items, selected: Math.max(0, items.findIndex((i) => i.value === this.sidebar())), filter: '' };
+      o.pick = { row: row.id, title: 'How should projects, workspaces and tabs be laid out?', items, selected: Math.max(0, items.findIndex((i) => i.value === this.sidebar())), filter: '' };
     } else if (row.id === 'notify') {
       const items = NOTIFY_CHOICES.map(([value, note]) => ({ value, note }));
       o.pick = { row: row.id, title: 'How should your terminal notify you?', items, selected: Math.max(0, items.findIndex((i) => i.value === c.notify)), filter: '' };
@@ -1491,9 +1661,15 @@ export class App {
       const items = AGENTS.filter(([k]) => !listed.includes(k)).map(([k, bin]) => ({ value: k, note: bin }));
       o.pick = { row: row.id, title: 'Which agent do you want to set up?', items, selected: 0, filter: '' };
     } else if (row.id.startsWith('token:')) {
-      const source = row.id.slice(6) as 'shortcut' | 'linear';
-      if (c.accounts[source]) o.notice = `${source === 'shortcut' ? 'Shortcut' : 'Linear'} is connected; delete removes the token`;
-      else o.edit = { row: row.id, label: source === 'shortcut' ? 'Shortcut API token' : 'Linear API key', input: '', token: true };
+      const source = row.id.slice(6) as Remote;
+      if (c.accounts[source]) o.notice = `${REMOTES[source].name} is connected; delete removes the token`;
+      else o.edit = { row: row.id, label: tokenName(source), input: '', token: true };
+    } else if (row.id === 'jira-site') {
+      o.edit = { row: row.id, label: 'Jira site, such as acme.atlassian.net', input: c.jiraSite, token: false };
+    } else if (row.id === 'jira-email') {
+      o.edit = { row: row.id, label: 'Jira email', input: c.jiraEmail, token: false };
+    } else if (row.id === 'jira-jql') {
+      o.edit = { row: row.id, label: 'Jira filter (JQL, such as project = SHOP; empty lists everything)', input: c.jiraJql, token: false };
     } else if (row.id.startsWith('src:')) {
       const id = row.id.slice(4);
       if (c.sources.includes(id)) {
@@ -1567,19 +1743,38 @@ export class App {
         o.notice = this.config.fetchMinutes ? `branches are fetched every ${this.config.fetchMinutes} min` : 'branches are not fetched: commits to pull are not shown';
       }
     } else if (edit.row.startsWith('token:')) {
-      const source = edit.row.slice(6) as 'shortcut' | 'linear';
-      if (!edit.input.trim()) {
-        edit.error = `paste the ${source === 'shortcut' ? 'API token' : 'API key'} first`;
+      const source = edit.row.slice(6) as Remote;
+      if (source === 'jira' && (!this.config.jiraSite || !this.config.jiraEmail)) {
+        edit.error = 'set the Jira site and email first';
+      } else if (!edit.input.trim()) {
+        edit.error = `paste the ${REMOTES[source].token} first`;
       } else {
         o.busy = 'checking…';
         this.after(900, () => {
           o.busy = undefined;
           o.edit = undefined;
           this.config.accounts[source] = true;
-          o.notice = `${source === 'shortcut' ? 'Shortcut' : 'Linear'} connected as @you in acme`;
+          o.notice = `${REMOTES[source].name} connected as ${this.accountOf(source)}`;
           this.dirty();
         });
       }
+    } else if (edit.row === 'jira-site' || edit.row === 'jira-email') {
+      const site = edit.row === 'jira-site';
+      const name = site ? 'site' : 'email';
+      const input = edit.input.trim();
+      const [value, error] = !input ? [''] : site ? checkSite(input) : checkEmail(input);
+      if (error) edit.error = error;
+      else {
+        if (site) this.config.jiraSite = value;
+        else this.config.jiraEmail = value;
+        if (!value) this.config.accounts.jira = false;
+        o.edit = undefined;
+        o.notice = value ? `Jira ${name}: ${value}` : `the Jira ${name} was cleared`;
+      }
+    } else if (edit.row === 'jira-jql') {
+      this.config.jiraJql = edit.input.trim();
+      o.edit = undefined;
+      o.notice = this.config.jiraJql ? `Jira lists only: ${this.config.jiraJql}` : 'Jira lists every issue you can see';
     } else if (edit.row.startsWith('kind:')) {
       const kind = edit.row.slice(5);
       const mode = this.modeOf(kind);
@@ -1613,7 +1808,8 @@ export class App {
       agentPick: null,
       chosen: null,
     };
-    this.emit('narrate', 'Your issues from GitHub, Shortcut and Linear. Click one to read it, then press start.');
+    this.overlay.token = this.freshToken(this.issuesSource(this.overlay));
+    this.emit('narrate', 'Your issues from GitHub, Shortcut, Linear and Jira. Click one to read it, then press start.');
     this.after(450, () => {
       const o = this.overlay;
       if (o?.kind === 'issues') {
@@ -1633,13 +1829,23 @@ export class App {
     return this.config.sources[o.tab] ?? 'all';
   }
 
+  private accountOf(source: Remote): string {
+    return `@you in ${source === 'jira' ? this.config.jiraSite : 'acme'}`;
+  }
+
+  private freshToken(source: string): IssuesOverlay['token'] {
+    return source === 'jira' ? { input: this.config.jiraSite, checking: false, step: 'site' } : { input: '', checking: false };
+  }
+
   private issuesList(o: IssuesOverlay): Issue[] {
     const source = this.issuesSource(o);
     const p = this.projects.find((x) => x.id === o.project);
     const github = !!p?.repo;
-    const allowed = (s: string) => (s === 'github' ? github : this.config.accounts[s as 'shortcut' | 'linear']);
+    const allowed = (s: string) => (s === 'github' ? github : isRemote(s) && this.config.accounts[s]);
     const f = o.filter.trim().toLowerCase();
+    const project = this.config.jiraJql.trim().match(/^project\s*=\s*"?([a-z][a-z0-9_]*)"?$/i)?.[1].toUpperCase();
     return ISSUES.filter((i) => (source === 'all' ? allowed(i.source) : i.source === source && allowed(i.source)))
+      .filter((i) => i.source !== 'jira' || !project || i.key.startsWith(`${project}-`))
       .filter((i) => !o.mine || i.mine)
       .filter((i) => !f || [i.key, i.title, i.author, i.state, ...i.labels].some((k) => k.toLowerCase().includes(f)));
   }
@@ -1743,12 +1949,29 @@ export class App {
         picking: true,
       };
     }
-    if ((source === 'shortcut' || source === 'linear') && !this.config.accounts[source]) {
-      const name = source === 'shortcut' ? 'Shortcut' : 'Linear';
-      const help =
-        source === 'shortcut'
-          ? 'Create a token in Shortcut under Settings → Your account → API Tokens, paste it here and press Enter.'
-          : 'Create a personal API key in Linear under Settings → Security & access → Personal API keys, paste it here and press Enter.';
+    if (isRemote(source) && !this.config.accounts[source]) {
+      const remote = REMOTES[source];
+      const step = o.token.step ?? 'token';
+      const help = [`Connect ${remote.name}.`, ''];
+      let label = remote.token;
+      let input = '•'.repeat(Math.min(o.token.input.length, 40));
+      if (step === 'site') {
+        help.push('Type your Jira Cloud site, such as acme.atlassian.net, and press Enter.');
+        [label, input] = ['site', o.token.input];
+      } else if (step === 'email') {
+        help.push('Type the email you sign in to Atlassian with and press Enter.');
+        [label, input] = ['email', o.token.input];
+      } else {
+        if (source === 'jira') help.push(`Signing in to ${this.config.jiraSite} as ${this.config.jiraEmail}.`, '');
+        help.push(remote.help);
+      }
+      help.push(
+        '',
+        step === 'token'
+          ? `It is saved in secrets.json (only you can read it); you can also paste it in settings. ${remote.env}, when set, takes precedence.`
+          : 'The site and the email are saved in your settings.',
+      );
+      const back = step !== 'site' && source === 'jira' ? ['back'] : [];
       return {
         tabs,
         toggles,
@@ -1758,11 +1981,8 @@ export class App {
         empty: '',
         hint: o.token.error ?? '',
         error: !!o.token.error,
-        buttons: ['connect', 'cancel'],
-        token: {
-          label: source === 'shortcut' ? 'API token' : 'API key',
-          help: [`Connect ${name}.`, '', help, '', `It is saved in secrets.json (only you can read it); you can also paste it in settings. ${source === 'shortcut' ? 'SHORTCUT_API_TOKEN' : 'LINEAR_API_KEY'}, when set, takes precedence.`],
-        },
+        buttons: [step === 'token' ? 'connect' : 'next', ...back, 'cancel'],
+        token: { label, input, help },
         picking: false,
       };
     }
@@ -1770,10 +1990,19 @@ export class App {
     const selected = Math.min(o.selected, Math.max(0, list.length - 1));
     const sel = list[selected];
     const p = this.projects.find((x) => x.id === o.project);
-    const empty = o.loading ? '' : o.filter ? 'no matches' : source === 'github' && !p?.repo ? 'this project is not in a git repository' : 'no open issues';
-    const account = source === 'shortcut' || source === 'linear' ? '@you in acme' : '';
+    const nothing = source === 'all' && !p?.repo && !Object.values(this.config.accounts).some(Boolean);
+    const empty = o.loading
+      ? ''
+      : o.filter
+        ? 'no matches'
+        : source === 'github' && !p?.repo
+          ? 'this project is not in a git repository'
+          : nothing
+            ? 'nothing to list here: connect Shortcut, Linear or Jira in their tabs'
+            : 'no open issues';
+    const account = isRemote(source) ? this.accountOf(source) : '';
     const hint = o.loading ? 'loading…' : [account, sel ? `enter reads ${sel.key} · start works on it ${this.startHint(sel, o)}` : ''].filter(Boolean).join(' · ');
-    const buttons = ['start', 'refresh', ...(source === 'shortcut' || source === 'linear' ? ['disconnect'] : []), 'cancel'];
+    const buttons = ['start', 'refresh', ...(isRemote(source) ? ['disconnect'] : []), 'cancel'];
     return {
       tabs,
       toggles,
@@ -1798,7 +2027,7 @@ export class App {
     o.selected = 0;
     o.scroll = 0;
     o.filter = '';
-    o.token = { input: '', checking: false };
+    o.token = this.freshToken(this.issuesSource(o));
     this.dirty();
   }
 
@@ -1853,6 +2082,11 @@ export class App {
     const o = this.overlay;
     if (o?.kind !== 'issues') return;
     if (label === 'cancel') return this.closeOverlay();
+    if (label === 'back' && !o.agentPick && !o.detail && o.token.step && o.token.step !== 'site') {
+      const email = o.token.step === 'token';
+      o.token = { input: email ? this.config.jiraEmail : this.config.jiraSite, checking: false, step: email ? 'email' : 'site' };
+      return this.dirty();
+    }
     if (label === 'back') {
       if (o.agentPick) o.agentPick = null;
       else o.detail = null;
@@ -1871,11 +2105,12 @@ export class App {
       return this.dirty();
     }
     if (label === 'disconnect') {
-      const source = this.issuesSource(o) as 'shortcut' | 'linear';
+      const source = this.issuesSource(o) as Remote;
       this.config.accounts[source] = false;
+      o.token = this.freshToken(source);
       return this.dirty();
     }
-    if (label === 'connect') return this.issuesConnect();
+    if (label === 'connect' || label === 'next') return this.issuesConnect();
     if (label === 'copy url') {
       const issue = ISSUES.find((i) => i.key === o.detail);
       if (issue) {
@@ -1910,16 +2145,30 @@ export class App {
   private issuesConnect(): void {
     const o = this.overlay;
     if (o?.kind !== 'issues') return;
-    const source = this.issuesSource(o) as 'shortcut' | 'linear';
-    if (!o.token.input.trim()) {
-      o.token.error = `paste the ${source === 'shortcut' ? 'API token' : 'API key'} first`;
+    const source = this.issuesSource(o) as Remote;
+    const input = o.token.input.trim();
+    if (o.token.step === 'site' || o.token.step === 'email') {
+      const site = o.token.step === 'site';
+      const [value, error] = site ? checkSite(input) : checkEmail(input);
+      if (error) o.token.error = error;
+      else if (site) {
+        this.config.jiraSite = value;
+        o.token = { input: this.config.jiraEmail, checking: false, step: 'email' };
+      } else {
+        this.config.jiraEmail = value;
+        o.token = { input: '', checking: false, step: 'token' };
+      }
+      return this.dirty();
+    }
+    if (!input) {
+      o.token.error = `paste the ${REMOTES[source].token} first`;
       return this.dirty();
     }
     o.busy = 'checking…';
     this.after(900, () => {
       o.busy = undefined;
       this.config.accounts[source] = true;
-      o.token = { input: '', checking: false };
+      o.token = this.freshToken(source);
       o.loading = true;
       this.after(400, () => {
         o.loading = false;
@@ -2371,10 +2620,10 @@ export class App {
     else if (k.key === 'ArrowDown') o.cursor = Math.min(o.cursor + 1, rows.length - 1);
     else if (k.key === 'ArrowUp') o.cursor = Math.max(0, o.cursor - 1);
     else if ((k.key === 'Delete' || k.key === 'Backspace') && rows[o.cursor]?.id.startsWith('token:')) {
-      const source = rows[o.cursor].id.slice(6) as 'shortcut' | 'linear';
+      const source = rows[o.cursor].id.slice(6) as Remote;
       if (this.config.accounts[source]) {
         this.config.accounts[source] = false;
-        o.notice = `the ${source === 'shortcut' ? 'Shortcut API token' : 'Linear API key'} was removed`;
+        o.notice = `the ${tokenName(source)} was removed`;
       }
     }
     this.dirty();
@@ -2393,11 +2642,12 @@ export class App {
     }
     if (view.token) {
       if (k.key === 'Enter') this.issuesConnect();
-      else if (k.key === 'Backspace') o.token.input = o.token.input.slice(0, -1);
       else if (k.key === 'Tab' || k.key === 'ArrowRight') this.issuesTab((o.tab + 1) % this.config.sources.length);
       else if (k.key === 'ArrowLeft') this.issuesTab((o.tab + this.config.sources.length - 1) % this.config.sources.length);
-      else if (ch) o.token.input += ch;
-      o.token.error = undefined;
+      else if (k.key === 'Backspace' || ch) {
+        o.token.input = k.key === 'Backspace' ? o.token.input.slice(0, -1) : o.token.input + ch;
+        o.token.error = undefined;
+      }
       this.dirty();
       return true;
     }

@@ -5,7 +5,7 @@ description: Below 90 columns, cornercase folds its columns into a menu bar so t
 
 import Screen from '../../../../components/Screen.astro';
 
-The two columns take about 58 columns of your terminal. When the terminal is narrower than **90 columns** (a split in your window manager, a laptop with large fonts, a phone over SSH), cornercase switches to a **compact layout**: the columns fold away and the active tab gets the whole width.
+The sidebar takes 32 columns of your terminal, or about 58 with projects and workspaces side by side. When the terminal is narrower than **90 columns** (a split in your window manager, a laptop with large fonts, a phone over SSH), cornercase switches to a **compact layout**: the columns fold away and the active tab gets the whole width.
 
 <Screen
   name="compact-bar"
@@ -29,17 +29,19 @@ The menu covers the screen and shows one column at a time. It opens on the works
 
 <Screen
   name="compact-menu-workspaces"
-  alt="The compact menu showing the workspaces of shop: main with its nvim and bash tabs, a hint that more rows are below, + new workspace and issues"
+  alt="The compact menu showing the workspaces of shop: main with its nvim and bash tabs, each row with its ×, a hint that more rows are below, + new workspace and issues"
 />
 
 Click a tab to switch to it and close the menu. **`‹ projects`** goes back to the list of projects, which also holds `settings`, `usage` and `quit` (and, when a new version is out, the [update](../../installation/#update) button at the end of the `settings` row):
 
 <Screen
   name="compact-menu-projects"
-  alt="The compact menu showing the projects: shop, api, infra and notes, + new project, settings, usage and quit"
+  alt="The compact menu showing the projects: shop, api, infra and notes, each with its ×, + new project, settings, usage and quit"
 />
 
-Click a project to see its workspaces. Everything you can do in the wide layout is here: the `+` buttons, `×` on hover, right-click to rename, group headers to collapse, dragging to [reorder](../projects-workspaces-tabs/#reorder), the wheel to scroll. Each row is three lines tall, so it's easy to hit.
+Click a project to see its workspaces. Everything you can do in the wide layout is here: the `+` buttons, right-click to rename, group headers to collapse, dragging to [reorder](../projects-workspaces-tabs/#reorder), the wheel to scroll. Each row is three lines tall, so it's easy to hit.
+
+Every row shows its `×` all the time, since a touch screen has no hover. Because it is easy to tap by accident, closing a tab or a workspace asks first here, as closing a project always does. A workspace with its own worktree shows only its usual [remove](../worktrees/#remove-a-worktree) dialog.
 
 Click the bar again or press `Esc` to close the menu.
 

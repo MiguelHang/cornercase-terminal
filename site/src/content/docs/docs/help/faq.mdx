@@ -13,7 +13,11 @@ Not at the moment, on purpose. Inside cornercase's own dialogs, `Enter` confirms
 
 ### Does it replace tmux?
 
-It overlaps: both keep shells running after you detach and split them into panes. cornercase is organised around **projects, workspaces and git worktrees**, can start **coding agents** on issues, and is driven by the mouse. If you rely on tmux's scripting or scrollback, keep using it; you can even run cornercase inside a tmux window.
+It overlaps: both keep shells running after you detach and split them into panes, and both can be driven from scripts ([Scripts and agents](../../guides/scripts-and-agents/)). cornercase is organised around **projects, workspaces and git worktrees**, can start **coding agents** on issues, and is driven by the mouse. If you rely on tmux's scrollback or its many commands, keep using it; you can even run cornercase inside a tmux window.
+
+### Can an agent drive cornercase?
+
+Yes. The `cornercase` command opens tabs, types into panes, starts agents in their own worktrees, waits until they finish or need you, and reads what they wrote, so an agent in one tab can coordinate others. Install the [skill](../../guides/scripts-and-agents/#teach-your-agents) so your agents know about it.
 
 ### Is it fast?
 
@@ -62,7 +66,7 @@ Claude Code, Codex, Gemini CLI, opencode, Cursor's agent, GitHub Copilot CLI, Am
 
 ### Which issue trackers?
 
-GitHub (through the `gh` CLI), Shortcut and Linear.
+GitHub (through the `gh` CLI), Shortcut, Linear and Jira Cloud.
 
 ### Will it delete my branches?
 
@@ -70,11 +74,13 @@ Never. Removing a worktree workspace deletes the worktree's folder, after asking
 
 ### Where are my tokens stored?
 
-In `secrets.json` next to your `config.json`, readable only by you, or in the `SHORTCUT_API_TOKEN` and `LINEAR_API_KEY` environment variables if you prefer. They are never written to logs, to the issue cache or to the screen.
+In `secrets.json` next to your `config.json`, readable only by you, or in the `SHORTCUT_API_TOKEN`, `LINEAR_API_KEY` and `JIRA_API_TOKEN` environment variables if you prefer. They are never written to logs, to the issue cache or to the screen.
 
 ### Does it respect my terminal's colour theme?
 
 Yes. cornercase asks your terminal for its colours when it starts and draws its interface with palette colours, so it follows light and dark themes. The programs in your panes get the same colours.
+
+The one exception is grey text, such as titles, the buttons at the bottom and the tree's arrows. It uses your theme's *bright black* unless that colour is too close to the background, as in Solarized Dark, or your terminal does not say what it is, as Warp does not. Then cornercase uses a fixed grey that shows on any dark or light background.
 
 ### Which platforms does it run on?
 

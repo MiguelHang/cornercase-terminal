@@ -74,6 +74,19 @@ The same goes for "the running cornercase server is incompatible with this build
 
 You ran `cornercase` from a pane of cornercase itself, where `CORNERCASE=1` is set. Open it from another terminal window instead.
 
+### "no cornercase server is running"
+
+The [commands for scripts and agents](../../guides/scripts-and-agents/) talk to a running server and never start one. Run `cornercase` first. If cornercase is running, check that the command uses the same socket: a different `CORNERCASE_SOCKET`, `XDG_RUNTIME_DIR` or `TMPDIR` points it at another server.
+
+### "the running cornercase server is too old for `cornercase …`"
+
+The server started before you updated to a version with that command. Save your work in the panes, then restart it:
+
+```sh
+cornercase kill-server
+cornercase
+```
+
 ### "failed to start the cornercase server"
 
 The server didn't come up within five seconds. The message names its log file; open it to see why. If you use `CORNERCASE_SOCKET`, check that the folder can be created and that the path is short: Unix socket paths are limited to about 100 bytes.
@@ -103,6 +116,14 @@ Where you see it tells you which side refused:
 Sessions are restored only by a **new** server, and projects or workspaces whose folders no longer exist are skipped. The session is saved two seconds after your layout last changed, so a change made right before a crash or a power cut may be missing.
 
 ## Using cornercase
+
+### "cornercase hit a bug, see server.log"
+
+Something went wrong inside cornercase itself. It dropped only what it was doing at that moment and carried on: your shells and agents keep running. A dialog or menu you had open may have closed. A dialog that was waiting for something in the background, such as creating a worktree, shows the message in red instead; close it or try again. A [command for scripts and agents](../../guides/scripts-and-agents/) that was running, such as `cornercase wait`, fails with the same message.
+
+`server.log` says where it happened, in a line starting with `cornercase server: thread 'main' panicked at` (or another thread's name), followed by a backtrace. Please [open an issue](https://github.com/usecornercase/cornercase-terminal/issues) with those lines and what you were doing. A bug that keeps happening is written in full only the first time, then without the backtrace and ever more rarely.
+
+If the message keeps coming back, or the screen stays blank, the bug happens every time cornercase checks or draws something. Your shells still run, so finish what you're doing, then restart the server with `cornercase kill-server` (it closes them) and start cornercase again, or update once a fix is out.
 
 ### Copying doesn't reach my clipboard
 
@@ -146,9 +167,11 @@ The server reads your terminal's colours once, from the first client that attach
 - *this project is not in a git repository*: open the repository's folder as the project.
 - An error mentioning `gh`: install the [GitHub CLI](https://cli.github.com) and run `gh auth login`. If `gh` isn't on the server's `PATH`, set its path with the `gh` key in [`config.json`](../../reference/configuration/).
 
-### Shortcut or Linear rejects my token
+### Shortcut, Linear or Jira rejects my token
 
-Create a new one (Shortcut: **Settings → Your account → API Tokens**; Linear: **Settings → Security & access → Personal API keys**) and paste it in the tracker's tab of the issue browser. If `SHORTCUT_API_TOKEN` or `LINEAR_API_KEY` is set, it is used instead of what you paste: fix or unset the variable, then restart the server.
+Create a new one (Shortcut: **Settings → Your account → API Tokens**; Linear: **Settings → Security & access → Personal API keys**; Jira: **Security → Create and manage API tokens** at id.atlassian.com) and paste it in the tracker's tab of the issue browser. If `SHORTCUT_API_TOKEN`, `LINEAR_API_KEY` or `JIRA_API_TOKEN` is set, it is used instead of what you paste: fix or unset the variable, then restart the server.
+
+For Jira, the token is sent with your site and email: check them in **settings → Issues → Jira**. Use a classic API token; tokens with scopes only work through Atlassian's gateway, which cornercase doesn't use. *no Jira site at …* means the site is misspelled.
 
 ### The agent doesn't start
 

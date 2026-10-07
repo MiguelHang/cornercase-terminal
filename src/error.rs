@@ -58,6 +58,19 @@ pub enum Error {
     Usage(String),
     #[error("`{0}` already exists")]
     PathExists(PathBuf),
+    #[error("no cornercase server is running")]
+    NoServer,
+    #[error("{0}")]
+    Control(String),
+    #[error(
+        "the running cornercase server is too old for `cornercase {0}`. Restart it: run `cornercase kill-server` \
+         (it closes all its terminals) and start cornercase again"
+    )]
+    OldServer(&'static str),
+    #[error("the cornercase server stopped before answering")]
+    ServerGone,
+    #[error("cornercase hit a bug, see server.log")]
+    Bug,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

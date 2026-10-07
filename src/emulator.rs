@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use crossterm::event::KeyEvent;
 use libghostty_vt::Terminal;
-use libghostty_vt::fmt::Format;
+use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::key::{Encoder, KittyKeyFlags};
 use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
 use libghostty_vt::screen::TrackedGridRef;
@@ -153,10 +153,24 @@ impl Emulator {
 
     pub fn finish_selection(&mut self) -> Result<Option<String>> {
         self.anchor = None;
-        let options = FormatOptions::new().with_emit_format(Format::Plain).with_unwrap(true).with_trim(true);
-        let text = self.vt.format_selection_alloc(None, options)?.map(|b| String::from_utf8_lossy(&b).into_owned());
+        let text = self.vt.format_selection_alloc(None, plain())?.map(|b| String::from_utf8_lossy(&b).into_owned());
         self.vt.set_selection(None)?;
         Ok(text.filter(|t| !t.is_empty()))
+    }
+
+    pub fn screen_text(&self) -> Result<String> {
+        let (rows, cols) = self.size()?;
+        let at = |x, y| self.vt.grid_ref(Point::Active(PointCoordinate { x, y }));
+        let selection =
+            Selection::new(at(0, 0)?, at(cols.saturating_sub(1), u32::from(rows.saturating_sub(1)))?, false);
+        let text = self.vt.format_selection_alloc(None, plain().with_selection(&selection))?;
+        Ok(tail(&text.map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default(), None))
+    }
+
+    pub fn last_lines(&self, lines: usize) -> Result<String> {
+        let options = FormatterOptions::new().with_format(Format::Plain).with_unwrap(true).with_trim(true);
+        let text = Formatter::new(&self.vt, options)?.format_alloc(None)?;
+        Ok(tail(&String::from_utf8_lossy(&text), Some(lines)))
     }
 
     pub fn snapshot(&mut self) -> Result<Snapshot> {
@@ -184,6 +198,17 @@ impl Emulator {
         }
         Ok(Snapshot { rows, cursor })
     }
+}
+
+fn plain<'t, 's>() -> FormatOptions<'t, 's> {
+    FormatOptions::new().with_emit_format(Format::Plain).with_unwrap(true).with_trim(true)
+}
+
+fn tail(text: &str, lines: Option<usize>) -> String {
+    let all: Vec<&str> = text.lines().collect();
+    let end = all.iter().rposition(|line| !line.trim().is_empty()).map_or(0, |i| i + 1);
+    let start = lines.map_or(0, |n| end.saturating_sub(n));
+    all[start..end].join("\n")
 }
 
 fn clipboard_text(write: &ClipboardWrite<'_>) -> Option<String> {
@@ -473,6 +498,51 @@ mod tests {
             emu.finish_selection().expect("finish");
             let row = &emu.snapshot().expect("snapshot").rows[0];
             assert!(row.iter().all(|c| !c.style.add_modifier.contains(Modifier::REVERSED)));
+        }
+    }
+
+    mod text {
+        use super::*;
+
+        fn after(rows: u16, cols: u16, output: &[u8]) -> Emulator {
+            let mut emu = Emulator::new(rows, cols, 100, &HostTheme::default(), Box::new(|_| {})).expect("emulator");
+            emu.feed(output);
+            emu
+        }
+
+        #[test]
+        fn the_screen_joins_lines_the_terminal_wrapped() {
+            let emu = after(4, 10, b"0123456789abcde\r\nnext");
+
+            assert_eq!(emu.screen_text().expect("text"), "0123456789abcde\nnext");
+        }
+
+        #[test]
+        fn empty_lines_at_the_end_are_left_out() {
+            let emu = after(6, 20, b"hello   \r\n\r\nworld\r\n\r\n");
+
+            assert_eq!(emu.screen_text().expect("text"), "hello\n\nworld");
+        }
+
+        #[test]
+        fn the_screen_is_only_what_shows() {
+            let emu = after(3, 10, b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+
+            assert_eq!(emu.screen_text().expect("text"), "three\nfour\nfive");
+        }
+
+        #[test]
+        fn the_last_lines_reach_into_the_scrollback() {
+            let emu = after(3, 10, b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+
+            assert_eq!(emu.last_lines(4).expect("text"), "two\nthree\nfour\nfive");
+        }
+
+        #[test]
+        fn more_lines_than_there_are_give_them_all() {
+            let emu = after(3, 10, b"one\r\ntwo");
+
+            assert_eq!(emu.last_lines(50).expect("text"), "one\ntwo");
         }
     }
 

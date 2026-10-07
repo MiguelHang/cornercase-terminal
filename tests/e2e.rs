@@ -9,6 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use cornercase::activity::{CLAUDE_DIR_ENV, CLAUDE_SESSION_ENV};
+use cornercase::control::{PANE_ENV, Report};
 use cornercase::protocol::{NESTED_ENV, SOCKET_ENV};
 use cornercase::split::{self, Dir};
 use cornercase::ui::{self, SidebarRow, WorkspaceRow};
@@ -100,8 +101,47 @@ impl Session {
 
     fn command_of(&self, bin: &std::path::Path) -> std::process::Command {
         let mut cmd = std::process::Command::new(bin);
-        cmd.env(SOCKET_ENV, self.socket()).env_remove(NESTED_ENV).env_remove(update::LATEST_ENV);
+        cmd.env(SOCKET_ENV, self.socket()).env_remove(NESTED_ENV).env_remove(PANE_ENV).env_remove(update::LATEST_ENV);
         cmd
+    }
+
+    fn cli(&self, args: &[&str]) -> std::process::Output {
+        self.command().args(args).output().expect("run cornercase")
+    }
+
+    fn says(&self, args: &[&str]) -> String {
+        let out = self.cli(args);
+        assert!(out.status.success(), "cornercase {args:?} failed: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim_end().to_string()
+    }
+
+    fn report(&self) -> Report {
+        serde_json::from_str(&self.says(&["status", "--json"])).expect("a status report")
+    }
+
+    fn spawn(&self, args: &[&str]) -> std::process::Child {
+        let mut cmd = self.command();
+        cmd.args(args).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        cmd.spawn().expect("run cornercase")
+    }
+
+    fn output(child: std::process::Child) -> String {
+        let out = child.wait_with_output().expect("wait for cornercase");
+        assert!(out.status.success(), "cornercase failed: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim_end().to_string()
+    }
+
+    fn wait_for_working(&self) {
+        let deadline = Instant::now() + TIMEOUT;
+        let working = |report: Report| {
+            let panes =
+                report.projects.into_iter().flat_map(|p| p.workspaces).flat_map(|w| w.tabs).flat_map(|t| t.panes);
+            panes.into_iter().any(|p| p.status.as_deref() == Some("working"))
+        };
+        while !working(self.report()) {
+            assert!(Instant::now() < deadline, "timed out waiting for: an agent at work");
+            thread::sleep(POLL);
+        }
     }
 }
 
@@ -152,6 +192,7 @@ impl Harness {
         cmd.env(SOCKET_ENV, session.socket());
         cmd.env(CLAUDE_DIR_ENV, session.claude_dir());
         cmd.env_remove(NESTED_ENV);
+        cmd.env_remove(PANE_ENV);
         for var in ["SHORTCUT_API_TOKEN", "LINEAR_API_KEY", "TMUX", "STY", "ZELLIJ", "TERM_PROGRAM", "LC_TERMINAL"] {
             cmd.env_remove(var);
         }
@@ -272,7 +313,7 @@ impl Drop for Harness {
 }
 
 fn columns() -> u16 {
-    ui::SIDEBAR_WIDTH + ui::WORKSPACES_WIDTH + ui::PANE_PADDING
+    areas().pane.x
 }
 
 fn entry(name: &str) -> String {
@@ -301,7 +342,7 @@ fn workspace_row(tabs: &[usize], row: WorkspaceRow) -> Position {
 }
 
 fn areas() -> ui::Areas {
-    ui::layout(AREA, ui::Widths::default())
+    ui::layout_with(AREA, ui::Widths::default(), false, ui::Sidebar::default())
 }
 
 const NEW_MENU: [&str; 2] = ["open project", "new group"];
@@ -735,8 +776,15 @@ fn a_todo_typed_in_the_panel_is_saved_next_to_the_session() {
     let mut app = Harness::start();
     app.click(areas().todo_button.as_position());
     app.wait_for("the todo panel opens", |s| s.contains("+ new todo"));
-    let panel = ui::layout_with(AREA, ui::Widths::default(), true, ui::Sidebar::SideBySide).changes;
-    let view = ui::todo::View { items: Vec::new(), scroll: 0, adding: None, light: false, drag: None };
+    let panel = ui::layout_with(AREA, ui::Widths::default(), true, ui::Sidebar::default()).changes;
+    let view = ui::todo::View {
+        items: Vec::new(),
+        scroll: 0,
+        adding: None,
+        light: false,
+        muted: ratatui::style::Color::DarkGray,
+        drag: None,
+    };
     let button = ui::todo::rows(panel, &view).button();
 
     app.click(button.as_position());
@@ -755,7 +803,7 @@ fn dragging_a_border_resizes_the_shell_and_is_saved() {
     app.send(format!("\x1b[<0;{from};{y}M\x1b[<32;{to};{y}M\x1b[<0;{to};{y}m").as_bytes());
     app.send(b"stty size\r");
 
-    let pane = COLS - ui::SIDEBAR_WIDTH - 10 - ui::WORKSPACES_WIDTH - ui::PANE_PADDING;
+    let pane = areas().pane.width - 10;
     app.wait_for("the shell sees the narrower pane", |s| s.contains(&format!("{ROWS} {pane}")));
     let widths = format!("\"projects\": {}", ui::SIDEBAR_WIDTH + 10);
     app.session.wait_for_saved("the widths are saved", |saved| saved.contains(&widths));
@@ -1046,9 +1094,10 @@ fn a_workspace_with_its_own_worktree_is_created_and_removed() {
     app.wait_for("the form opens", |s| s.contains("with its own worktree"));
     app.send(b"e2e/login\r");
 
-    let label_row = ui::workspace_row(workspaces_list(), 1, &tab_lines(&[1, 1]), 0, WorkspaceRow::Workspace(1));
     app.wait_for("the worktree workspace opens", |s| s.contains("e2e/login") && !s.contains("cancel"));
-    assert!(app.row(label_row.y).contains("e2e/login"), "workspace row: {:?}", app.row(label_row.y));
+    let list = workspaces_list();
+    let y = (list.y..list.bottom()).find(|&y| app.row(y).contains("e2e/login")).expect("the workspace row");
+    let label_row = Rect { y, height: 1, ..list };
     let checkout = worktrees.join(&repo_name).join("e2e-login");
     assert_eq!(std::fs::read_to_string(checkout.join(".env")).ok().as_deref(), Some("TOKEN=1\n"));
 
@@ -1272,4 +1321,243 @@ fn finish_within(mut child: std::process::Child, timeout: Duration) -> std::proc
     }
     let _ = child.kill();
     child.wait_with_output().expect("collect its output")
+}
+
+fn bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cornercase")
+}
+
+fn refused(out: &std::process::Output, code: i32, message: &str) -> bool {
+    out.status.code() == Some(code) && String::from_utf8_lossy(&out.stderr).contains(message)
+}
+
+#[test]
+fn status_lists_the_window_and_marks_the_pane_it_runs_in() {
+    let mut app = Harness::start();
+
+    let report = app.session.report();
+    let inside = app.session.dir.join("inside.json");
+    app.send(format!("{} status --json > '{}'; echo status-\"\"saved\r", bin(), inside.display()).as_bytes());
+    app.wait_for("the status is saved", |s| s.contains("status-saved"));
+
+    let seen: Report = serde_json::from_str(&std::fs::read_to_string(&inside).expect("read it")).expect("a report");
+    assert_eq!(report.projects[0].path, temp());
+    assert_eq!((report.caller, seen.caller), (None, report.shown.pane));
+}
+
+#[test]
+fn open_adds_a_project_and_leaves_the_window_as_it_is() {
+    let mut app = Harness::start();
+    let name = format!("ccop-{}", std::process::id());
+    let dir = temp_dir_named(&name);
+    let path = dir.display().to_string();
+
+    let id = app.session.says(&["open", &path]);
+
+    app.wait_for("the project shows", |s| s.contains(&entry(&name)));
+    assert!(app.text().contains(&format!("▌{}", first_entry())), "the window moved:\n{}", app.text());
+    assert_eq!(app.session.says(&["open", &path]), id);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn new_workspace_adds_one_to_the_project() {
+    let app = Harness::start();
+
+    let id = app.session.says(&["new-workspace", "notes"]);
+
+    let report = app.session.report();
+    let workspace = report.projects[0].workspaces.iter().find(|w| w.id.to_string() == id).expect("the workspace");
+    let shown = report.shown.workspace == Some(workspace.id);
+    assert_eq!((workspace.name.as_str(), workspace.tabs.len(), shown), ("notes", 1, false));
+}
+
+#[test]
+fn a_command_typed_in_a_new_tab_is_waited_for_and_read() {
+    let mut app = Harness::start();
+
+    let pane = app.session.says(&["new-tab", "--name", "build", "--", "sleep 0.5; echo built-$((40+2))"]);
+    let ended = app.session.says(&["wait", "--pane", &pane, "--until", "shell", "--timeout", "10"]);
+
+    assert_eq!(ended, "shell");
+    assert!(app.session.says(&["read", "--pane", &pane, "--lines", "5"]).contains("built-42"));
+    app.wait_for("the tab shows in the list", |s| s.contains("build"));
+}
+
+#[test]
+fn split_opens_a_pane_beside_the_shown_one() {
+    let mut app = Harness::start();
+
+    let pane = app.session.says(&["split", "--", "echo", "split-\"\"done"]);
+
+    app.wait_for("the new pane runs its command", |s| s.contains("split-done"));
+    let tab = &app.session.report().projects[0].workspaces[0].tabs[0];
+    assert_eq!(tab.panes.iter().map(|p| p.id.to_string()).collect::<Vec<_>>()[1], pane);
+}
+
+#[test]
+fn an_agent_started_from_the_command_line_takes_its_prompts_and_is_waited_for() {
+    let session = Session::new();
+    std::fs::create_dir(session.dir.join("bin")).expect("create bin");
+    let agent = session.dir.join("bin").join("claude");
+    write_executable(
+        &agent,
+        "#!/bin/sh\nd=\"$CLAUDE_CONFIG_DIR/sessions\"; mkdir -p \"$d\"; s=\"$d/$$.json\"\n\
+         printf '{\"pid\":%s,\"status\":\"idle\"}' $$ > \"$s\"\n\
+         while printf 'agent> ' && IFS= read -r line; do\n\
+         printf '{\"pid\":%s,\"status\":\"busy\"}' $$ > \"$s\"\n\
+         while [ ! -e \"$CLAUDE_CONFIG_DIR/finish\" ]; do sleep 0.02; done; rm -f \"$CLAUDE_CONFIG_DIR/finish\"\n\
+         printf 'done: %s\\n' \"$line\"; printf '{\"pid\":%s,\"status\":\"idle\"}' $$ > \"$s\"; done\n",
+    );
+    let config = format!("{{\"agent_commands\": {{\"claude\": \"{}\"}}}}", agent.display());
+    std::fs::write(session.dir.join("config.json"), config).expect("write config");
+    let mut app = Harness::open(Arc::clone(&session), ROWS, COLS);
+    app.wait_for("app starts with one terminal", |s| s.contains(&first_entry()));
+    let finish = || {
+        session.wait_for_working();
+        std::fs::write(session.claude_dir().join("finish"), "").expect("let the agent finish");
+    };
+
+    let start = session.spawn(&["start", "claude", "--prompt", "fix the login", "--wait", "--timeout", "30"]);
+    finish();
+    let started = Session::output(start);
+    let lines: Vec<&str> = started.lines().collect();
+    let [pane, ended] = lines[..] else { panic!("not a pane and an ending: {started}") };
+    let send = session.spawn(&["send", "--pane", pane, "--enter", "--wait", "--timeout", "30", "add tests"]);
+    finish();
+    let next = Session::output(send);
+
+    assert_eq!((ended, next.as_str()), ("done", "done"));
+    let screen = session.says(&["read", "--pane", pane]);
+    assert!(screen.contains("done: fix the login") && screen.contains("done: add tests"), "{screen}");
+}
+
+#[test]
+fn keys_reach_the_program_in_the_pane() {
+    let mut app = Harness::start();
+    app.send(b"echo cat-\"\"starts; cat -v\r");
+    app.wait_for("cat runs", |s| s.contains("cat-starts"));
+
+    app.session.says(&["keys", "ctrl+b", "x", "enter"]);
+
+    app.wait_for("cat echoes them", |s| s.matches("^Bx").count() >= 2);
+}
+
+#[test]
+fn close_ends_a_tab_and_its_shell() {
+    let mut app = Harness::start();
+    let pane = app.session.says(&["new-tab", "--name", "doomed"]);
+    app.wait_for("the tab shows", |s| s.contains("doomed"));
+
+    app.session.says(&["close", "--pane", &pane]);
+
+    app.wait_for("the tab goes", |s| !s.contains("doomed"));
+}
+
+#[test]
+fn rename_inside_a_pane_names_its_own_tab() {
+    let mut app = Harness::start();
+
+    app.send(format!("{} rename from-\"\"inside\r", bin()).as_bytes());
+
+    let tab = usize::from(ui::workspace_row(workspaces_list(), 1, &tab_lines(&[1]), 0, WorkspaceRow::Tab(0, 0)).y);
+    app.wait_for("the tab has its name", |s| s.lines().nth(tab).is_some_and(|l| l.contains("from-inside")));
+}
+
+#[test]
+fn focus_shows_another_tab() {
+    let mut app = Harness::start();
+    let pane = app.session.says(&["new-tab", "--", "echo", "in-the-\"\"second"]);
+    assert!(!app.text().contains("in-the-second"), "the window moved:\n{}", app.text());
+
+    app.session.says(&["focus", "--pane", &pane]);
+
+    app.wait_for("the second tab shows", |s| s.contains("in-the-second"));
+}
+
+#[test]
+fn notify_reaches_the_window_and_the_desktop() {
+    let mut app = Harness::start();
+
+    app.session.says(&["notify", "the", "build", "is", "ready"]);
+
+    app.wait_for_raw("ghostty is asked to notify", |raw| raw.contains("\x1b]777;notify;cornercase;the build is ready"));
+    app.wait_for("a toast says it", |s| s.contains("the build is ready"));
+}
+
+#[test]
+fn the_todo_list_takes_commands() {
+    let app = Harness::start();
+
+    let id = app.session.says(&["todo", "add", "buy", "milk"]);
+    app.session.says(&["todo", "done", &id]);
+
+    assert_eq!(app.session.says(&["todo", "list"]), format!("{id} [x] buy milk"));
+    app.session.wait_for_file("todos.json", "the item is saved", |saved| saved.contains("buy milk"));
+}
+
+#[test]
+fn a_worktree_made_from_the_command_line_is_removed_by_it() {
+    let session = Session::new();
+    let worktrees = session.dir.join("worktrees");
+    std::fs::write(session.dir.join("config.json"), format!("{{\"worktrees_dir\": \"{}\"}}", worktrees.display()))
+        .expect("write config");
+    let repo = temp_dir("cli-worktree");
+    git(&repo, &["init", "--quiet"]);
+    git(&repo, &["commit", "--quiet", "--allow-empty", "-m", "init"]);
+    let mut app = Harness::open(Arc::clone(&session), ROWS, COLS);
+    app.wait_for("app starts with one terminal", |s| s.contains(&first_entry()));
+    let project = session.says(&["open", &repo.display().to_string()]);
+
+    let workspace = session.says(&["new-workspace", "e2e/cli", "--worktree", "--project", &project]);
+    let checkout = worktrees.join(repo.file_name().expect("repo name")).join("e2e-cli");
+    assert!(checkout.is_dir(), "no checkout at {}", checkout.display());
+    session.says(&["close", "--workspace", &workspace, "--remove-worktree"]);
+
+    assert!(!checkout.exists(), "the checkout is still there");
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn skill_prints_the_instructions_for_agents() {
+    let out = std::process::Command::new(bin()).arg("skill").output().expect("run cornercase");
+
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("---\nname: cornercase\n"), "{out:?}");
+}
+
+#[test]
+fn a_command_without_a_server_says_so_and_starts_none() {
+    let session = Session::new();
+
+    let out = session.cli(&["status"]);
+
+    assert!(refused(&out, 1, "no cornercase server is running"), "{out:?}");
+    assert_eq!(session.servers(), 0);
+}
+
+#[test]
+fn wrong_usage_exits_with_2() {
+    let session = Session::new();
+
+    let out = session.cli(&["send", "--wait", "hi"]);
+
+    assert!(refused(&out, 2, "--enter"), "{out:?}");
+}
+
+#[test]
+fn a_server_without_a_window_refuses_new_terminals() {
+    let session = Session::new();
+    let mut server = session.command().arg("server").spawn().expect("start a server");
+    let deadline = Instant::now() + TIMEOUT;
+    while std::os::unix::net::UnixStream::connect(session.socket()).is_err() {
+        assert!(Instant::now() < deadline, "the server never listened");
+        thread::sleep(POLL);
+    }
+
+    let out = session.cli(&["new-tab"]);
+
+    assert!(refused(&out, 1, "has not opened a window yet"), "{out:?}");
+    assert_eq!(session.report().projects, []);
+    drop(session);
+    let _ = server.wait();
 }

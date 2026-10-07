@@ -1,6 +1,6 @@
 # cornercase
 
-A terminal multiplexer TUI in Rust. A sidebar of **projects** (folders, optionally in **groups** with an icon and a colour), a column with the active project's **workspaces** (lines of work, optionally each in its own git worktree) and their **tabs** (one or more shells, split like Ghostty), the active tab's panes, and an optional **changes** panel on the right with the workspace's git diff. Everything is driven by mouse buttons. An issues modal (GitHub, Shortcut, Linear) reads an issue and starts a coding agent on it in its own worktree. A background server owns the shells, so closing the UI leaves them running and the next `cornercase` reattaches.
+A terminal multiplexer TUI in Rust. A sidebar of **projects** (folders, optionally in **groups** with an icon and a colour), a column with the active project's **workspaces** (lines of work, optionally each in its own git worktree) and their **tabs** (one or more shells, split like Ghostty), the active tab's panes, and an optional **changes** panel on the right with the workspace's git diff. Everything is driven by mouse buttons. An issues modal (GitHub, Shortcut, Linear, Jira) reads an issue and starts a coding agent on it in its own worktree. A background server owns the shells, so closing the UI leaves them running and the next `cornercase` reattaches.
 
 These rules apply to every contributor and coding agent, in `src/`, `tests/` and `site/`. The design decisions and their reasons, area by area, are in [DESIGN.md](DESIGN.md): read the section for the area you touch before changing it, and update it in the same change when a decision changes. How these files are loaded is under [Instruction files](#instruction-files).
 
@@ -8,6 +8,7 @@ These rules apply to every contributor and coding agent, in `src/`, `tests/` and
 
 ```sh
 cargo run                                   # attach to the server (starts it if none is running)
+cargo run -- --help                         # every command, including the ones for scripts and agents
 cargo run -- kill-server                    # stop the server and every shell in it
 cargo test --locked                         # unit + snapshot + e2e tests
 cargo clippy --all-targets --all-features --locked -- -D warnings
@@ -45,14 +46,16 @@ npx -y jscpd@4.3.0                          # copy-paste detector, reads .jscpd.
 
 - **Mouse buttons only, no app shortcuts.** Every key goes to the program in the active pane, except while a modal, the search, the changes panel's filter field or a TODO field has them (then `Enter` submits, `Esc` cancels; a TODO field also takes `←` `→` `↑` `↓` `Home` `End` `Delete` to move and edit, since editing an item means fixing a word in the middle) and `Esc` while a row is dragged. Do not add keyboard shortcuts without asking. No `Alt` shortcuts (Option is a compose key on macOS), no `Ctrl+letter` (steals shell bindings). `e2e::ctrl_b_reaches_the_shell` guards this.
 - Closing the last project leaves the app open and empty. ` quit ` only detaches.
-- `×` buttons only show while hovering their row. Names are cut at the end (`ui::truncate_right`), paths at the start (`truncate_left`).
+- `×` buttons only show while hovering their row, except in compact mode, where they always show dimmed (touch screens have no hover) and closing a tab or a plain workspace asks first (`Overlay::CloseTab`, `Overlay::CloseWorkspace`), since an always-visible `×` is easy to tap by accident. Names are cut at the end (`ui::truncate_right`), paths at the start (`truncate_left`).
 - At most one overlay is open (menu, form, confirmation, settings, usage, picker, issues, search). While it is open, no mouse event reaches the columns or the pane.
 - Overlays, hover, scroll, column widths and the toast live in `App` and are shared by every attached client. A toast can carry an ` undo ` (TODO removals), then lasts 6 s.
 
 ## Architecture
 
 ```
-src/main.rs       client, `server`, `kill-server` or `update` from argv (uses anyhow)
+src/main.rs       hands argv to cli.rs (uses anyhow)
+src/cli.rs        clap definitions of every command; the commands for scripts and agents send a request and print the answer
+src/control.rs    the JSON of those requests and answers, shared by the commands and the server; CORNERCASE_PANE
 src/client.rs     the UI process: terminal setup/teardown, colour query, starts the server, forwards events, writes frames; `kill-server` and `update`
 src/server.rs     the daemon: owns App and every Term, accepts clients on a Unix socket, draws a ratatui frame per client
 src/protocol.rs   messages, length-prefixed postcard framing, socket and lock paths, build id
@@ -66,11 +69,12 @@ src/context.rs    model/context lines for Claude Code and Codex; context/codex.r
 src/memory.rs     how much memory an agent pane uses (its shell and descendants), measured on a thread
 src/usage/        plan usage: claude.rs (the `get_usage` control request), codex.rs (`codex app-server`, `account/rateLimits/read`), mod.rs (running a probe, the modal's state per agent)
 src/notify.rs     desktop notifications through the outer terminal: which escape sequence a terminal understands, encoding
+src/panics.rs     containing panics: `catch_unwind` wrappers for the server loop and background jobs, the hook that logs them
 src/launch.rs     starting an agent in a new tab (pure state machine)
-src/secrets.rs    Shortcut / Linear tokens in secrets.json (0600)
+src/secrets.rs    Shortcut / Linear / Jira tokens in secrets.json (0600)
 src/markdown.rs   Markdown -> wrapped ratatui Lines
 src/highlight.rs  syntax highlighting of fenced code (syntect scopes -> palette colours), cached
-src/issues/       issue model and clients: github.rs (gh CLI), shortcut.rs (REST), linear.rs (GraphQL), http.rs, browser.rs (modal state), cache.rs (lists on disk)
+src/issues/       issue model and clients: github.rs (gh CLI), shortcut.rs (REST), linear.rs (GraphQL), jira.rs (REST; jira/adf.rs turns ADF into Markdown), http.rs, browser.rs (modal state), cache.rs (lists on disk)
 src/clipboard.rs  OSC 52
 src/worktree.rs   `git worktree add`/`remove`, checkout path, `.worktreeinclude`
 src/upstream.rs   `git fetch` and commits to pull per workspace (`↓n`)
@@ -80,7 +84,7 @@ src/picker.rs     folder picker state
 src/process.rs    a pid's cwd, name, arguments, environment, descendants and resident memory: /proc on Linux, libproc and sysctl on macOS; a socket peer's uid
 src/project.rs    Group, Project > Workspace > Tab > panes, labels, removal, moving
 src/split.rs      a tab's split tree: rects, dividers, splitting, removing, ratios
-src/app.rs        App state; turns AppEvents into actions; builds the View; app/todo_panel.rs wires the TODO panel
+src/app.rs        App state; turns AppEvents into actions; builds the View; app/todo_panel.rs wires the TODO panel; app/control.rs answers the commands for scripts and keeps their waits
 src/term.rs       a shell in a PTY, its Emulator, and the reader thread
 src/emulator.rs   wraps libghostty-vt; takes plain Snapshots for ui
 src/ui.rs         layout, hit testing and drawing from a plain View (no PTYs); ui/changes.rs draws the changes panel, ui/todo.rs the TODO panel
@@ -90,6 +94,7 @@ src/host_theme.rs asks the outer terminal for its colours and its name (XTVERSIO
 src/git.rs        branch from .git/HEAD, repo roots, linked worktrees (no git process)
 src/update.rs     update check against GitHub releases, download, checksum, binary swap
 src/error.rs      library error type
+skills/cornercase/SKILL.md  the agent skill, embedded for `cornercase skill`
 ```
 
 **Server loop:** the accept thread, one reader thread per client, the signal thread and a forwarder for PTY output all send `ServerEvent`s over one `mpsc` channel. The loop waits for an event or a 500 ms tick, drains the queue, then draws once per client. Each client has a writer thread so a slow one never blocks the loop. **Client:** the main thread writes each `Frame` to stdout; an input thread sends every crossterm event.
@@ -102,13 +107,15 @@ src/error.rs      library error type
 - UI: render a `View` into `TestBackend`; `insta` snapshots for layout, cell styles for hover.
 - App tests `click` with a press and a release (rows act on release); drags start with `press`.
 - `term.rs` / `app.rs` tests spawn real `/bin/sh` PTYs (never the user's shell) and wait with `test_util::wait_until`, never sleeps. `/bin/sh` is `bash` on macOS, so tests check its name with `test_util::is_sh`. `TempDir` paths are canonical, because macOS' temp dir is behind a symlink (`/var` → `/private/var`).
-- Helpers: `test_util::TempDir`, `git_repo`, `fake_gh`, `FakeHttp` (canned HTTP), `write_executable` (through a `/bin/sh` child to avoid `ETXTBSY`), `Family` (`sh` running `sh` running `sleep`, for process trees). Nothing calls real `gh`, Shortcut or Linear. App tests clear `App::env_tokens` and never use the real config.
+- Helpers: `test_util::TempDir`, `git_repo`, `fake_gh`, `FakeHttp` (canned HTTP), `write_executable` (through a `/bin/sh` child to avoid `ETXTBSY`), `Family` (`sh` running `sh` running `sleep`, for process trees). Nothing calls real `gh`, Shortcut, Linear or Jira. App tests clear `App::env_tokens` and never use the real config.
 - Agents are faked with a script (`FAKE_AGENT`) that asks a trust question and echoes what it reads.
 - Agent status is faked with a script named `claude` that writes its own `sessions/$$.json` (and, for the context line, a transcript under `projects/`); app tests point `App::claude_dir` at a temp dir, and e2e sets `CLAUDE_CONFIG_DIR` per `Session`, so nothing reads the real `~/.claude`. Codex's is `FakeCodex`: its rollout gets the turn fixtures appended, and its script sets the title it finds in a `title` signal file (OSC 0). `app::tests::agent_status::Watched` drives either agent with the same steps, so the notification tests run for both. Tests that read a process's environment spawn `/bin/sleep` with a cleared one and wait until its arguments are `sleep`'s (before `exec`, `/proc` shows the parent's).
 - The usage probes are faked with `claude` and `codex` scripts that read the requests and answer, set through `agent_commands`; app tests point the agent they do not fake at `/nonexistent/<kind>`, so no test runs the real `claude` or `codex` (both may be on the `PATH`).
-- `tests/e2e.rs` runs the real binary in a PTY (`SHELL=/bin/sh`, `PS1='$ '`), parses output with `vt100`, sends raw bytes and SGR mouse sequences, and answers the startup colour query. Each test gets its own server through a `Session`; dropping it runs `kill-server`.
+- `tests/e2e.rs` runs the real binary in a PTY (`SHELL=/bin/sh`, `PS1='$ '`), parses output with `vt100`, sends raw bytes and SGR mouse sequences, and answers the startup colour query. Each test gets its own server through a `Session`; dropping it runs `kill-server`. `Session::says` runs a command for scripts against it; `Session::command` removes `CORNERCASE` and `CORNERCASE_PANE`, since the tests may run inside a real cornercase.
+- `app::tests::control_requests` sends requests to an `App` with `App::request` and reads `take_answers`; its fake agent (`AGENT`) writes Claude's session file and works until the test writes a `finish` file.
 - Avoid races in e2e: wait for output that proves the previous step finished (`echo cat-""starts; cat -v`).
 - A safety-net test must fail without the code it protects.
+- Panics are tested with a closure that panics, so `App` needs no test-only code: `panics::contain` takes it directly, and the server loop through `Server::serve_with`, which takes the function that runs each `Step` (`Server::step` in production). `server::tests::a_bug` runs that loop on a session in a temp dir (`Server::new` takes the session's path), with a client attached over a socket pair whose frames it reads with `vt100`.
 
 ### Manual check in a real terminal
 

@@ -19,7 +19,7 @@ cornercase is a single Rust binary that plays two roles: a **server** that owns 
                                     your shells, editors and agents
 ```
 
-- `src/main.rs` picks the role from the first argument: none for the client, `server`, or `kill-server`; `update` installs the latest release and restarts the server; `--version` only prints the version.
+- `src/main.rs` hands the arguments to `cli.rs`, which parses them with `clap`: none for the client, `server`, or `kill-server`; `update` installs the latest release and restarts the server; `--version` only prints the version; the [commands for scripts and agents](../../guides/scripts-and-agents/) send one request to the running server and print its answer.
 - The **client** (`client.rs`) starts the server if needed, queries the outer terminal's colours and name, sets up raw mode, mouse capture, bracketed paste and the kitty keyboard flags, sends a `Hello`, then has two jobs: write every frame it receives to stdout, and send every crossterm event it reads to the server.
 - The **server** (`server.rs`) owns the `App`, every PTY and every emulator. It renders a ratatui frame for each client and sends the bytes.
 
@@ -27,10 +27,12 @@ cornercase is a single Rust binary that plays two roles: a **server** that owns 
 
 The accept thread, one reader thread per client, the signal thread and a forwarder for PTY output all send `ServerEvent`s down one `mpsc` channel. Each turn of the loop:
 
-1. drives pending agent launches and, at most once a second, looks for new git worktrees;
+1. drives pending agent launches, answers the waits of the commands for scripts whose condition holds and, at most once a second, looks for new git worktrees;
 2. draws one frame per client;
 3. lets the session `Saver` decide whether to write the session to disk;
 4. waits for an event or a 500 ms tick, then drains everything queued, feeding input and PTY output to the `App`.
+
+Each step (the refresh, sending the answers to commands, the draw, the save and every event) runs under `catch_unwind`. A step that panics is dropped, the loop goes on, and the user sees `cornercase hit a bug, see server.log`; a command for scripts that the panic left without an answer fails with the same message instead of waiting forever; a panic in input or drawing also closes the open dialog or menu and ends any drag, and one while drawing starts every client's screen over. Otherwise a single bug would end the process and every shell in it. Background jobs that the UI waits for turn a panic into an error answer (`panics::job`), so no dialog stays busy forever. That is why every profile must keep `panic = "unwind"`.
 
 Each client has its own writer thread, so a slow client never blocks the loop. All clients share one size, that of the client that attached, typed or clicked last (a smaller client gets the frame cropped), and see the same `App`, which is why hover, menus and scroll positions are mirrored.
 
@@ -41,6 +43,7 @@ Each client has its own writer thread, so a slow client never blocks the loop. A
 - `Hello` carries a protocol version and a build id (the executable's modification time). A server rejects a client from another build with `ServerMessage::Rejected`.
 - After an in-app update, or when `cornercase update` sends `ClientMessage::Restart`, the server saves the session and sends every client `ServerMessage::Restart`; each client waits for the old server to exit and runs its own executable (which the update replaced), and that starts a new server. A server from before `Restart` cannot decode it and answers `Rejected`, so `cornercase update` falls back to `KillServer`.
 - `ClientMessage::KillServer` and `ServerMessage::Rejected` must stay the first variants of their enums, so that any two builds can still tell each other to stop. `protocol::tests::compatibility` guards this.
+- The commands for scripts send `ClientMessage::Request` and get one `ServerMessage::Response`, both carrying JSON (`control.rs`) instead of postcard, so a command and a server from different releases still understand each other: unknown fields are ignored, and an unknown command is answered with an error that names the server's version. They skip the build check of `Hello`, and a server from before them answers `Rejected`. The server handles a request on its loop like input, but it never counts as a use, so it never changes the shared size. Waits stay in `App` (`app/control.rs`) as pending requests, checked on every turn of the loop, and are dropped when their client goes.
 - One server per socket is enforced with `flock` on `server.lock`. The server calls `setsid` and ignores `SIGHUP`.
 
 ## Rendering
@@ -49,14 +52,14 @@ Each client has its own writer thread, so a slow client never blocks the loop. A
 
 Geometry functions such as `ui::layout`, `entry_row`, `workspace_row`, `form_buttons` and `picker_item` are shared by drawing and hit testing, so a click lands exactly on what was drawn, and tests take their click positions from the same functions.
 
-Colours are palette indices (cyan, dark gray, the brand purple `99`, the surfaces `236` and `254`), so the user's terminal theme applies. Below 90 columns, `ui::compact_layout` reuses the same areas with a top bar and three-row bands.
+Colours are palette indices (cyan, the brand purple `99`, the surfaces `236` and `254`), so the user's terminal theme applies. Grey text is `View::muted`: the theme's bright black, or the fixed greys `243` and `245` when that one would not show (`ui::muted`). Below 90 columns, `ui::compact_layout` reuses the same areas with a top bar and three-row bands.
 
 ## Terminal emulation
 
 Panes are emulated with [libghostty-vt](https://github.com/ghostty-org/ghostty), Ghostty's terminal core, wrapped in `emulator.rs`:
 
 - It answers the terminal queries programs wait for (DSR, DA, DECRQM, kitty keyboard queries…) and reflows text on resize.
-- Its types are `!Send`, so every emulator lives on the server's main thread; each PTY's reader thread only forwards bytes. Replies go out from `on_pty_write`, in order with the output that asked for them.
+- Its types are `!Send`, so every emulator lives on the server's main thread; each PTY's reader thread only forwards bytes. Replies go out from `on_pty_write`, in order with the output that asked for them. Everything written to a PTY, keys, pastes and replies alike, goes through a writer thread per pane, so a program that stops reading never blocks the server.
 - Cells keep palette indices. The colours queried from the outer terminal (OSC 10, 11 and 4, with DA1 as an end marker) become every emulator's defaults. The same query asks for the terminal's name (XTVERSION), which decides how desktop notifications are written to it.
 - `take_copied` hands over OSC 52 clipboard writes from programs; reads and primary-selection writes are dropped.
 
@@ -75,11 +78,14 @@ Keys are encoded in `keys.rs`: Ghostty's encoder for special keys, and for every
 
 | Module | Responsibility |
 | --- | --- |
-| `main.rs` | Client, `server`, `kill-server`, `update` or `--version`, from the arguments (the only place using `anyhow`). |
+| `main.rs` | Hands the arguments to `cli.rs` (the only place using `anyhow`). |
+| `cli.rs` | The `clap` definitions of every command, and the commands for scripts: sending a request, printing its answer. |
+| `control.rs` | The JSON of requests and answers, shared by the commands and the server. |
 | `client.rs` | Terminal setup and teardown, colour query, starting the server, forwarding events, writing frames; `kill-server` and `update`. |
 | `server.rs` | The daemon: owns `App` and every terminal, accepts clients, draws a frame per client. |
+| `panics.rs` | Containing panics: `catch_unwind` around each step of the server loop and each background job, and the hook that writes them to `server.log`. |
 | `protocol.rs` | Messages, framing, socket and lock paths, build id. |
-| `app.rs` | Application state; turns events into actions; builds the `View`. |
+| `app.rs` | Application state; turns events into actions; builds the `View`. `app/control.rs` answers the commands for scripts and keeps their waits. |
 | `ui.rs` | Layout, hit testing and drawing from a plain `View`. |
 | `project.rs` | Project › workspace › tab › panes, labels, removal. |
 | `split.rs` | A tab's split tree: rects, dividers, splitting, removing, ratios. |
@@ -91,7 +97,7 @@ Keys are encoded in `keys.rs`: Ghostty's encoder for special keys, and for every
 | `process.rs` | A process's cwd, name, arguments, environment, children and resident memory, per platform. |
 | `git.rs` | Branch from `.git/HEAD`, repository roots, linked worktrees, without running git. |
 | `worktree.rs` | `git worktree add` and `remove`, checkout paths, `.worktreeinclude`. |
-| `issues/` | The issue model and clients for GitHub (`gh`), Shortcut (REST) and Linear (GraphQL), the browser state and the on-disk cache. |
+| `issues/` | The issue model and clients for GitHub (`gh`), Shortcut (REST), Linear (GraphQL) and Jira Cloud (REST, with an Atlassian Document Format to Markdown converter), the browser state and the on-disk cache. |
 | `agents.rs` | Known agents, modes and arguments, choosing and detecting an agent, the trust prompt. |
 | `activity.rs` | What the agent in a pane is doing: Claude Code's session file and terminal title, Codex's terminal title and turns, and the finished-but-unseen mark. |
 | `context.rs`, `context/codex.rs` | Model/context lines for Claude Code and Codex. Claude uses its session transcript and configured window rules; Codex follows the process's open rollout, recorded model and latest usage/window. Both read incrementally and clear obsolete context on session changes and compaction. |
