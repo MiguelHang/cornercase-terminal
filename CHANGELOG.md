@@ -2,6 +2,13 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.11.2
+
+- A new look. Dialogs have rounded corners and dim the rest of the screen while they are open, their buttons look like buttons, and the selected row in a list is marked with a bar on its left instead of a bright cyan fill.
+- In the sidebar, tabs hang from their workspace on thin tree lines, the bar that marks the active row sits on the left edge and covers the whole row, and borders and separators are quieter.
+- The usage bars are thin lines, and TODO items have round boxes that turn into a green check when done.
+- A workspace without tabs says so in the middle of the pane, and with no project open the pane shows the cornercase logo and how to open a folder.
+
 ## 0.11.1
 
 - With **memory** on, an agent tab now shows the memory its agent really uses: on macOS the figure Activity Monitor shows, on Linux each process's private memory, including what was swapped out. Code that several processes share, such as the agent's own program, used to be counted again for every process, so the figure was about twice what the agent costs; a fresh Claude Code tab now shows about 200 MB instead of 440 MB.
