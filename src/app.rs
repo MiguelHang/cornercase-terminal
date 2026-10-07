@@ -227,6 +227,8 @@ enum Overlay {
     GroupStyle { group: u64 },
     DeleteGroup { group: u64 },
     CloseProject { project: u64 },
+    CloseWorkspace { project: u64, workspace: u64 },
+    CloseTab { project: u64, workspace: u64, tab: u64 },
     NewWorkspace { project: u64, input: String, worktree: Option<bool>, error: Option<String>, creating: bool },
     Settings(Box<Settings>),
     Rename { target: Target, input: String },
@@ -246,7 +248,7 @@ impl Overlay {
             Self::RemoveWorkspace { force: true, .. } => FORCE_REMOVE_SUBMIT,
             Self::RemoveWorkspace { .. } => REMOVE_SUBMIT,
             Self::DeleteGroup { .. } => DELETE_SUBMIT,
-            Self::CloseProject { .. } => CLOSE_SUBMIT,
+            Self::CloseProject { .. } | Self::CloseWorkspace { .. } | Self::CloseTab { .. } => CLOSE_SUBMIT,
             Self::Update(UpdateStep::Failed(_)) => RETRY_UPDATE_SUBMIT,
             Self::Update(UpdateStep::Installed) => RESTART_SUBMIT,
             Self::Update(UpdateStep::Manual(_)) => COPY_COMMAND_SUBMIT,
@@ -346,6 +348,14 @@ fn measure_memory(term: &mut Term, measure: bool, now: Instant) {
         term.memory = memory::Pane::default();
     } else if measure && let Some(pid) = term.shell_pid() {
         term.memory.update(pid, now);
+    }
+}
+
+fn stopped_tabs(tabs: usize) -> String {
+    match tabs {
+        0 => String::new(),
+        1 => " Its tab and the programs running in it are stopped.".into(),
+        n => format!(" Its {n} tabs and the programs running in them are stopped."),
     }
 }
 
@@ -1130,6 +1140,18 @@ impl App {
         if self.projects[p].closing && !self.projects[p].has_terms() {
             self.remove_project(p);
         }
+        if self.closing_gone() {
+            self.overlay = None;
+        }
+    }
+
+    fn closing_gone(&self) -> bool {
+        match self.overlay {
+            Some(Overlay::CloseProject { project }) => self.project_index(project).is_none(),
+            Some(Overlay::CloseWorkspace { project, workspace }) => self.workspace_index(project, workspace).is_none(),
+            Some(Overlay::CloseTab { project, workspace, tab }) => self.tab_index(project, workspace, tab).is_none(),
+            _ => false,
+        }
     }
 
     fn reap(&mut self) {
@@ -1903,6 +1925,7 @@ impl App {
             self.nav = None;
         }
         let p = self.active;
+        let ask = pitch > 1;
         let rect = |row: WorkspaceRow| ui::workspace_row(list, pitch, &tabs, self.workspaces_scroll, row);
         let project = &self.projects[p];
         match hit {
@@ -1910,11 +1933,20 @@ impl App {
                 let target = Target::Workspace(project.id, project.workspaces[w].id);
                 self.grab(target, rect(WorkspaceRow::Workspace(w)), area, false);
             }
+            Some(WorkspaceHit::CloseWorkspace(w)) if ask && !project.workspaces[w].worktree => {
+                self.overlay =
+                    Some(Overlay::CloseWorkspace { project: project.id, workspace: project.workspaces[w].id });
+            }
             Some(WorkspaceHit::CloseWorkspace(w)) => self.close_workspace(p, w),
             Some(WorkspaceHit::Tab(w, t)) => {
                 let workspace = &project.workspaces[w];
                 let target = Target::Tab(project.id, workspace.id, workspace.tabs[t].id);
                 self.grab(target, rect(WorkspaceRow::Tab(w, t)), area, false);
+            }
+            Some(WorkspaceHit::CloseTab(w, t)) if ask => {
+                let workspace = &project.workspaces[w];
+                let (project, workspace, tab) = (project.id, workspace.id, workspace.tabs[t].id);
+                self.overlay = Some(Overlay::CloseTab { project, workspace, tab });
             }
             Some(WorkspaceHit::CloseTab(w, t)) => self.close_tab(p, w, t),
             Some(WorkspaceHit::NewTab(w)) => self.add_tab(p, w, area)?,
@@ -1922,6 +1954,12 @@ impl App {
             None => {}
         }
         Ok(())
+    }
+
+    fn tab_index(&self, project: u64, workspace: u64, tab: u64) -> Option<(usize, usize, usize)> {
+        let (p, w) = self.workspace_index(project, workspace)?;
+        let t = self.projects[p].workspaces[w].tabs.iter().position(|t| t.id == tab)?;
+        Some((p, w, t))
     }
 
     fn close_workspace(&mut self, p: usize, w: usize) {
@@ -2860,6 +2898,18 @@ impl App {
                 self.close_project(project);
                 None
             }
+            Overlay::CloseWorkspace { project, workspace } => {
+                if let Some((p, w)) = self.workspace_index(project, workspace) {
+                    self.close_workspace(p, w);
+                }
+                None
+            }
+            Overlay::CloseTab { project, workspace, tab } => {
+                if let Some((p, w, t)) = self.tab_index(project, workspace, tab) {
+                    self.close_tab(p, w, t);
+                }
+                None
+            }
             Overlay::Update(step) => self.submit_update(step),
             busy => Some(busy),
         };
@@ -3523,6 +3573,18 @@ impl App {
                 note: None,
                 submit: overlay.submit_label(),
             }),
+            Overlay::CloseWorkspace { project, workspace } => ui::Overlay::Confirm(ui::Confirm {
+                title: "close workspace",
+                message: self.close_workspace_message(*project, *workspace)?,
+                note: None,
+                submit: overlay.submit_label(),
+            }),
+            Overlay::CloseTab { project, workspace, tab } => ui::Overlay::Confirm(ui::Confirm {
+                title: "close tab",
+                message: self.close_tab_message(*project, *workspace, *tab)?,
+                note: None,
+                submit: overlay.submit_label(),
+            }),
             Overlay::Picker(picker) => Self::picker_view(picker, home),
             Overlay::Issues(b) => b.view(area, issues::now()),
             Overlay::Search(search) => self.search_view(search),
@@ -3543,12 +3605,20 @@ impl App {
 
     fn close_project_message(&self, id: u64) -> Option<String> {
         let project = &self.projects[self.project_index(id)?];
-        let stopped = match project.workspaces.iter().map(|w| w.tabs.len()).sum::<usize>() {
-            0 => String::new(),
-            1 => " Its tab and the programs running in it are stopped.".into(),
-            n => format!(" Its {n} tabs and the programs running in them are stopped."),
-        };
+        let stopped = stopped_tabs(project.workspaces.iter().map(|w| w.tabs.len()).sum());
         Some(format!("Close the project {}?{stopped} Folders and worktrees stay on disk.", self.project_label(project)))
+    }
+
+    fn close_workspace_message(&self, project: u64, workspace: u64) -> Option<String> {
+        let (p, w) = self.workspace_index(project, workspace)?;
+        let workspace = &self.projects[p].workspaces[w];
+        Some(format!("Close the workspace {}?{}", workspace.label(), stopped_tabs(workspace.tabs.len())))
+    }
+
+    fn close_tab_message(&self, project: u64, workspace: u64, tab: u64) -> Option<String> {
+        let (p, w, t) = self.tab_index(project, workspace, tab)?;
+        let name = self.projects[p].workspaces[w].tabs[t].label(&self.config);
+        Some(format!("Close the tab {name}? The programs running in it are stopped."))
     }
 
     fn search_view(&self, search: &Search) -> ui::Overlay {
@@ -6375,6 +6445,7 @@ rm -f "$1/sessions/$$.json"
     mod compact {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
+        use rstest::rstest;
 
         use super::*;
 
@@ -6512,6 +6583,116 @@ rm -f "$1/sessions/$$.json"
             let (mut app, _rx) = app();
             app.resize(SMALL);
             assert_eq!(term(&app, 0).emulator.size().expect("size"), (SMALL.height - ui::COMPACT_PITCH, SMALL.width));
+        }
+
+        fn with_workspace(worktree: bool) -> (App, Receiver<AppEvent>, Vec<TempDir>) {
+            let (mut app, rx, dirs) = app_with(1);
+            let path = app.projects[0].path.clone();
+            let other = app.new_workspace(AREA, path, Some("other".into()), worktree).expect("workspace");
+            app.projects[0].workspaces.push(other);
+            open_menu(&mut app);
+            (app, rx, dirs)
+        }
+
+        fn click_close(app: &mut App, row: WorkspaceRow) {
+            let r =
+                ui::workspace_row(small().workspaces_list, small().pitch, &app.tab_lines(), app.workspaces_scroll, row);
+            press(app, ui::row_close_button(r, small().pitch).as_position());
+        }
+
+        fn confirm(app: &mut App) {
+            press(app, ui::form_buttons(ui::form_area(SMALL), CLOSE_SUBMIT)[0].as_position());
+        }
+
+        #[test]
+        fn closing_a_tab_asks_first() {
+            let (mut app, _rx, _dirs) = with_workspace(false);
+            let name = app.projects[0].workspaces[1].tabs[0].label(&app.config);
+
+            click_close(&mut app, WorkspaceRow::Tab(1, 0));
+
+            let expected = format!("Close the tab {name}? The programs running in it are stopped.");
+            assert_eq!(confirmation(&app), Some(expected));
+        }
+
+        #[test]
+        fn confirming_closes_the_tab() {
+            let (mut app, rx, _dirs) = with_workspace(false);
+            click_close(&mut app, WorkspaceRow::Tab(1, 0));
+
+            confirm(&mut app);
+
+            pump_until(&mut app, &rx, "the tab closes", |a| a.projects[0].workspaces[1].tabs.is_empty());
+        }
+
+        #[test]
+        fn the_question_goes_when_its_tab_exits_by_itself() {
+            let (mut app, rx, _dirs) = with_workspace(false);
+            click_close(&mut app, WorkspaceRow::Tab(1, 0));
+            let asked = confirmation(&app).is_some();
+
+            app.close_tab(0, 1, 0);
+
+            pump_until(&mut app, &rx, "the question goes", |a| a.overlay.is_none());
+            assert!(asked);
+        }
+
+        #[test]
+        fn closing_a_workspace_asks_first() {
+            let (mut app, _rx, _dirs) = with_workspace(false);
+
+            click_close(&mut app, WorkspaceRow::Workspace(1));
+
+            let expected = "Close the workspace other? Its tab and the programs running in it are stopped.";
+            assert_eq!(confirmation(&app).as_deref(), Some(expected));
+        }
+
+        #[test]
+        fn confirming_closes_the_workspace() {
+            let (mut app, rx, _dirs) = with_workspace(false);
+            click_close(&mut app, WorkspaceRow::Workspace(1));
+
+            confirm(&mut app);
+
+            pump_until(&mut app, &rx, "the workspace closes", |a| a.projects[0].workspaces.len() == 1);
+        }
+
+        #[rstest]
+        #[case::workspace(WorkspaceRow::Workspace(1))]
+        #[case::tab(WorkspaceRow::Tab(1, 0))]
+        fn cancelling_keeps_everything_running(#[case] row: WorkspaceRow) {
+            let (mut app, rx, _dirs) = with_workspace(false);
+            click_close(&mut app, row);
+            let asked = confirmation(&app).is_some();
+
+            send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            app.nav = None;
+            app.projects[0].active = 1;
+            type_in_pane(&mut app, &rx, "still");
+
+            assert_eq!((asked, app.projects[0].workspaces[1].closing), (true, false));
+        }
+
+        #[test]
+        fn removing_a_worktree_shows_only_its_own_dialog() {
+            let (mut app, _rx, _dirs) = with_workspace(true);
+            click_close(&mut app, WorkspaceRow::Workspace(1));
+            assert!(matches!(app.overlay, Some(Overlay::RemoveWorkspace { .. })));
+        }
+
+        #[test]
+        fn closing_a_project_asks_first() {
+            let (mut app, _rx, _dirs) = app_with(2);
+            open_menu(&mut app);
+            press(&mut app, small().back.as_position());
+            let rows = app.sidebar_rows();
+
+            press(
+                &mut app,
+                ui::close_button(small().list, small().pitch, &rows, 0, SidebarRow::Project(1)).as_position(),
+            );
+
+            assert!(matches!(app.overlay, Some(Overlay::CloseProject { .. })));
         }
     }
 

@@ -11,6 +11,11 @@ Every pull request that changes the app adds a section here for its new version.
 - A server started before this update answers these commands with "too old": restart it once (cornercase offers to when you open it).
 - Pasting a long text into a pane whose program isn't reading it, such as one waiting in `sleep`, no longer freezes cornercase until the program reads.
 
+## 0.9.2
+
+- In the compact layout (below 90 columns, as on a phone over SSH), every group, project, workspace and tab row now shows its `×` all the time, dimmed, instead of only on hover, which touch screens don't have.
+- Because it is easy to tap by accident there, closing a tab or a workspace in the compact layout asks first, as closing a project always does. The wide layout is unchanged.
+
 ## 0.9.1
 
 - Most bugs in cornercase no longer take your shells and agents down with them. Until now, when the server hit a bug (a panic), it stopped, and every terminal and coding agent running in it went too. Now cornercase drops only what it was doing at that moment (a dialog or menu you had open may close), says `cornercase hit a bug, see server.log` for a few seconds and carries on.
