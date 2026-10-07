@@ -59,6 +59,9 @@ pub fn read(file: &Path) -> Result<Workspace> {
 fn file_uri(uri: &str) -> Option<String> {
     let path = uri.strip_prefix("file://")?;
     let path = path.strip_prefix("localhost").unwrap_or(path);
+    if !path.starts_with('/') {
+        return None;
+    }
     let bytes = path.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -188,17 +191,19 @@ mod tests {
         }
 
         #[test]
-        fn reads_file_uris_and_skips_remote_ones() {
+        fn reads_local_file_uris_and_skips_remote_ones() {
             let tmp = TempDir::new();
             let text = r#"{"folders": [
                 {"uri": "file:///home/me/my%20app"},
+                {"uri": "file://localhost/srv/api"},
+                {"uri": "file://server/share/web"},
                 {"uri": "vscode-remote://ssh-remote+box/srv/api"}
             ]}"#;
             let file = write(tmp.path(), "w.code-workspace", text);
 
             let paths: Vec<PathBuf> = read(&file).expect("read").folders.into_iter().map(|f| f.path).collect();
 
-            assert_eq!(paths, [PathBuf::from("/home/me/my app")]);
+            assert_eq!(paths, [PathBuf::from("/home/me/my app"), PathBuf::from("/srv/api")]);
         }
 
         #[test]
