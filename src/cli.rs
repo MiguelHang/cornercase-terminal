@@ -1,0 +1,971 @@
+use std::fmt::Write as _;
+use std::io::{self, Read as _};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+
+use crate::control::{self, Done, Item, ProjectInfo, Report, Request, Response, TodoList, Until};
+use crate::error::{Error, Result};
+use crate::keys;
+use crate::protocol::{self, ClientMessage, ServerMessage};
+use crate::{client, server, ui};
+
+pub const SKILL: &str = include_str!("../skills/cornercase/SKILL.md");
+
+const ABOUT: &str = "A terminal multiplexer for projects, git worktrees and coding agents, driven by the mouse";
+const LONG_ABOUT: &str = "A terminal multiplexer for projects, git worktrees and coding agents, driven by the mouse.
+
+Without a command, cornercase opens its window, starting the server if none is running. The other
+commands drive the running server from scripts, git hooks and the agents in its panes; they never
+start a server.";
+const AFTER_HELP: &str = "Ids come from `cornercase status` and last while the server runs. Inside a pane, the commands
+act on that pane, its tab, workspace and project unless told otherwise; elsewhere on what the window
+shows. Only `focus` and `--focus` change what the window shows. The commands exit with 1 on errors
+and timeouts, and 2 on wrong usage.
+
+Examples:
+  cornercase status
+  pane=$(cornercase new-tab --name tests -- cargo test)
+  cornercase wait --pane \"$pane\" --until shell --timeout 900
+  cornercase read --pane \"$pane\" --lines 40
+  cornercase start claude --worktree fix-login --prompt 'Fix the login form' --wait";
+const STATUS_HELP: &str = "Each pane shows its program and folder, and for a coding agent what it is doing (working,
+waiting for an answer, done out of sight, idle), its model and how full its context is. `(you)`
+marks the pane running the command, `(shown)` what the window shows.
+
+Examples:
+  cornercase status
+  cornercase status --json";
+const OPEN_HELP: &str = "Examples:
+  cornercase open ~/src/shop
+  cornercase open . --focus";
+const NEW_WORKSPACE_HELP: &str =
+    "The workspace gets one tab. A worktree goes in the worktrees folder from settings, on a new
+branch from HEAD when the branch does not exist yet; the command returns once git made it.
+
+Examples:
+  cornercase new-workspace experiments
+  cornercase new-workspace fix/login --worktree --project 3";
+const COMMAND_HELP: &str =
+    "The words of COMMAND are joined with spaces and typed at the prompt once the shell is ready,
+as ssh does, so quote what the shell should read as one argument. The command returns once it
+is typed.";
+const NEW_TAB_HELP: &str = "Examples:
+  pane=$(cornercase new-tab --name server -- npm run dev)
+  cornercase new-tab --workspace 5 -- 'cargo test 2>&1 | tee test.log'";
+const SPLIT_HELP: &str = "Examples:
+  cornercase split -- htop
+  cornercase split --pane 7 --down -- tail -f server.log";
+const START_HELP: &str = "The agent starts with its command and arguments from settings → agents, and its folder trust
+question is answered when the settings allow it. Once it is ready, the prompt is pasted and
+submitted, and the command prints the pane's id; it fails if the agent never shows up. With
+--wait, a second line says how the wait ended: idle, done (it finished out of sight) or waiting
+(it needs an answer).
+
+Examples:
+  cornercase start claude --worktree fix-login --prompt 'Fix the login form, then commit'
+  cornercase start codex --prompt-file task.md --wait --timeout 1800";
+const SEND_HELP: &str = "The text goes in as one paste, bracketed when the program asked for it. A pane whose agent
+waits for an answer to a question or a permission prompt is refused, since the text would answer
+it; use `cornercase keys` for that. With --wait, the command fails if the agent does not start
+working within 10 seconds of the Enter, and otherwise prints how the wait ended.
+
+Examples:
+  cornercase send --pane 12 --enter 'Now add tests for it'
+  cornercase send --pane 12 --enter --wait --timeout 900 - < next-step.md";
+const KEYS_HELP: &str = "Keys are encoded the way the program in the pane asked for.
+
+Examples:
+  cornercase keys --pane 12 ctrl+c
+  cornercase keys --pane 12 down enter";
+const KEY_NAMES: &str = "enter, esc, tab, backspace, space, up, down, left, right, home, end, pageup,
+pagedown, delete, insert, f1 to f12 or one character, each after any of ctrl+, alt+ and shift+";
+const READ_HELP: &str = "Lines the terminal wrapped come back joined, and empty lines at the end are left out.
+
+Examples:
+  cornercase read --pane 12
+  cornercase read --pane 7 --lines 200 > build.log";
+const WAIT_HELP: &str =
+    "By default it waits until the agent stops working: idle, done or waiting. It then prints how it
+ended (idle, done, waiting, working, shell or quiet), or the line that matched. Waiting for an
+agent fails on a pane without one. A timeout exits with 1 and does not prove that the agent missed
+what you sent: read the pane before sending it again.
+
+Examples:
+  cornercase wait --pane 12 --timeout 600
+  cornercase wait --pane 7 --until shell
+  cornercase wait --pane 7 --text 'test result: (ok|FAILED)'";
+const CLOSE_HELP: &str = "Its shells stop, as with its ×, but nothing asks first, not even for a project. A worktree's
+workspace stays listed while its worktree exists, and its branch is never deleted.
+
+Examples:
+  cornercase close --tab 9
+  cornercase close --workspace 5 --remove-worktree";
+const RENAME_HELP: &str = "Examples:
+  cornercase rename 'review #42'
+  cornercase rename --workspace 5 ''";
+const FOCUS_HELP: &str = "Examples:
+  cornercase focus --pane 12";
+const NOTIFY_HELP: &str = "The desktop notification goes through the terminal of every open window, like the one for an
+agent that needs you.
+
+Examples:
+  cornercase notify the release build is ready";
+const TODO_HELP: &str = "Examples:
+  cornercase todo add review the login fix
+  cornercase todo list
+  cornercase todo done 3";
+const SKILL_HELP: &str = "Install them for Claude Code, Codex and other agents with
+  npx skills add usecornercase/cornercase-terminal --skill cornercase -g
+or put this text in an AGENTS.md or CLAUDE.md.";
+const HERE_PANE: &str = "The pane [default: the one this runs in, else the shown one]";
+const HERE_WORKSPACE: &str = "The workspace [default: the one this runs in, else the shown one]";
+
+#[derive(Debug, Parser)]
+#[command(name = "cornercase", version, about = ABOUT, long_about = LONG_ABOUT, after_help = AFTER_HELP)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    #[command(flatten)]
+    Control(Control),
+    #[command(about = "Print the instructions that teach coding agents these commands", after_help = SKILL_HELP)]
+    Skill,
+    #[command(about = "Install the latest release, then offer to restart the server")]
+    Update(UpdateArgs),
+    #[command(about = "Stop the server and every shell in it")]
+    KillServer,
+    #[command(hide = true)]
+    Server,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Control {
+    #[command(about = "List the projects, workspaces, tabs and panes, with their ids", after_help = STATUS_HELP)]
+    Status(Print),
+    #[command(about = "Open a folder as a project, or find the open one, and print its id", after_help = OPEN_HELP)]
+    Open(OpenArgs),
+    #[command(
+        about = "Add a workspace to a project, or a git worktree, and print its id",
+        after_help = NEW_WORKSPACE_HELP
+    )]
+    NewWorkspace(NewWorkspaceArgs),
+    #[command(
+        about = "Open a tab, optionally typing a command into it, and print its pane's id",
+        long_about = COMMAND_HELP,
+        after_help = NEW_TAB_HELP
+    )]
+    NewTab(NewTabArgs),
+    #[command(
+        about = "Split a pane right or down, optionally typing a command, and print the new pane's id",
+        long_about = COMMAND_HELP,
+        after_help = SPLIT_HELP
+    )]
+    Split(SplitArgs),
+    #[command(
+        about = "Start a coding agent in a new tab, give it a prompt, and print its pane's id",
+        after_help = START_HELP
+    )]
+    Start(StartArgs),
+    #[command(about = "Paste text into a pane, and press Enter with --enter", after_help = SEND_HELP)]
+    Send(SendArgs),
+    #[command(about = "Press keys in a pane", after_help = KEYS_HELP)]
+    Keys(KeysArgs),
+    #[command(about = "Print the screen of a pane as text, or its last lines", after_help = READ_HELP)]
+    Read(ReadArgs),
+    #[command(
+        about = "Wait until an agent stops working, a program ends, text shows up or the output stops",
+        after_help = WAIT_HELP
+    )]
+    Wait(WaitArgs),
+    #[command(about = "Close a pane, tab, workspace or project", after_help = CLOSE_HELP)]
+    Close(CloseArgs),
+    #[command(about = "Rename a tab, workspace, project or group", after_help = RENAME_HELP)]
+    Rename(RenameArgs),
+    #[command(about = "Show a pane, tab, workspace or project in the window", after_help = FOCUS_HELP)]
+    Focus(FocusArgs),
+    #[command(about = "Show a message in the window, with a desktop notification", after_help = NOTIFY_HELP)]
+    Notify(NotifyArgs),
+    #[command(about = "Add, list, check off and remove items of the TODO list", after_help = TODO_HELP)]
+    Todo(TodoArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct Print {
+    #[arg(long, help = "Print JSON instead of text")]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct Create {
+    #[arg(long, help = "Also show it in the window, which otherwise stays as it is")]
+    pub focus: bool,
+    #[command(flatten)]
+    pub print: Print,
+}
+
+#[derive(Debug, Args)]
+pub struct Target {
+    #[arg(long, value_name = "ID", help = HERE_PANE)]
+    pub pane: Option<u64>,
+    #[arg(long, value_name = "ID", conflicts_with = "pane", help = "A tab: its agent's pane, else its active one")]
+    pub tab: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub struct OpenArgs {
+    #[arg(value_name = "PATH", help = "The folder")]
+    pub path: PathBuf,
+    #[command(flatten)]
+    pub create: Create,
+}
+
+#[derive(Debug, Args)]
+pub struct NewWorkspaceArgs {
+    #[arg(value_name = "NAME", help = "Its name, or its branch with --worktree")]
+    pub name: String,
+    #[arg(long, value_name = "ID", help = "The project [default: the one this runs in, else the shown one]")]
+    pub project: Option<u64>,
+    #[arg(long, help = "Check the branch out in a git worktree of its own, at a repository's root only")]
+    pub worktree: bool,
+    #[command(flatten)]
+    pub create: Create,
+}
+
+#[derive(Debug, Args)]
+pub struct NewTabArgs {
+    #[arg(long, value_name = "ID", help = HERE_WORKSPACE)]
+    pub workspace: Option<u64>,
+    #[arg(long, help = "The tab's name [default: the name of the program it runs]")]
+    pub name: Option<String>,
+    #[command(flatten)]
+    pub create: Create,
+    #[arg(last = true, value_name = "COMMAND", help = "What to type into its shell")]
+    pub command: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SplitArgs {
+    #[arg(long, value_name = "ID", help = HERE_PANE)]
+    pub pane: Option<u64>,
+    #[arg(long, help = "Split it down instead of right")]
+    pub down: bool,
+    #[command(flatten)]
+    pub create: Create,
+    #[arg(last = true, value_name = "COMMAND", help = "What to type into the new shell")]
+    pub command: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct StartArgs {
+    #[arg(
+        value_name = "AGENT",
+        help = "The agent, such as claude or codex [default: the one chosen in settings → agents, else the one \
+                running here]"
+    )]
+    pub agent: Option<String>,
+    #[arg(
+        long,
+        value_name = "BRANCH",
+        conflicts_with = "workspace",
+        help = "Start it in the worktree of this branch, made when missing"
+    )]
+    pub worktree: Option<String>,
+    #[arg(long, value_name = "ID", help = HERE_WORKSPACE)]
+    pub workspace: Option<u64>,
+    #[arg(long, help = "The tab's name [default: the agent's]")]
+    pub name: Option<String>,
+    #[arg(long, value_name = "TEXT", conflicts_with = "prompt_file", help = "What to ask it")]
+    pub prompt: Option<String>,
+    #[arg(long, value_name = "FILE", help = "Read the prompt from a file, or from standard input with -")]
+    pub prompt_file: Option<PathBuf>,
+    #[arg(long, help = "Then wait until the agent stops working, and print how it ended")]
+    pub wait: bool,
+    #[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Give up after this long, with status 1")]
+    pub timeout: Option<f64>,
+    #[command(flatten)]
+    pub create: Create,
+}
+
+#[derive(Debug, Args)]
+pub struct SendArgs {
+    #[command(flatten)]
+    pub target: Target,
+    #[arg(long, help = "Press Enter once the screen settles")]
+    pub enter: bool,
+    #[arg(long, requires = "enter", help = "Then wait until the agent stops working, and print how it ended")]
+    pub wait: bool,
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        requires = "wait",
+        value_parser = seconds,
+        help = "Give up waiting after this long, with status 1"
+    )]
+    pub timeout: Option<f64>,
+    #[command(flatten)]
+    pub print: Print,
+    #[arg(
+        value_name = "TEXT",
+        required_unless_present = "enter",
+        help = "The text, or - to read it from standard input"
+    )]
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct KeysArgs {
+    #[command(flatten)]
+    pub target: Target,
+    #[arg(required = true, value_name = "KEY", value_parser = key, help = KEY_NAMES)]
+    pub keys: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ReadArgs {
+    #[command(flatten)]
+    pub target: Target,
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u64).range(1..),
+        help = "The last N lines, scrollback included (a pane keeps 5,000)"
+    )]
+    pub lines: Option<u64>,
+    #[command(flatten)]
+    pub print: Print,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum UntilArg {
+    #[value(help = "The agent is idle or done")]
+    Idle,
+    #[value(help = "The agent is working")]
+    Working,
+    #[value(help = "The agent waits for an answer to a question or a permission prompt")]
+    Waiting,
+    #[value(help = "The program in the foreground ended and the shell is back")]
+    Shell,
+}
+
+#[derive(Debug, Args)]
+pub struct WaitArgs {
+    #[command(flatten)]
+    pub target: Target,
+    #[arg(long, value_enum, conflicts_with_all = ["text", "quiet"], help = "Until the pane is in this state")]
+    pub until: Option<UntilArg>,
+    #[arg(
+        long,
+        value_name = "REGEX",
+        conflicts_with = "quiet",
+        value_parser = pattern,
+        help = "Until a line on its screen matches, one already there included"
+    )]
+    pub text: Option<String>,
+    #[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Until it writes nothing for this long")]
+    pub quiet: Option<f64>,
+    #[arg(long, value_name = "SECONDS", value_parser = seconds, help = "Give up after this long, with status 1")]
+    pub timeout: Option<f64>,
+    #[command(flatten)]
+    pub print: Print,
+}
+
+#[derive(Debug, Args)]
+#[group(required = true, multiple = false)]
+pub struct Which {
+    #[arg(long, value_name = "ID", help = "A pane")]
+    pub pane: Option<u64>,
+    #[arg(long, value_name = "ID", help = "A tab and its panes")]
+    pub tab: Option<u64>,
+    #[arg(long, value_name = "ID", help = "A workspace and its tabs")]
+    pub workspace: Option<u64>,
+    #[arg(long, value_name = "ID", help = "A project and its workspaces")]
+    pub project: Option<u64>,
+}
+
+impl Which {
+    fn item(&self) -> Option<Item> {
+        self.pane
+            .map(Item::Pane)
+            .or_else(|| self.tab.map(Item::Tab))
+            .or_else(|| self.workspace.map(Item::Workspace))
+            .or_else(|| self.project.map(Item::Project))
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct CloseArgs {
+    #[command(flatten)]
+    pub which: Which,
+    #[arg(
+        long,
+        conflicts_with_all = ["pane", "tab", "project"],
+        help = "Also remove the workspace's git worktree from disk"
+    )]
+    pub remove_worktree: bool,
+    #[arg(long, requires = "remove_worktree", help = "Remove it even when git would lose changes")]
+    pub force: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct FocusArgs {
+    #[command(flatten)]
+    pub which: Which,
+}
+
+#[derive(Debug, Args)]
+#[group(multiple = false)]
+pub struct Renamed {
+    #[arg(long, value_name = "ID", help = "The tab [default: the one this runs in, else the shown one]")]
+    pub tab: Option<u64>,
+    #[arg(long, value_name = "ID", help = "Rename this workspace instead")]
+    pub workspace: Option<u64>,
+    #[arg(long, value_name = "ID", help = "Rename this project instead")]
+    pub project: Option<u64>,
+    #[arg(long, value_name = "ID", help = "Rename this group instead")]
+    pub group: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub struct RenameArgs {
+    #[command(flatten)]
+    pub renamed: Renamed,
+    #[arg(value_name = "NAME", help = "The new name; an empty one goes back to the default")]
+    pub name: String,
+}
+
+#[derive(Debug, Args)]
+pub struct NotifyArgs {
+    #[arg(required = true, value_name = "TEXT", help = "The message")]
+    pub text: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct TodoArgs {
+    #[command(subcommand)]
+    pub action: TodoAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TodoAction {
+    #[command(about = "Add an item and print its id")]
+    Add {
+        #[arg(required = true, value_name = "TEXT", help = "What to do")]
+        text: Vec<String>,
+    },
+    #[command(about = "List the items with their ids, pending ones first")]
+    List(Print),
+    #[command(about = "Check an item off, or back on")]
+    Done {
+        #[arg(value_name = "ID", help = "The item")]
+        id: u64,
+    },
+    #[command(about = "Remove an item")]
+    Rm {
+        #[arg(value_name = "ID", help = "The item")]
+        id: u64,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+    #[arg(long, help = "Only say whether a newer version is out")]
+    pub check: bool,
+    #[arg(short, long, help = "Restart the server without asking")]
+    pub yes: bool,
+}
+
+fn seconds(text: &str) -> std::result::Result<f64, String> {
+    match text.parse::<f64>() {
+        Ok(n) if n.is_finite() && n > 0.0 => Ok(n),
+        _ => Err("use a positive number of seconds".into()),
+    }
+}
+
+fn pattern(text: &str) -> std::result::Result<String, String> {
+    regex::Regex::new(text).map(|_| text.to_string()).map_err(|e| e.to_string())
+}
+
+fn key(text: &str) -> std::result::Result<String, String> {
+    keys::named(text).map(|_| text.to_string()).ok_or_else(|| format!("unknown key; use {KEY_NAMES}"))
+}
+
+pub fn run(cli: Cli) -> Result<bool> {
+    let Some(command) = cli.command else {
+        client::run()?;
+        return Ok(true);
+    };
+    match command {
+        Command::Control(control) => run_control(control)?,
+        Command::Skill => print!("{SKILL}"),
+        Command::Update(update) => return client::update(update.check, update.yes),
+        Command::KillServer => {
+            if !client::kill_server()? {
+                eprintln!("no cornercase server is running");
+            }
+        }
+        Command::Server => server::run()?,
+    }
+    Ok(true)
+}
+
+fn run_control(command: Control) -> Result<()> {
+    match command {
+        Control::Status(print) => {
+            let value = ask("status", control::Command::Status(control::Status {}))?;
+            if print.json {
+                return print_json(&value);
+            }
+            let report: Report = answer(value)?;
+            print!("{}", render(&report, home().as_deref()));
+            Ok(())
+        }
+        Control::Open(open) => {
+            let path = std::path::absolute(&open.path)?;
+            let value = ask("open", control::Command::Open(control::Open { path, focus: open.create.focus }))?;
+            say(value, open.create.print.json, |done| id(done.ids.project))
+        }
+        Control::NewWorkspace(new) => {
+            let (name, project, worktree, focus) = (new.name, new.project, new.worktree, new.create.focus);
+            let request = control::NewWorkspace { name, project, worktree, focus };
+            let value = ask("new-workspace", control::Command::NewWorkspace(request))?;
+            say(value, new.create.print.json, |done| id(done.ids.workspace))
+        }
+        Control::NewTab(new) => {
+            let request = control::NewTab {
+                workspace: new.workspace,
+                name: new.name,
+                command: typed(&new.command),
+                focus: new.create.focus,
+            };
+            say(ask("new-tab", control::Command::NewTab(request))?, new.create.print.json, |done| id(done.ids.pane))
+        }
+        Control::Split(split) => {
+            let request = control::Split {
+                pane: split.pane,
+                down: split.down,
+                command: typed(&split.command),
+                focus: split.create.focus,
+            };
+            say(ask("split", control::Command::Split(request))?, split.create.print.json, |done| id(done.ids.pane))
+        }
+        Control::Start(start) => run_start(start),
+        Control::Send(send) => {
+            let text = send.text.map(|text| if text == "-" { stdin() } else { Ok(text) }).transpose()?;
+            let Target { pane, tab } = send.target;
+            let request =
+                control::SendText { pane, tab, text, enter: send.enter, wait: send.wait, timeout: send.timeout };
+            say(ask("send", control::Command::Send(request))?, send.print.json, ending)
+        }
+        Control::Keys(keys) => {
+            let Target { pane, tab } = keys.target;
+            ask("keys", control::Command::Keys(control::Keys { pane, tab, keys: keys.keys })).map(drop)
+        }
+        Control::Read(read) => {
+            let Target { pane, tab } = read.target;
+            let lines = read.lines.and_then(|n| usize::try_from(n).ok());
+            let value = ask("read", control::Command::Read(control::Read { pane, tab, lines }))?;
+            say(value, read.print.json, |done| done.text.clone().into_iter().collect())
+        }
+        Control::Wait(wait) => {
+            let until = match (wait.until, wait.text, wait.quiet) {
+                (Some(UntilArg::Idle), ..) => Until::Idle,
+                (Some(UntilArg::Working), ..) => Until::Working,
+                (Some(UntilArg::Waiting), ..) => Until::Waiting,
+                (Some(UntilArg::Shell), ..) => Until::Shell,
+                (None, Some(text), _) => Until::Text(text),
+                (None, None, Some(quiet)) => Until::Quiet(quiet),
+                (None, None, None) => Until::Stops,
+            };
+            let Target { pane, tab } = wait.target;
+            let request = control::Wait { pane, tab, until, timeout: wait.timeout };
+            say(ask("wait", control::Command::Wait(request))?, wait.print.json, ending)
+        }
+        Control::Close(close) => {
+            let item = close.which.item().ok_or_else(|| Error::Control("say what to close".into()))?;
+            let request = control::Close { item, remove_worktree: close.remove_worktree, force: close.force };
+            ask("close", control::Command::Close(request)).map(drop)
+        }
+        Control::Rename(rename) => {
+            let Renamed { tab, workspace, project, group } = rename.renamed;
+            let item = tab
+                .map(Item::Tab)
+                .or_else(|| workspace.map(Item::Workspace))
+                .or_else(|| project.map(Item::Project))
+                .or_else(|| group.map(Item::Group));
+            ask("rename", control::Command::Rename(control::Rename { item, name: rename.name })).map(drop)
+        }
+        Control::Focus(focus) => {
+            let item = focus.which.item().ok_or_else(|| Error::Control("say what to show".into()))?;
+            ask("focus", control::Command::Focus(control::Focus { item })).map(drop)
+        }
+        Control::Notify(notify) => {
+            let text = notify.text.join(" ");
+            ask("notify", control::Command::Notify(control::Notify { text })).map(drop)
+        }
+        Control::Todo(todo) => run_todo(todo.action),
+    }
+}
+
+fn run_start(start: StartArgs) -> Result<()> {
+    let prompt = match (start.prompt, start.prompt_file) {
+        (Some(prompt), _) => Some(prompt),
+        (None, Some(file)) if file == Path::new("-") => Some(stdin()?),
+        (None, Some(file)) => Some(trimmed(
+            &std::fs::read_to_string(&file)
+                .map_err(|e| Error::Control(format!("cannot read the prompt from `{}`: {e}", file.display())))?,
+        )),
+        (None, None) => None,
+    };
+    let request = control::Start {
+        agent: start.agent,
+        worktree: start.worktree,
+        workspace: start.workspace,
+        name: start.name,
+        prompt,
+        wait: start.wait,
+        timeout: start.timeout,
+        focus: start.create.focus,
+    };
+    say(ask("start", control::Command::Start(request))?, start.create.print.json, |done| {
+        id(done.ids.pane).into_iter().chain(ending(done)).collect()
+    })
+}
+
+fn run_todo(action: TodoAction) -> Result<()> {
+    match action {
+        TodoAction::Add { text } => {
+            let value = ask("todo", control::Command::Todo(control::Todo::Add(text.join(" "))))?;
+            say(value, false, |done| id(done.todo))
+        }
+        TodoAction::List(print) => {
+            let value = ask("todo", control::Command::Todo(control::Todo::List))?;
+            if print.json {
+                return print_json(&value);
+            }
+            let list: TodoList = answer(value)?;
+            for item in list.todos {
+                println!("{} [{}] {}", item.id, if item.done { 'x' } else { ' ' }, item.text);
+            }
+            Ok(())
+        }
+        TodoAction::Done { id } => ask("todo", control::Command::Todo(control::Todo::Done(id))).map(drop),
+        TodoAction::Rm { id } => ask("todo", control::Command::Todo(control::Todo::Rm(id))).map(drop),
+    }
+}
+
+fn ask(name: &'static str, command: control::Command) -> Result<Value> {
+    let path = protocol::socket_path();
+    protocol::check_socket_dir(&path)?;
+    let mut stream = UnixStream::connect(&path).map_err(|_| Error::NoServer)?;
+    protocol::check_peer(&stream, protocol::own_uid())?;
+    let caller = std::env::var(control::PANE_ENV).ok().and_then(|id| id.parse().ok());
+    let server = std::env::var(control::SERVER_ENV).ok();
+    let request =
+        serde_json::to_string(&Request { caller, server, command }).map_err(|e| Error::Control(e.to_string()))?;
+    protocol::send(&mut stream, &ClientMessage::Request(request))?;
+    loop {
+        match protocol::recv::<ServerMessage>(&mut stream) {
+            Ok(Some(ServerMessage::Response(text))) => {
+                return match serde_json::from_str(&text) {
+                    Ok(Response::Ok(value)) => Ok(value),
+                    Ok(Response::Error(message)) => Err(Error::Control(message)),
+                    Err(e) => Err(Error::Control(format!("cannot read the server's answer: {e}"))),
+                };
+            }
+            Ok(Some(ServerMessage::Rejected(_))) => return Err(Error::OldServer(name)),
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => return Err(Error::OldServer(name)),
+            Ok(Some(ServerMessage::Frame(_) | ServerMessage::Detached)) => {}
+            Ok(Some(ServerMessage::Shutdown | ServerMessage::Restart(_)) | None) | Err(_) => {
+                return Err(Error::ServerGone);
+            }
+        }
+    }
+}
+
+fn answer<T: DeserializeOwned>(value: Value) -> Result<T> {
+    serde_json::from_value(value).map_err(|e| Error::Control(format!("cannot read the server's answer: {e}")))
+}
+
+fn print_json(value: &Value) -> Result<()> {
+    let text = serde_json::to_string_pretty(value).map_err(|e| Error::Control(e.to_string()))?;
+    println!("{text}");
+    Ok(())
+}
+
+fn say(value: Value, json: bool, lines: impl Fn(&Done) -> Vec<String>) -> Result<()> {
+    if json {
+        return print_json(&value);
+    }
+    for line in lines(&answer(value)?) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn id(id: Option<u64>) -> Vec<String> {
+    id.map(|id| id.to_string()).into_iter().collect()
+}
+
+fn ending(done: &Done) -> Vec<String> {
+    let line = match done.ended.as_deref() {
+        Some("text") => done.line.clone(),
+        ended => ended.map(str::to_string),
+    };
+    line.into_iter().collect()
+}
+
+fn typed(words: &[String]) -> Option<String> {
+    (!words.is_empty()).then(|| words.join(" "))
+}
+
+fn trimmed(text: &str) -> String {
+    text.trim_end_matches(['\n', '\r']).to_string()
+}
+
+fn stdin() -> Result<String> {
+    let mut text = String::new();
+    io::stdin().read_to_string(&mut text)?;
+    Ok(trimmed(&text))
+}
+
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+pub fn render(report: &Report, home: Option<&Path>) -> String {
+    let mut lines = Vec::new();
+    let grouped = |p: &&ProjectInfo| p.group.is_some_and(|g| report.groups.iter().any(|group| group.id == g));
+    for project in report.projects.iter().filter(|p| !grouped(p)) {
+        project_lines(&mut lines, report, project, 0, home);
+    }
+    for group in &report.groups {
+        let state = if group.collapsed { "collapsed" } else { "" };
+        lines.push(line(0, "group", group.id, &[group.name.clone(), state.into()], &[]));
+        for project in report.projects.iter().filter(|p| p.group == Some(group.id)) {
+            project_lines(&mut lines, report, project, 1, home);
+        }
+    }
+    lines.into_iter().map(|line| line + "\n").collect()
+}
+
+fn project_lines(lines: &mut Vec<String>, report: &Report, project: &ProjectInfo, depth: usize, home: Option<&Path>) {
+    let shown = report.shown;
+    let place = |path: &Path| ui::display_path(path, home);
+    let marks = |is_shown: bool| if is_shown { vec!["shown"] } else { Vec::new() };
+    let parts = [project.name.clone(), place(&project.path)];
+    lines.push(line(depth, "project", project.id, &parts, &marks(shown.project == Some(project.id))));
+    for workspace in &project.workspaces {
+        let mut parts = vec![workspace.name.clone(), place(&workspace.path)];
+        parts.extend(workspace.branch.as_ref().map(|branch| format!("branch {branch}")));
+        parts.extend(workspace.worktree.then(|| "worktree".to_string()));
+        parts.extend((workspace.behind > 0).then(|| format!("{} behind", workspace.behind)));
+        lines.push(line(depth + 1, "workspace", workspace.id, &parts, &marks(shown.workspace == Some(workspace.id))));
+        for tab in &workspace.tabs {
+            let parts = [tab.name.clone(), tab.status.clone().unwrap_or_default()];
+            lines.push(line(depth + 2, "tab", tab.id, &parts, &marks(shown.tab == Some(tab.id))));
+            for pane in &tab.panes {
+                let details = match (&pane.model, pane.context) {
+                    (Some(model), Some(percent)) => format!("{model} · {percent}%"),
+                    (Some(model), None) => model.clone(),
+                    (None, Some(percent)) => format!("{percent}%"),
+                    (None, None) => String::new(),
+                };
+                let parts = [
+                    pane.program.clone().unwrap_or_else(|| "?".into()),
+                    pane.status.clone().unwrap_or_default(),
+                    details,
+                    pane.path.as_deref().map(place).unwrap_or_default(),
+                ];
+                let mut marked = marks(shown.pane == Some(pane.id));
+                marked.extend(pane.caller.then_some("you"));
+                lines.push(line(depth + 3, "pane", pane.id, &parts, &marked));
+            }
+        }
+    }
+}
+
+fn line(depth: usize, kind: &str, id: u64, parts: &[String], marks: &[&str]) -> String {
+    let mut text = format!("{}{kind} {id}", "  ".repeat(depth));
+    for part in parts.iter().filter(|part| !part.is_empty()) {
+        text.push_str("  ");
+        text.push_str(part);
+    }
+    if !marks.is_empty() {
+        let _ = write!(text, "  ({})", marks.join(", "));
+    }
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+    use rstest::rstest;
+
+    use super::*;
+    use crate::control::{GroupInfo, Ids, PaneInfo, TabInfo, WorkspaceInfo};
+
+    fn parse(args: &[&str]) -> std::result::Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("cornercase").chain(args.iter().copied()))
+    }
+
+    mod parsing {
+        use super::*;
+
+        #[test]
+        fn the_definitions_are_consistent() {
+            Cli::command().debug_assert();
+        }
+
+        #[test]
+        fn no_command_opens_the_window() {
+            assert!(parse(&[]).expect("parse").command.is_none());
+        }
+
+        #[test]
+        fn a_command_after_two_dashes_keeps_its_words() {
+            let cli = parse(&["new-tab", "--name", "tests", "--", "cargo", "test", "--locked"]).expect("parse");
+
+            let Some(Command::Control(Control::NewTab(new))) = cli.command else { panic!("not new-tab") };
+            assert_eq!((new.name.as_deref(), typed(&new.command)), (Some("tests"), Some("cargo test --locked".into())));
+        }
+
+        #[test]
+        fn a_dash_reads_the_text_from_standard_input() {
+            let cli = parse(&["send", "--pane", "4", "--enter", "-"]).expect("parse");
+
+            let Some(Command::Control(Control::Send(send))) = cli.command else { panic!("not send") };
+            assert_eq!((send.target.pane, send.text.as_deref()), (Some(4), Some("-")));
+        }
+
+        #[test]
+        fn the_old_commands_stay() {
+            let update = parse(&["update", "--check", "-y"]).expect("parse");
+            let kill = parse(&["kill-server"]).expect("parse");
+
+            assert!(matches!(update.command, Some(Command::Update(UpdateArgs { check: true, yes: true }))));
+            assert!(matches!(kill.command, Some(Command::KillServer)));
+        }
+
+        #[rstest]
+        #[case::wait_without_enter(&["send", "--wait", "hi"])]
+        #[case::nothing_to_send(&["send", "--pane", "1"])]
+        #[case::a_pane_and_a_tab(&["read", "--pane", "1", "--tab", "2"])]
+        #[case::nothing_to_close(&["close"])]
+        #[case::two_things_to_close(&["close", "--pane", "1", "--tab", "2"])]
+        #[case::removing_the_worktree_of_a_tab(&["close", "--tab", "1", "--remove-worktree"])]
+        #[case::forcing_without_removing(&["close", "--workspace", "1", "--force"])]
+        #[case::two_conditions(&["wait", "--until", "idle", "--text", "x"])]
+        #[case::an_unknown_state(&["wait", "--until", "sleeping"])]
+        #[case::a_broken_pattern(&["wait", "--text", "("])]
+        #[case::a_negative_timeout(&["wait", "--timeout", "-1"])]
+        #[case::no_lines(&["read", "--lines", "0"])]
+        #[case::an_unknown_key(&["keys", "hello"])]
+        #[case::two_prompts(&["start", "--prompt", "a", "--prompt-file", "b"])]
+        #[case::a_worktree_and_a_workspace(&["start", "--worktree", "x", "--workspace", "1"])]
+        #[case::two_things_to_rename(&["rename", "--tab", "1", "--group", "2", "x"])]
+        #[case::an_unknown_command(&["frobnicate"])]
+        fn wrong_usage_exits_with_2(#[case] args: &[&str]) {
+            assert_eq!(parse(args).expect_err("wrong usage").exit_code(), 2);
+        }
+
+        #[test]
+        fn the_server_stays_out_of_the_help() {
+            let help = Cli::command().render_help().to_string();
+
+            assert!(!help.lines().any(|line| line.trim_start().starts_with("server ")), "{help}");
+        }
+    }
+
+    mod output {
+        use super::*;
+
+        fn report() -> Report {
+            let pane = |id, program: &str, active| PaneInfo {
+                id,
+                path: Some(PathBuf::from("/home/ana/shop")),
+                program: Some(program.into()),
+                active,
+                ..PaneInfo::default()
+            };
+            let claude = PaneInfo {
+                agent: Some("claude".into()),
+                status: Some("working".into()),
+                model: Some("Opus 5.5".into()),
+                context: Some(23),
+                caller: true,
+                ..pane(5, "claude", false)
+            };
+            let tab = TabInfo {
+                id: 3,
+                name: "claude".into(),
+                status: Some("working".into()),
+                active: true,
+                panes: vec![pane(4, "zsh", true), claude],
+            };
+            let workspace = WorkspaceInfo {
+                id: 2,
+                name: "fix/login".into(),
+                path: PathBuf::from("/home/ana/.cornercase/worktrees/shop/fix-login"),
+                branch: Some("fix/login".into()),
+                worktree: true,
+                behind: 2,
+                active: true,
+                tabs: vec![tab],
+            };
+            let project = |id, name: &str, group| ProjectInfo {
+                id,
+                name: name.into(),
+                path: format!("/home/ana/{name}").into(),
+                group,
+                ..ProjectInfo::default()
+            };
+            Report {
+                version: "0.9.0".into(),
+                caller: Some(5),
+                shown: Ids { project: Some(1), workspace: Some(2), tab: Some(3), pane: Some(4) },
+                groups: vec![GroupInfo { id: 8, name: "work".into(), collapsed: true }],
+                projects: vec![
+                    ProjectInfo { workspaces: vec![workspace], ..project(1, "shop", None) },
+                    project(9, "api", Some(8)),
+                ],
+            }
+        }
+
+        #[test]
+        fn status_is_a_tree_of_ids_with_what_matters() {
+            let text = render(&report(), Some(Path::new("/home/ana")));
+
+            assert_eq!(
+                text,
+                "project 1  shop  ~/shop  (shown)\n\
+                 \x20 workspace 2  fix/login  ~/.cornercase/worktrees/shop/fix-login  branch fix/login  worktree  2 behind  (shown)\n\
+                 \x20   tab 3  claude  working  (shown)\n\
+                 \x20     pane 4  zsh  ~/shop  (shown)\n\
+                 \x20     pane 5  claude  working  Opus 5.5 · 23%  ~/shop  (you)\n\
+                 group 8  work  collapsed\n\
+                 \x20 project 9  api  ~/api\n"
+            );
+        }
+
+        #[rstest]
+        #[case::a_state(Some("idle"), None, &["idle"])]
+        #[case::a_matching_line(Some("text"), Some("test result: ok"), &["test result: ok"])]
+        #[case::no_wait(None, None, &[])]
+        fn the_ending_is_the_state_or_the_line(
+            #[case] ended: Option<&str>,
+            #[case] line: Option<&str>,
+            #[case] expected: &[&str],
+        ) {
+            let done = Done { ended: ended.map(str::to_string), line: line.map(str::to_string), ..Done::default() };
+
+            assert_eq!(ending(&done), expected);
+        }
+    }
+}

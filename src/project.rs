@@ -62,10 +62,12 @@ impl Tab {
         }
     }
 
-    pub fn split(&mut self, target: u64, dir: Dir, term: Term) {
+    pub fn split(&mut self, target: u64, dir: Dir, term: Term, focus: bool) {
         if self.layout.split(target, dir, term.id) {
             self.panes.push(term);
-            self.active = self.panes.len() - 1;
+            if focus {
+                self.active = self.panes.len() - 1;
+            }
         }
     }
 

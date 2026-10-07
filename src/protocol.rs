@@ -27,6 +27,7 @@ pub enum ClientMessage {
     Hello(Box<Hello>),
     Event(Event),
     Restart,
+    Request(String),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -46,6 +47,7 @@ pub enum ServerMessage {
     Detached,
     Shutdown,
     Restart(PathBuf),
+    Response(String),
 }
 
 pub fn send<T: Serialize>(w: &mut impl Write, msg: &T) -> io::Result<()> {
@@ -218,21 +220,64 @@ mod tests {
             assert_eq!(postcard::to_stdvec(&ServerMessage::Rejected(String::new())).expect("encode"), [0, 0]);
         }
 
+        #[derive(Debug, Deserialize)]
+        #[expect(dead_code, reason = "decoded only, the way a server from before Restart reads it")]
+        enum BeforeRestart {
+            KillServer,
+            Hello(Box<Hello>),
+            Event(Event),
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[expect(dead_code, reason = "decoded only, the way a server from before Request reads it")]
+        enum BeforeRequest {
+            KillServer,
+            Hello(Box<Hello>),
+            Event(Event),
+            Restart,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[expect(dead_code, reason = "decoded only, the way a client from before Response reads it")]
+        enum BeforeResponse {
+            Rejected(String),
+            Frame(Vec<u8>),
+            Detached,
+            Shutdown,
+            Restart(PathBuf),
+        }
+
+        fn read_as<T: DeserializeOwned + std::fmt::Debug>(msg: &impl Serialize) -> io::ErrorKind {
+            let mut frame = Vec::new();
+            send(&mut frame, msg).expect("encode");
+            recv::<T>(&mut frame.as_slice()).expect_err("an unknown variant").kind()
+        }
+
         #[test]
         fn a_server_without_restart_reads_it_as_invalid_data() {
-            #[derive(Debug, Deserialize)]
-            #[expect(dead_code, reason = "decoded only, the way a server from before Restart reads it")]
-            enum Before {
-                KillServer,
-                Hello(Box<Hello>),
-                Event(Event),
-            }
-            let mut frame = Vec::new();
-            send(&mut frame, &ClientMessage::Restart).expect("encode");
+            assert_eq!(read_as::<BeforeRestart>(&ClientMessage::Restart), io::ErrorKind::InvalidData);
+        }
 
-            let err = recv::<Before>(&mut frame.as_slice()).expect_err("an unknown variant");
+        #[test]
+        fn a_request_comes_after_every_older_client_variant() {
+            assert_eq!(postcard::to_stdvec(&ClientMessage::Request(String::new())).expect("encode"), [4, 0]);
+        }
 
-            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        #[test]
+        fn a_server_without_requests_reads_one_as_invalid_data() {
+            let request = ClientMessage::Request(r#"{"command":"status","args":{}}"#.into());
+
+            assert_eq!(read_as::<BeforeRequest>(&request), io::ErrorKind::InvalidData);
+        }
+
+        #[test]
+        fn a_response_comes_after_every_older_server_variant() {
+            assert_eq!(postcard::to_stdvec(&ServerMessage::Response(String::new())).expect("encode"), [5, 0]);
+        }
+
+        #[test]
+        fn a_client_without_responses_reads_one_as_invalid_data() {
+            assert_eq!(read_as::<BeforeResponse>(&ServerMessage::Response("{}".into())), io::ErrorKind::InvalidData);
         }
     }
 

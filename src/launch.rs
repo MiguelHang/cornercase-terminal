@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::issues::one_line;
+use crate::term::bracketed;
 
 const SHELL_QUIET: Duration = Duration::from_millis(300);
 const SHELL_LATEST: Duration = Duration::from_secs(5);
@@ -8,16 +9,15 @@ const AGENT_QUIET: Duration = Duration::from_secs(1);
 const AGENT_GONE: Duration = Duration::from_secs(3);
 const AGENT_LATEST: Duration = Duration::from_secs(30);
 const SUBMIT_QUIET: Duration = Duration::from_millis(300);
+const SUBMIT_LATEST: Duration = Duration::from_secs(3);
 const MAX_TRUSTS: u8 = 4;
 const MARKERS: [&str; 5] = ["❯", "›", ">", "▸", "→"];
 const MENU_REACH: usize = 6;
-const PASTE_START: &str = "\x1b[200~";
-const PASTE_END: &str = "\x1b[201~";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Spec {
     pub command: String,
-    pub prompt: String,
+    pub prompt: Option<String>,
     pub submit: bool,
 }
 
@@ -31,7 +31,9 @@ enum Stage {
 #[derive(Debug)]
 pub struct Launch {
     pub term: u64,
+    pub key: Option<u64>,
     spec: Spec,
+    agent: bool,
     stage: Stage,
     since: Instant,
     output: Option<Instant>,
@@ -57,11 +59,33 @@ pub enum Step {
 
 impl Launch {
     pub fn new(term: u64, spec: Spec, now: Instant) -> Self {
-        Self { term, spec, stage: Stage::Shell, since: now, output: None, trusts: 0, trusted_screen: None }
+        Self {
+            term,
+            key: None,
+            spec,
+            agent: true,
+            stage: Stage::Shell,
+            since: now,
+            output: None,
+            trusts: 0,
+            trusted_screen: None,
+        }
+    }
+
+    pub fn command(term: u64, command: String, now: Instant) -> Self {
+        Self { agent: false, ..Self::new(term, Spec { command, prompt: None, submit: false }, now) }
+    }
+
+    pub fn enter(term: u64, now: Instant) -> Self {
+        Self { stage: Stage::Submit, ..Self::command(term, String::new(), now) }
     }
 
     pub fn output(&mut self, now: Instant) {
         self.output = Some(now);
+    }
+
+    pub fn submits(&self) -> bool {
+        self.stage == Stage::Submit
     }
 
     fn quiet(&self, now: Instant) -> Duration {
@@ -82,8 +106,12 @@ impl Launch {
                 if !ready {
                     return Step::Wait;
                 }
+                let typed = format!("{}\r", self.spec.command).into_bytes();
+                if !self.agent {
+                    return Step::Done(typed);
+                }
                 self.next(Stage::Agent, now);
-                Step::Write(format!("{}\r", self.spec.command).into_bytes())
+                Step::Write(typed)
             }
             Stage::Agent if seen.shell_in_foreground => {
                 if now.duration_since(self.since) >= AGENT_GONE && self.quiet(now) >= AGENT_GONE {
@@ -108,12 +136,9 @@ impl Launch {
                     self.next(Stage::Agent, now);
                     return Step::Write(keys);
                 }
-                let text = if self.spec.submit && seen.bracketed_paste {
-                    self.spec.prompt.clone()
-                } else {
-                    one_line(&self.spec.prompt)
-                };
-                let bytes = if seen.bracketed_paste { format!("{PASTE_START}{text}{PASTE_END}") } else { text };
+                let Some(prompt) = &self.spec.prompt else { return Step::Done(Vec::new()) };
+                let text = if self.spec.submit && seen.bracketed_paste { prompt.clone() } else { one_line(prompt) };
+                let bytes = if seen.bracketed_paste { bracketed(&text) } else { text };
                 if self.spec.submit {
                     self.next(Stage::Submit, now);
                     Step::Write(bytes.into_bytes())
@@ -122,7 +147,7 @@ impl Launch {
                 }
             }
             Stage::Submit => {
-                if self.quiet(now) >= SUBMIT_QUIET {
+                if self.quiet(now) >= SUBMIT_QUIET || now.duration_since(self.since) >= SUBMIT_LATEST {
                     Step::Done(b"\r".to_vec())
                 } else {
                     Step::Wait
@@ -166,7 +191,7 @@ mod tests {
     const MS: Duration = Duration::from_millis(1);
 
     fn spec(submit: bool) -> Spec {
-        Spec { command: "claude --permission-mode plan".into(), prompt: "https://x.dev/7\nplease".into(), submit }
+        Spec { command: "claude --permission-mode plan".into(), prompt: Some("https://x.dev/7\nplease".into()), submit }
     }
 
     struct World {
@@ -319,6 +344,49 @@ mod tests {
     fn gives_up_when_the_agent_never_leaves_the_shell() {
         let (mut launch, t) = started(false);
         assert_eq!(step(&mut launch, t + AGENT_GONE, &shell()), Step::Abandon);
+    }
+
+    #[test]
+    fn a_command_is_typed_once_the_shell_is_quiet_and_that_is_all() {
+        let t0 = Instant::now();
+        let mut launch = Launch::command(1, "cargo test".into(), t0);
+        launch.output(t0);
+
+        let early = step(&mut launch, t0 + 100 * MS, &shell());
+        let typed = step(&mut launch, t0 + SHELL_QUIET, &shell());
+
+        assert_eq!((early, typed), (Step::Wait, Step::Done(b"cargo test\r".to_vec())));
+    }
+
+    #[test]
+    fn an_agent_without_a_prompt_is_done_once_it_is_ready() {
+        let t0 = Instant::now();
+        let mut launch = Launch::new(1, Spec { prompt: None, ..spec(true) }, t0);
+        launch.output(t0);
+        step(&mut launch, t0 + SHELL_QUIET, &shell());
+
+        assert_eq!(step(&mut launch, t0 + SHELL_QUIET + AGENT_QUIET, &agent("> ")), Step::Done(Vec::new()));
+    }
+
+    #[test]
+    fn enter_waits_for_the_screen_to_settle() {
+        let t0 = Instant::now();
+        let mut launch = Launch::enter(1, t0);
+        launch.output(t0 + 200 * MS);
+
+        let early = step(&mut launch, t0 + 400 * MS, &agent("> fix it"));
+        let pressed = step(&mut launch, t0 + 200 * MS + SUBMIT_QUIET, &agent("> fix it"));
+
+        assert_eq!((early, pressed, launch.submits()), (Step::Wait, Step::Done(b"\r".to_vec()), true));
+    }
+
+    #[test]
+    fn enter_is_pressed_anyway_while_the_screen_keeps_changing() {
+        let t0 = Instant::now();
+        let mut launch = Launch::enter(1, t0);
+        launch.output(t0 + SUBMIT_LATEST);
+
+        assert_eq!(step(&mut launch, t0 + SUBMIT_LATEST, &agent("⠋ thinking")), Step::Done(b"\r".to_vec()));
     }
 
     #[test]

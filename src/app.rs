@@ -45,6 +45,7 @@ use crate::upstream;
 use crate::usage;
 use crate::worktree;
 
+mod control;
 mod todo_panel;
 
 #[derive(Debug)]
@@ -56,11 +57,13 @@ pub enum AppEvent {
         project: u64,
         result: Result<PathBuf>,
         start: Option<Start>,
+        request: Option<u64>,
     },
     WorktreeRemoved {
         project: u64,
         workspace: u64,
         result: Result<()>,
+        request: Option<u64>,
     },
     IssuesLoaded {
         project: u64,
@@ -190,6 +193,7 @@ const COUNT_BEHIND_EVERY: Duration = Duration::from_secs(3);
 const WATCH_AGENTS_EVERY: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const AUTO_SCROLL_EVERY: Duration = Duration::from_millis(150);
+const LAUNCH_EVERY: Duration = Duration::from_millis(100);
 const TOAST_FOR: Duration = Duration::from_secs(2);
 const UNDO_FOR: Duration = Duration::from_secs(6);
 const BUG_FOR: Duration = Duration::from_secs(6);
@@ -204,6 +208,7 @@ const COMPARE_SUBMIT: &str = "compare";
 const CHANGES_LABEL: &str = "changes";
 const SENT_TO_AGENT: &str = "sent to the agent";
 const NO_AGENT: &str = "no agent here, so the reference is copied";
+const NOT_READING: &str = "the program in this pane is not reading what it gets";
 const EDIT_SCRIPT: &str = "exec ${VISUAL:-${EDITOR:-vi}} \"+$1\" \"$2\"";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -417,6 +422,7 @@ pub struct App {
     usage_timeout: Duration,
     todos: Todos,
     todo: todo::Panel,
+    requests: control::Requests,
 }
 
 struct Apis {
@@ -505,6 +511,7 @@ impl App {
             usage_timeout: usage::TIMEOUT,
             todos: Todos::default(),
             todo: todo::Panel::default(),
+            requests: control::Requests::default(),
         }
     }
 
@@ -585,14 +592,17 @@ impl App {
         self.open_project(here, area)
     }
 
-    pub fn tick(&self) -> Option<Duration> {
-        self.row_drag.filter(|d| d.moved).map(|_| AUTO_SCROLL_EVERY)
+    pub fn tick(&self, now: Instant) -> Option<Duration> {
+        let drag = self.row_drag.filter(|d| d.moved).map(|_| AUTO_SCROLL_EVERY);
+        let launch = (!self.launches.is_empty()).then_some(LAUNCH_EVERY);
+        [drag, launch, self.next_request(now)].into_iter().flatten().min()
     }
 
     pub fn refresh(&mut self, now: Instant) {
         self.reap();
         self.drive_launches(now);
         self.watch_agents(now);
+        self.check_requests(now);
         self.check_updates(now);
         self.refresh_changes(now);
         self.auto_scroll(now);
@@ -725,7 +735,7 @@ impl App {
         let mut finished = Vec::new();
         for (i, launch) in self.launches.iter_mut().enumerate() {
             let Some(term) = self.projects.iter_mut().flat_map(Project::terms_mut).find(|t| t.id == launch.term) else {
-                finished.push(i);
+                finished.push((i, false));
                 continue;
             };
             let shell_in_foreground = term.shell_in_foreground();
@@ -742,19 +752,28 @@ impl App {
             };
             match launch.step(now, &mut seen) {
                 Step::Wait => {}
-                Step::Write(bytes) => term.write(&bytes),
-                Step::Done(bytes) => {
-                    term.write(&bytes);
-                    finished.push(i);
+                Step::Write(bytes) => {
+                    if !(bytes.is_empty() || term.write(&bytes)) {
+                        finished.push((i, false));
+                    }
+                }
+                Step::Done(bytes) if !(bytes.is_empty() || term.write(&bytes)) => finished.push((i, false)),
+                Step::Done(_) => {
+                    if launch.submits() {
+                        term.submitted = Some(now);
+                    }
+                    finished.push((i, true));
                 }
                 Step::Abandon => {
                     eprintln!("cornercase server: the agent did not start in terminal {}", launch.term);
-                    finished.push(i);
+                    finished.push((i, false));
                 }
             }
         }
-        for i in finished.into_iter().rev() {
-            self.launches.remove(i);
+        for (i, started) in finished.into_iter().rev() {
+            if let Some(key) = self.launches.remove(i).key {
+                self.requests.launched(key, started);
+            }
         }
     }
 
@@ -820,17 +839,20 @@ impl App {
 
     fn open_project(&mut self, dir: PathBuf, area: Rect) -> Result<()> {
         let path = dir.canonicalize().unwrap_or(dir);
-        if let Some(i) = self.projects.iter().position(|p| p.path == path) {
-            self.active = i;
-            return Ok(());
-        }
+        self.active = match self.projects.iter().position(|p| p.path == path) {
+            Some(i) => i,
+            None => self.add_project(path, area)?,
+        };
+        Ok(())
+    }
+
+    fn add_project(&mut self, path: PathBuf, area: Rect) -> Result<usize> {
         let workspace = self.new_workspace(area, path.clone(), None, false)?;
         let mut project = Project::new(self.take_id(), path, None);
         project.workspaces.push(workspace);
         self.projects.push(project);
-        self.active = self.projects.len() - 1;
         self.sync_worktrees();
-        Ok(())
+        Ok(self.projects.len() - 1)
     }
 
     fn project(&self) -> Option<&Project> {
@@ -1151,10 +1173,16 @@ impl App {
             AppEvent::Input(Event::Mouse(ev)) => self.handle_mouse(ev, area)?,
             AppEvent::Input(Event::Paste(text)) => self.handle_paste(&text),
             AppEvent::Exited(id) => self.remove(id),
-            AppEvent::WorktreeCreated { project, result, start } => {
+            AppEvent::WorktreeCreated { project, result, request: Some(key), .. } => {
+                self.worktree_ready(key, project, result, area);
+            }
+            AppEvent::WorktreeCreated { project, result, start, request: None } => {
                 self.worktree_created(project, result, start, area)?;
             }
-            AppEvent::WorktreeRemoved { project, workspace, result } => {
+            AppEvent::WorktreeRemoved { project, workspace, result, request: Some(key) } => {
+                self.worktree_gone(key, project, workspace, result);
+            }
+            AppEvent::WorktreeRemoved { project, workspace, result, request: None } => {
                 self.worktree_removed(project, workspace, result);
             }
             AppEvent::IssuesLoaded { project, source, query, result } => {
@@ -1177,7 +1205,7 @@ impl App {
             AppEvent::Updated(result) => self.updated(result),
             AppEvent::Usage(agent, result) => self.usage.answered(agent, result, Instant::now()),
             AppEvent::Output(id, bytes) => {
-                if let Some(launch) = self.launches.iter_mut().find(|l| l.term == id) {
+                for launch in self.launches.iter_mut().filter(|l| l.term == id) {
                     launch.output(Instant::now());
                 }
                 if let Some(t) = self.projects.iter_mut().flat_map(Project::terms_mut).find(|t| t.id == id) {
@@ -1215,8 +1243,8 @@ impl App {
     fn forward_key(&mut self, key: KeyEvent) {
         let Some(term) = self.term_mut() else { return };
         let bytes = term.emulator.encode_key(key);
-        if !bytes.is_empty() {
-            term.write(&bytes);
+        if !bytes.is_empty() && !term.write(&bytes) {
+            self.toast = Some(Toast::new(NOT_READING, ui::ToastIcon::Bug));
         }
     }
 
@@ -1503,22 +1531,9 @@ impl App {
     }
 
     fn pane_action(&mut self, pane: u64, action: PaneAction, area: Rect) -> Result<()> {
-        let Some((path, tab)) = self.tab_with_pane(pane) else { return Ok(()) };
+        let Some((_, tab)) = self.tab_with_pane(pane) else { return Ok(()) };
         match action {
-            PaneAction::Split(dir) => {
-                let cwd = tab
-                    .panes
-                    .iter()
-                    .find(|t| t.id == pane)
-                    .and_then(Term::cwd)
-                    .filter(|dir| dir.is_dir())
-                    .unwrap_or_else(|| path.to_path_buf());
-                let term = self.spawn(area, cwd)?;
-                if let Some((_, tab)) = self.tab_with_pane(pane) {
-                    tab.split(pane, dir, term);
-                }
-                self.resize(area);
-            }
+            PaneAction::Split(dir) => return self.split_pane(pane, dir, area, true).map(drop),
             PaneAction::RightClicksToPane | PaneAction::RightClicksToMenu => tab.toggle_right_clicks(pane),
             PaneAction::Close => {
                 if let Some(term) = tab.panes.iter_mut().find(|t| t.id == pane) {
@@ -1527,6 +1542,24 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    fn split_pane(&mut self, pane: u64, dir: Dir, area: Rect, focus: bool) -> Result<Option<u64>> {
+        let Some((path, tab)) = self.tab_with_pane(pane) else { return Ok(None) };
+        let cwd = tab
+            .panes
+            .iter()
+            .find(|t| t.id == pane)
+            .and_then(Term::cwd)
+            .filter(|dir| dir.is_dir())
+            .unwrap_or_else(|| path.to_path_buf());
+        let term = self.spawn(area, cwd)?;
+        let id = term.id;
+        if let Some((_, tab)) = self.tab_with_pane(pane) {
+            tab.split(pane, dir, term, focus);
+        }
+        self.resize(area);
+        Ok(Some(id))
     }
 
     fn press_border(&mut self, border: ui::Border, now: Instant) {
@@ -1930,35 +1963,30 @@ impl App {
     }
 
     fn close_workspace(&mut self, p: usize, w: usize) {
-        let project = &mut self.projects[p];
-        let workspace = &mut project.workspaces[w];
-        if workspace.worktree {
-            self.overlay = Some(Overlay::RemoveWorkspace {
-                project: project.id,
-                workspace: workspace.id,
-                error: None,
-                force: false,
-                removing: false,
-            });
+        let (project, workspace) = (self.projects[p].id, self.projects[p].workspaces[w].id);
+        if self.projects[p].workspaces[w].worktree {
+            self.overlay =
+                Some(Overlay::RemoveWorkspace { project, workspace, error: None, force: false, removing: false });
             return;
         }
-        workspace.closing = true;
-        workspace.kill();
-        if workspace.tabs.is_empty() {
-            project.remove_workspace(w);
-        }
+        self.drop_workspace(project, workspace);
     }
 
     fn add_tab(&mut self, p: usize, w: usize, area: Rect) -> Result<()> {
-        let path = self.projects[p].workspaces[w].path.clone();
-        let tab = self.new_tab(area, path, None)?;
+        let t = self.push_tab(p, w, area, None)?;
         let project = &mut self.projects[p];
-        let workspace = &mut project.workspaces[w];
-        workspace.tabs.push(tab);
-        workspace.active = workspace.tabs.len() - 1;
+        project.workspaces[w].active = t;
         project.active = w;
         self.active = p;
         Ok(())
+    }
+
+    fn push_tab(&mut self, p: usize, w: usize, area: Rect, name: Option<String>) -> Result<usize> {
+        let path = self.projects[p].workspaces[w].path.clone();
+        let tab = self.new_tab(area, path, name)?;
+        let workspace = &mut self.projects[p].workspaces[w];
+        workspace.tabs.push(tab);
+        Ok(workspace.tabs.len() - 1)
     }
 
     fn open_picker(&mut self) {
@@ -2380,7 +2408,7 @@ impl App {
             name: issues::workspace_name(issue),
             spec: launch::Spec {
                 command: agents::command_line(&self.config, agent),
-                prompt: issues::prompt(&self.config.prompt, issue, &branch),
+                prompt: Some(issues::prompt(&self.config.prompt, issue, &branch)),
                 submit: self.config.submit,
             },
         };
@@ -2399,13 +2427,7 @@ impl App {
             self.overlay = None;
             return self.open_workspace(p, w, Some(start), area);
         }
-        let repo = self.projects[p].path.clone();
-        let path = worktree::checkout_path(&self.config.worktrees_dir(self.home.as_deref()), &repo, &branch);
-        let tx = self.tx.clone();
-        std::thread::spawn(move || {
-            let result = panics::job(|| worktree::create(&repo, &branch, &path).map(|()| path));
-            let _ = tx.send(AppEvent::WorktreeCreated { project, result, start: Some(start) });
-        });
+        self.spawn_worktree(p, branch, Some(start), None);
         if let Some(Overlay::Issues(b)) = &mut self.overlay {
             b.starting = true;
             b.error = None;
@@ -2413,13 +2435,28 @@ impl App {
         Ok(())
     }
 
-    fn open_tab_with(&mut self, p: usize, w: Option<usize>, start: Start, area: Rect) -> Result<()> {
+    fn spawn_worktree(&self, p: usize, branch: String, start: Option<Start>, request: Option<u64>) {
+        let project = &self.projects[p];
+        let (id, repo, tx) = (project.id, project.path.clone(), self.tx.clone());
+        let path = worktree::checkout_path(&self.config.worktrees_dir(self.home.as_deref()), &repo, &branch);
+        std::thread::spawn(move || {
+            let result = panics::job(|| worktree::create(&repo, &branch, &path).map(|()| path));
+            let _ = tx.send(AppEvent::WorktreeCreated { project: id, result, start, request });
+        });
+    }
+
+    fn ensure_workspace(&mut self, p: usize) -> usize {
         if self.projects[p].workspaces.is_empty() {
             let id = self.take_id();
             let path = self.projects[p].path.clone();
             self.projects[p].workspaces.push(Workspace::new(id, path, None, false));
         }
-        let w = w.unwrap_or(self.projects[p].active).min(self.projects[p].workspaces.len() - 1);
+        self.projects[p].active.min(self.projects[p].workspaces.len() - 1)
+    }
+
+    fn open_tab_with(&mut self, p: usize, w: Option<usize>, start: Start, area: Rect) -> Result<()> {
+        let active = self.ensure_workspace(p);
+        let w = w.unwrap_or(active).min(self.projects[p].workspaces.len() - 1);
         self.add_tab(p, w, area)?;
         if let Some(tab) = self.projects[p].workspaces[w].tab_mut() {
             tab.name = Some(start.name);
@@ -3184,17 +3221,12 @@ impl App {
             self.overlay = Some(Overlay::NewWorkspace { project, input, worktree, error, creating: false });
             return Ok(());
         }
-        let repo = self.projects[p].path.clone();
         if worktree == Some(true) {
-            let path = worktree::checkout_path(&self.config.worktrees_dir(self.home.as_deref()), &repo, &name);
-            let tx = self.tx.clone();
-            std::thread::spawn(move || {
-                let result = panics::job(|| worktree::create(&repo, &name, &path).map(|()| path));
-                let _ = tx.send(AppEvent::WorktreeCreated { project, result, start: None });
-            });
+            self.spawn_worktree(p, name, None, None);
             self.overlay = Some(Overlay::NewWorkspace { project, input, worktree, error: None, creating: true });
             return Ok(());
         }
+        let repo = self.projects[p].path.clone();
         let workspace = self.new_workspace(area, repo, Some(name), false)?;
         let project = &mut self.projects[p];
         project.workspaces.push(workspace);
@@ -3231,14 +3263,17 @@ impl App {
             self.overlay = None;
         }
         let Some(p) = self.project_index(project) else { return Ok(()) };
-        let w = if let Some(w) = self.projects[p].workspaces.iter().position(|w| w.path == path) {
-            w
-        } else {
-            let id = self.take_id();
-            self.projects[p].workspaces.push(Workspace::new(id, path, None, true));
-            self.projects[p].workspaces.len() - 1
-        };
+        let w = self.worktree_workspace(p, path);
         self.open_workspace(p, w, start, area)
+    }
+
+    fn worktree_workspace(&mut self, p: usize, path: PathBuf) -> usize {
+        if let Some(w) = self.projects[p].workspaces.iter().position(|w| w.path == path) {
+            return w;
+        }
+        let id = self.take_id();
+        self.projects[p].workspaces.push(Workspace::new(id, path, None, true));
+        self.projects[p].workspaces.len() - 1
     }
 
     fn open_workspace(&mut self, p: usize, w: usize, start: Option<Start>, area: Rect) -> Result<()> {
@@ -3262,14 +3297,18 @@ impl App {
 
     fn remove_worktree(&mut self, project: u64, workspace: u64, force: bool) -> Option<Overlay> {
         let (p, w) = self.workspace_index(project, workspace)?;
-        let repo = self.projects[p].path.clone();
-        let path = self.projects[p].workspaces[w].path.clone();
-        let tx = self.tx.clone();
+        self.spawn_removal(p, w, force, None);
+        Some(Overlay::RemoveWorkspace { project, workspace, error: None, force, removing: true })
+    }
+
+    fn spawn_removal(&self, p: usize, w: usize, force: bool, request: Option<u64>) {
+        let project = &self.projects[p];
+        let (id, workspace) = (project.id, project.workspaces[w].id);
+        let (repo, path, tx) = (project.path.clone(), project.workspaces[w].path.clone(), self.tx.clone());
         std::thread::spawn(move || {
             let result = panics::job(|| worktree::remove(&repo, &path, force));
-            let _ = tx.send(AppEvent::WorktreeRemoved { project, workspace, result });
+            let _ = tx.send(AppEvent::WorktreeRemoved { project: id, workspace, result, request });
         });
-        Some(Overlay::RemoveWorkspace { project, workspace, error: None, force, removing: true })
     }
 
     fn worktree_removed(&mut self, project: u64, workspace: u64, result: Result<()>) {
@@ -3284,6 +3323,10 @@ impl App {
         if matches!(self.overlay, Some(Overlay::RemoveWorkspace { .. })) {
             self.overlay = None;
         }
+        self.drop_workspace(project, workspace);
+    }
+
+    fn drop_workspace(&mut self, project: u64, workspace: u64) {
         let Some((p, w)) = self.workspace_index(project, workspace) else { return };
         let workspace = &mut self.projects[p].workspaces[w];
         workspace.closing = true;
@@ -3331,12 +3374,10 @@ impl App {
             self.changes.scroll = 0;
             return;
         }
-        let Some(term) = self.term_mut() else { return };
-        let bracketed = term.emulator.bracketed_paste();
-        if bracketed {
-            term.write(format!("\x1b[200~{text}\x1b[201~").as_bytes());
-        } else {
-            term.write(text.as_bytes());
+        if let Some(term) = self.term_mut()
+            && !term.paste(text)
+        {
+            self.toast = Some(Toast::new(NOT_READING, ui::ToastIcon::Bug));
         }
     }
 
@@ -3830,12 +3871,12 @@ impl App {
         ws.active = t;
         let tab = &mut ws.tabs[t];
         tab.focus(id);
-        if let Some(term) = tab.panes.iter_mut().find(|term| term.id == id) {
-            let bytes =
-                if term.emulator.bracketed_paste() { format!("\x1b[200~{text}\x1b[201~") } else { text.to_string() };
-            term.write(bytes.as_bytes());
-        }
-        self.toast = Some(Toast::new(SENT_TO_AGENT, ui::ToastIcon::Check));
+        let sent = tab.panes.iter_mut().find(|term| term.id == id).is_some_and(|term| term.paste(text));
+        self.toast = Some(if sent {
+            Toast::new(SENT_TO_AGENT, ui::ToastIcon::Check)
+        } else {
+            Toast::new(NOT_READING, ui::ToastIcon::Bug)
+        });
     }
 
     fn open_branches(&mut self, target: &Checkout) {
@@ -9599,6 +9640,739 @@ rm -f "$1/sessions/$$.json"
             back.set_todos(Todos::from(saved));
             back.restore(&state, AREA).expect("restore");
             assert_eq!((state.todo, back.todo.open, texts(&back)), (true, true, vec!["a".into()]));
+        }
+    }
+
+    mod control_requests {
+        use serde_json::Value;
+
+        use super::*;
+        use crate::control::{self as wire, Command, Done, Item, Report, Response, Until};
+        use crate::test_util::write_executable;
+
+        const CLIENT: u64 = 9;
+        const AGENT: &str = r#"#!/bin/sh
+s="$1/sessions/$$.json"
+printf '{"pid":%s,"status":"idle"}' $$ > "$s"
+while printf 'agent> ' && IFS= read -r line; do
+  printf '{"pid":%s,"status":"busy"}' $$ > "$s"
+  while [ ! -e "$1/finish" ]; do sleep 0.02; done
+  rm -f "$1/finish"
+  case "$line" in *ask*) printf '{"pid":%s,"status":"waiting"}' $$ > "$s"; read answer ;; esac
+  printf 'done: %s\n' "$line"
+  printf '{"pid":%s,"status":"idle"}' $$ > "$s"
+done
+rm -f "$s"
+"#;
+
+        fn request(app: &mut App, caller: Option<u64>, command: Command, area: Option<Rect>) {
+            let server = caller.map(|_| wire::server_token().to_string());
+            let text = serde_json::to_string(&wire::Request { caller, server, command }).expect("json");
+            app.request(CLIENT, &text, area, Instant::now());
+        }
+
+        fn ask(app: &mut App, caller: Option<u64>, command: Command) {
+            request(app, caller, command, Some(AREA));
+        }
+
+        fn answers(app: &mut App) -> Vec<Response> {
+            let answers = app.take_answers();
+            assert!(answers.iter().all(|(client, _)| *client == CLIENT), "{answers:?}");
+            answers.into_iter().map(|(_, text)| serde_json::from_str(&text).expect("a response")).collect()
+        }
+
+        fn answered(app: &mut App, rx: &Receiver<AppEvent>, what: &str) -> Response {
+            let mut got = Vec::new();
+            wait_until(what, || {
+                while let Ok(ev) = rx.try_recv() {
+                    app.handle_event(ev, AREA).expect("handle event");
+                }
+                app.refresh(Instant::now());
+                got = answers(app);
+                !got.is_empty()
+            });
+            got.remove(0)
+        }
+
+        fn done(response: Response) -> Done {
+            match response {
+                Response::Ok(value) => serde_json::from_value(value).expect("an answer"),
+                Response::Error(message) => panic!("the request failed: {message}"),
+            }
+        }
+
+        fn error(response: Response) -> String {
+            match response {
+                Response::Error(message) => message,
+                Response::Ok(value) => panic!("the request did not fail: {value}"),
+            }
+        }
+
+        fn now(app: &mut App, caller: Option<u64>, command: Command) -> Response {
+            ask(app, caller, command);
+            let mut answers = answers(app);
+            assert_eq!(answers.len(), 1, "an answer at once");
+            answers.remove(0)
+        }
+
+        fn value(app: &mut App, caller: Option<u64>, command: Command) -> Value {
+            match now(app, caller, command) {
+                Response::Ok(value) => value,
+                Response::Error(message) => panic!("the request failed: {message}"),
+            }
+        }
+
+        fn pane(app: &App, id: u64) -> &Term {
+            app.projects
+                .iter()
+                .flat_map(|p| &p.workspaces)
+                .flat_map(Workspace::terms)
+                .find(|t| t.id == id)
+                .expect("the pane")
+        }
+
+        fn pane_screen(app: &App, id: u64) -> String {
+            pane(app, id).emulator.screen_text().expect("the screen")
+        }
+
+        fn first(app: &App) -> u64 {
+            term(app, app.active).id
+        }
+
+        fn new_tab(command: Option<&str>) -> Command {
+            Command::NewTab(wire::NewTab { command: command.map(str::to_string), ..wire::NewTab::default() })
+        }
+
+        fn wait_for(pane: u64, until: Until, timeout: Option<f64>) -> Command {
+            Command::Wait(wire::Wait { pane: Some(pane), tab: None, until, timeout })
+        }
+
+        fn send_text(pane: u64, text: &str, enter: bool, wait: bool) -> Command {
+            let text = Some(text.to_string()).filter(|t| !t.is_empty());
+            Command::Send(wire::SendText { pane: Some(pane), text, enter, wait, ..wire::SendText::default() })
+        }
+
+        fn press_keys(pane: u64, keys: &[&str]) -> Command {
+            Command::Keys(wire::Keys {
+                pane: Some(pane),
+                tab: None,
+                keys: keys.iter().map(ToString::to_string).collect(),
+            })
+        }
+
+        mod creating {
+            use super::*;
+
+            #[test]
+            fn status_lists_every_pane_and_marks_the_caller() {
+                let (mut app, _rx, _dirs) = app_with(2);
+                let (caller, other) = (term(&app, 0).id, term(&app, 1).id);
+
+                let report: Report =
+                    serde_json::from_value(value(&mut app, Some(caller), Command::Status(wire::Status {})))
+                        .expect("a report");
+
+                let panes: Vec<(u64, bool)> = report
+                    .projects
+                    .iter()
+                    .flat_map(|p| &p.workspaces)
+                    .flat_map(|w| &w.tabs)
+                    .flat_map(|t| &t.panes)
+                    .map(|p| (p.id, p.caller))
+                    .collect();
+                assert_eq!(panes, [(caller, true), (other, false)]);
+                assert_eq!((report.caller, report.shown.pane), (Some(caller), Some(other)));
+            }
+
+            #[test]
+            fn a_pane_of_another_server_is_not_the_caller() {
+                let (mut app, _rx, _dirs) = app_with(1);
+                let caller = Some(term(&app, 0).id);
+                let status = Command::Status(wire::Status {});
+                let text =
+                    serde_json::to_string(&wire::Request { caller, server: Some("another".into()), command: status })
+                        .expect("json");
+
+                app.request(CLIENT, &text, Some(AREA), Instant::now());
+
+                let report: Report = serde_json::from_value(match answers(&mut app).remove(0) {
+                    Response::Ok(value) => value,
+                    Response::Error(message) => panic!("{message}"),
+                })
+                .expect("a report");
+                assert_eq!(report.caller, None);
+            }
+
+            #[test]
+            fn a_project_being_closed_is_opened_again() {
+                let (mut app, _rx, dirs) = app_with(1);
+                let old = app.projects[0].id;
+                app.close_project(old);
+                let open = Command::Open(wire::Open { path: dirs[0].path().to_path_buf(), focus: false });
+
+                let opened = done(now(&mut app, None, open));
+
+                assert!(opened.ids.project.is_some_and(|id| id != old), "{opened:?}");
+            }
+
+            #[test]
+            fn open_adds_a_folder_once_and_leaves_the_window_as_it_is() {
+                let (mut app, _rx, _dirs) = app_with(1);
+                let dir = TempDir::new();
+                let open = || Command::Open(wire::Open { path: dir.path().to_path_buf(), focus: false });
+
+                let opened = done(now(&mut app, None, open()));
+                let found = done(now(&mut app, None, open()));
+
+                assert_eq!((app.projects.len(), app.active), (2, 0));
+                assert_eq!(
+                    (opened.ids.project, found.ids.project),
+                    (Some(app.projects[1].id), Some(app.projects[1].id))
+                );
+            }
+
+            #[test]
+            fn a_new_tab_leaves_the_window_as_it_is() {
+                let (mut app, _rx, _dirs) = app_with(2);
+                let before = app.focus();
+                let workspace = app.projects[0].workspaces[0].id;
+                let named =
+                    wire::NewTab { workspace: Some(workspace), name: Some("tests".into()), ..wire::NewTab::default() };
+
+                let made = done(now(&mut app, None, Command::NewTab(named)));
+
+                let tabs = &app.projects[0].workspaces[0].tabs;
+                assert_eq!(app.focus(), before);
+                assert_eq!((tabs.len(), tabs[1].name.as_deref()), (2, Some("tests")));
+                assert_eq!(made.ids.pane, tabs[1].pane().map(|t| t.id));
+            }
+
+            #[test]
+            fn a_command_is_typed_into_the_new_tab_before_the_answer() {
+                let (mut app, rx) = app();
+
+                ask(&mut app, None, new_tab(Some("echo typed-$((40+2))")));
+                assert_eq!(answers(&mut app), []);
+                let made = done(answered(&mut app, &rx, "the command is typed"));
+
+                let id = made.ids.pane.expect("the new pane");
+                pump_until(&mut app, &rx, "the command runs", |a| pane_screen(a, id).contains("typed-42"));
+            }
+
+            #[test]
+            fn focus_shows_what_it_names() {
+                let (mut app, _rx, _dirs) = app_with(2);
+                let id = term(&app, 0).id;
+
+                done(now(&mut app, None, Command::Focus(wire::Focus { item: Item::Pane(id) })));
+
+                assert_eq!((app.active, app.term().map(|t| t.id)), (0, Some(id)));
+            }
+
+            #[test]
+            fn a_split_keeps_the_focus_where_it_was() {
+                let (mut app, _rx) = app();
+                let was = first(&app);
+
+                let made =
+                    done(now(&mut app, None, Command::Split(wire::Split { down: true, ..wire::Split::default() })));
+
+                let tab = app.tab().expect("a tab");
+                assert_eq!((tab.panes.len(), tab.pane().map(|t| t.id)), (2, Some(was)));
+                assert_eq!(made.ids.pane, Some(tab.panes[1].id));
+            }
+
+            #[test]
+            fn new_terminals_need_a_window_to_take_their_size_from() {
+                let (mut app, _rx) = app();
+
+                request(&mut app, None, new_tab(None), None);
+
+                assert!(error(answers(&mut app).remove(0)).contains("has not opened a window yet"));
+            }
+
+            #[test]
+            fn an_unknown_command_names_the_version_of_the_server() {
+                let (mut app, _rx) = app();
+
+                app.request(CLIENT, r#"{"command": "teleport", "args": {}}"#, Some(AREA), Instant::now());
+
+                let message = error(answers(&mut app).remove(0));
+                assert!(
+                    message.contains("has no `teleport` command") && message.contains(update::CURRENT),
+                    "{message}"
+                );
+            }
+        }
+
+        mod talking {
+            use super::*;
+
+            #[test]
+            fn send_pastes_and_keys_press_keys() {
+                let (mut app, rx) = app();
+                let id = first(&app);
+                type_line(&mut app, "echo cat-\"\"starts; cat -v");
+                pump_until(&mut app, &rx, "cat runs", |a| pane_screen(a, id).contains("cat-starts"));
+
+                done(now(&mut app, None, send_text(id, "hello", false, false)));
+                done(now(&mut app, None, press_keys(id, &["ctrl+b", "enter"])));
+
+                pump_until(&mut app, &rx, "cat echoes both", |a| pane_screen(a, id).contains("hello^B"));
+            }
+
+            #[test]
+            fn read_gives_the_screen_or_its_last_lines() {
+                let (mut app, rx) = app();
+                let id = first(&app);
+                type_line(&mut app, "printf 'one\\ntwo\\nthree-%s\\n' $((1+1))");
+                pump_until(&mut app, &rx, "the lines show", |a| pane_screen(a, id).contains("three-2"));
+
+                let read = |lines| Command::Read(wire::Read { pane: Some(id), tab: None, lines });
+                let screen = done(now(&mut app, None, read(None))).text.expect("the screen");
+                let last = done(now(&mut app, None, read(Some(3)))).text.expect("the lines");
+
+                assert!(screen.contains("one\ntwo\nthree-2"), "{screen}");
+                assert_eq!((last.lines().count(), last.contains("three-2")), (3, true), "{last}");
+            }
+
+            #[test]
+            fn wait_until_shell_ends_once_the_program_does() {
+                let (mut app, rx) = app();
+                let id = first(&app);
+                type_line(&mut app, "sleep 1");
+                pump_until(&mut app, &rx, "sleep runs", |a| !pane(a, id).shell_in_foreground());
+
+                ask(&mut app, None, wait_for(id, Until::Shell, None));
+                app.refresh(Instant::now());
+                let early = answers(&mut app);
+
+                let ended = done(answered(&mut app, &rx, "sleep ends"));
+                assert_eq!((early, ended.ended.as_deref()), (Vec::new(), Some("shell")));
+            }
+
+            #[test]
+            fn wait_until_shell_right_after_typing_waits_for_the_program() {
+                let (mut app, rx) = app();
+                ask(&mut app, None, new_tab(Some("sleep 1")));
+                let id = done(answered(&mut app, &rx, "the command is typed")).ids.pane.expect("the pane");
+                let typed = Instant::now();
+
+                ask(&mut app, None, wait_for(id, Until::Shell, None));
+                done(answered(&mut app, &rx, "sleep ends"));
+
+                assert!(typed.elapsed() >= Duration::from_millis(900), "it ended after {:?}", typed.elapsed());
+            }
+
+            #[test]
+            fn a_shell_busy_before_its_program_starts_is_not_back_yet() {
+                let (mut app, rx) = app();
+                ask(&mut app, None, new_tab(Some("x=$(sleep 0.6); sleep 1")));
+                let id = done(answered(&mut app, &rx, "the command is typed")).ids.pane.expect("the pane");
+                let typed = Instant::now();
+
+                ask(&mut app, None, wait_for(id, Until::Shell, None));
+                done(answered(&mut app, &rx, "the program ends"));
+
+                assert!(typed.elapsed() >= Duration::from_millis(1500), "it ended after {:?}", typed.elapsed());
+            }
+
+            #[cfg(target_os = "linux")]
+            #[rstest::rstest]
+            #[case::send(|pane| send_text(pane, "", true, false), "did not take what was typed")]
+            #[case::keys(|pane| press_keys(pane, &["enter"]), "is not reading its input")]
+            fn an_enter_a_full_pane_refuses_is_not_reported_as_pressed(
+                #[case] enter: fn(u64) -> Command,
+                #[case] refused: &str,
+            ) {
+                let (mut app, rx) = app();
+                let id = first(&app);
+                type_line(&mut app, "stty -echo; sleep 30");
+                pump_until(&mut app, &rx, "sleep runs", |a| pane(a, id).program(&a.config).as_deref() == Some("sleep"));
+                let full = vec![b'x'; crate::term::MAX_QUEUED + 1024 * 1024];
+                let filled = app.projects[0].workspaces[0].tabs[0].panes[0].write(&full);
+
+                ask(&mut app, None, enter(id));
+
+                let message = error(answered(&mut app, &rx, "the enter is refused"));
+                assert!(filled && message.contains(refused), "{message}");
+                assert_eq!(pane(&app, id).submitted, None, "the pane counts no Enter");
+            }
+
+            #[test]
+            fn wait_for_text_takes_a_line_already_on_the_screen() {
+                let (mut app, rx) = app();
+                let id = first(&app);
+                type_line(&mut app, "echo ready-$((1+1))");
+                pump_until(&mut app, &rx, "the line shows", |a| pane_screen(a, id).contains("ready-2"));
+
+                ask(&mut app, None, wait_for(id, Until::Text(r"ready-\d".into()), None));
+
+                let ended = done(answered(&mut app, &rx, "the line matches"));
+                let line = ended.line.unwrap_or_default();
+                assert_eq!((ended.ended.as_deref(), line.ends_with("ready-2")), (Some("text"), true), "{line}");
+            }
+
+            #[test]
+            fn a_wait_times_out_saying_what_it_waited_for() {
+                let (mut app, rx) = app();
+                let id = first(&app);
+
+                ask(&mut app, None, wait_for(id, Until::Text("never".into()), Some(0.05)));
+
+                let message = error(answered(&mut app, &rx, "the wait times out"));
+                assert_eq!(
+                    message,
+                    format!("timed out after 0.05s: no line on the screen of pane {id} matches `never`")
+                );
+            }
+
+            #[test]
+            fn a_timeout_past_the_clock_is_refused_and_a_long_quiet_is_kept() {
+                let (mut app, _rx) = app();
+                let id = first(&app);
+
+                let message = error(now(&mut app, None, wait_for(id, Until::Quiet(1e19), Some(1e19))));
+                ask(&mut app, None, wait_for(id, Until::Quiet(1e19), None));
+                let tick = app.tick(Instant::now());
+
+                assert_eq!((message.as_str(), answers(&mut app), tick), ("--timeout is too long", Vec::new(), None));
+            }
+
+            #[test]
+            fn waiting_for_an_agent_needs_one() {
+                let (mut app, _rx) = app();
+                let id = first(&app);
+
+                let message = error(now(&mut app, None, wait_for(id, Until::Stops, None)));
+
+                assert!(message.contains(&format!("pane {id} runs no agent")), "{message}");
+            }
+
+            #[test]
+            fn waiting_for_an_agent_cornercase_cannot_follow_says_so() {
+                let (mut app, rx) = app();
+                let bin = TempDir::new();
+                let gemini = bin.path().join("gemini");
+                write_executable(&gemini, "#!/bin/sh\nsleep 30\n");
+                let id = first(&app);
+                type_line(&mut app, &gemini.display().to_string());
+                pump_until(&mut app, &rx, "gemini runs", |a| {
+                    crate::agents::detect(&a.config, &pane(a, id).foreground_args()).is_some()
+                });
+
+                let message = error(now(&mut app, None, wait_for(id, Until::Stops, None)));
+
+                assert!(message.contains(&format!("pane {id} runs gemini")), "{message}");
+            }
+
+            #[test]
+            fn a_pane_does_not_wait_for_its_own_shell() {
+                let (mut app, _rx) = app();
+                let id = first(&app);
+
+                let message = error(now(&mut app, Some(id), wait_for(id, Until::Shell, None)));
+
+                assert!(message.contains("it would wait for itself"), "{message}");
+            }
+
+            #[test]
+            fn a_client_that_leaves_takes_its_wait_with_it() {
+                let (mut app, rx) = app();
+                let id = first(&app);
+                ask(&mut app, None, wait_for(id, Until::Text("gone-\\d".into()), None));
+
+                app.forget(CLIENT);
+                type_line(&mut app, "echo gone-$((1+1))");
+                pump_until(&mut app, &rx, "the line shows", |a| pane_screen(a, id).contains("gone-2"));
+                app.refresh(Instant::now());
+
+                assert_eq!(answers(&mut app), []);
+            }
+        }
+
+        mod agents {
+            use super::*;
+
+            struct Agent {
+                app: App,
+                rx: Receiver<AppEvent>,
+                dir: TempDir,
+                _config: TempDir,
+                _project: TempDir,
+            }
+
+            impl Agent {
+                fn new() -> Self {
+                    let (dir, config, project) = (TempDir::new(), TempDir::new(), TempDir::new());
+                    std::fs::create_dir(dir.path().join("sessions")).expect("create the sessions folder");
+                    let script = config.path().join("claude");
+                    write_executable(&script, AGENT);
+                    let settings = Config {
+                        agent_commands: [("claude".to_string(), script.display().to_string())].into(),
+                        agent_args: [("claude".to_string(), vec![dir.path().display().to_string()])].into(),
+                        ..Config::default()
+                    };
+                    let config_path = config.path().join("config.json");
+                    config::save(&config_path, &settings).expect("write config");
+                    let (mut app, rx) = app_in(project.path(), config_path);
+                    app.claude_dir = Some(dir.path().to_path_buf());
+                    Self { app, rx, dir, _config: config, _project: project }
+                }
+
+                fn start(&mut self, prompt: Option<&str>) -> u64 {
+                    let start = wire::Start {
+                        agent: Some("claude".into()),
+                        name: Some("fixer".into()),
+                        prompt: prompt.map(str::to_string),
+                        ..wire::Start::default()
+                    };
+                    ask(&mut self.app, None, Command::Start(start));
+                    let started = done(answered(&mut self.app, &self.rx, "the agent is ready"));
+                    started.ids.pane.expect("the agent's pane")
+                }
+
+                fn finish(&self) {
+                    std::fs::write(self.dir.path().join("finish"), "").expect("finish");
+                }
+
+                fn until(&mut self, what: &str, cond: impl Fn(&App) -> bool) {
+                    let (app, rx) = (&mut self.app, &self.rx);
+                    pump_until(app, rx, what, |a| cond(a));
+                }
+
+                fn status(&self, id: u64) -> Option<activity::Status> {
+                    pane(&self.app, id).agent.status()
+                }
+
+                fn answered(&mut self, what: &str) -> Response {
+                    answered(&mut self.app, &self.rx, what)
+                }
+            }
+
+            fn refreshing(app: &mut App, rx: &Receiver<AppEvent>, what: &str, cond: impl Fn(&App) -> bool) {
+                wait_until(what, || {
+                    while let Ok(ev) = rx.try_recv() {
+                        app.handle_event(ev, AREA).expect("handle event");
+                    }
+                    app.refresh(Instant::now());
+                    cond(app)
+                });
+            }
+
+            #[test]
+            fn start_types_the_agent_and_submits_its_prompt_in_a_tab_of_its_own() {
+                let mut agent = Agent::new();
+                let before = agent.app.focus();
+
+                let id = agent.start(Some("fix the login"));
+
+                agent.until("the agent reads the prompt", |a| pane_screen(a, id).contains("agent> fix the login"));
+                let tab = &agent.app.projects[0].workspaces[0].tabs[1];
+                assert_eq!((tab.name.as_deref(), agent.app.focus()), (Some("fixer"), before));
+                agent.finish();
+            }
+
+            #[test]
+            fn send_and_wait_follows_the_agent_until_it_stops() {
+                let mut agent = Agent::new();
+                let id = agent.start(None);
+
+                ask(&mut agent.app, None, send_text(id, "next step", true, true));
+                let (app, rx) = (&mut agent.app, &agent.rx);
+                refreshing(app, rx, "the agent works", |a| {
+                    pane(a, id).agent.status() == Some(activity::Status::Working)
+                });
+                let early = answers(&mut agent.app);
+                agent.finish();
+
+                let ended = done(agent.answered("the agent stops"));
+                assert_eq!((early, ended.ended.as_deref()), (Vec::new(), Some("done")));
+            }
+
+            #[test]
+            fn a_wait_after_a_prompt_waits_for_the_agent_to_take_it() {
+                let mut agent = Agent::new();
+                let id = agent.start(None);
+                ask(&mut agent.app, None, send_text(id, "next step", true, false));
+                done(agent.answered("the enter is pressed"));
+
+                ask(&mut agent.app, None, wait_for(id, Until::Stops, None));
+                let (app, rx) = (&mut agent.app, &agent.rx);
+                refreshing(app, rx, "the agent works", |a| {
+                    pane(a, id).agent.status() == Some(activity::Status::Working)
+                });
+                let early = answers(&mut agent.app);
+                agent.finish();
+
+                let ended = done(agent.answered("the agent stops"));
+                assert_eq!((early, ended.ended.is_some()), (Vec::new(), true));
+            }
+
+            #[test]
+            fn send_refuses_an_agent_waiting_for_an_answer() {
+                let mut agent = Agent::new();
+                let id = agent.start(Some("please ask"));
+                agent.finish();
+                let (app, rx) = (&mut agent.app, &agent.rx);
+                refreshing(app, rx, "the agent asks", |a| {
+                    pane(a, id).agent.status() == Some(activity::Status::Waiting)
+                });
+
+                let message = error(now(&mut agent.app, None, send_text(id, "yes", true, false)));
+
+                assert!(message.contains("waiting for an answer"), "{message}");
+                assert_eq!(agent.status(id), Some(activity::Status::Waiting));
+            }
+        }
+
+        mod arranging {
+            use super::*;
+
+            #[test]
+            fn close_stops_the_shells_of_a_tab() {
+                let (mut app, rx) = app();
+                let made = done(now(&mut app, None, new_tab(None)));
+                let tab = made.ids.tab.expect("the new tab");
+
+                done(now(
+                    &mut app,
+                    None,
+                    Command::Close(wire::Close { item: Item::Tab(tab), remove_worktree: false, force: false }),
+                ));
+
+                pump_until(&mut app, &rx, "the tab closes", |a| a.projects[0].workspaces[0].tabs.len() == 1);
+            }
+
+            #[test]
+            fn a_project_closes_without_asking() {
+                let (mut app, rx, _dirs) = app_with(2);
+                let id = app.projects[0].id;
+
+                done(now(
+                    &mut app,
+                    None,
+                    Command::Close(wire::Close { item: Item::Project(id), remove_worktree: false, force: false }),
+                ));
+
+                pump_until(&mut app, &rx, "the project closes", |a| a.projects.len() == 1);
+                assert!(app.overlay.is_none());
+            }
+
+            #[test]
+            fn rename_without_a_target_names_the_callers_tab() {
+                let (mut app, _rx, _dirs) = app_with(2);
+                let caller = term(&app, 0).id;
+                let rename = |name: &str| Command::Rename(wire::Rename { item: None, name: name.into() });
+
+                done(now(&mut app, Some(caller), rename("mine")));
+                let named = app.projects[0].workspaces[0].tabs[0].name.clone();
+                done(now(&mut app, Some(caller), rename("")));
+
+                assert_eq!(
+                    (named.as_deref(), app.projects[0].workspaces[0].tabs[0].name.as_deref()),
+                    (Some("mine"), None)
+                );
+            }
+
+            #[test]
+            fn a_group_keeps_a_name() {
+                let (mut app, _rx) = app();
+                let group = app.add_group("work".into());
+
+                let message = error(now(
+                    &mut app,
+                    None,
+                    Command::Rename(wire::Rename { item: Some(Item::Group(group)), name: " ".into() }),
+                ));
+
+                assert_eq!((message.as_str(), app.groups[0].entry.name.as_str()), ("a group needs a name", "work"));
+            }
+
+            #[test]
+            fn notify_shows_a_toast_and_asks_for_a_desktop_notification() {
+                let (mut app, _rx) = app();
+
+                done(now(&mut app, None, Command::Notify(wire::Notify { text: "the build\u{7} is ready".into() })));
+
+                let sent: Vec<String> = app.take_notifications().into_iter().map(|n| n.text).collect();
+                assert_eq!((toast(&app), sent), (Some("the build is ready"), vec!["the build is ready".to_string()]));
+            }
+
+            #[test]
+            fn the_todo_list_follows_its_commands() {
+                let (mut app, _rx) = app();
+                let todo = |app: &mut App, todo| now(app, None, Command::Todo(todo));
+
+                let milk = done(todo(&mut app, wire::Todo::Add("buy milk".into()))).todo.expect("an id");
+                let docs = done(todo(&mut app, wire::Todo::Add("write docs".into()))).todo.expect("an id");
+                done(todo(&mut app, wire::Todo::Done(milk)));
+                done(todo(&mut app, wire::Todo::Rm(docs)));
+                let Response::Ok(list) = todo(&mut app, wire::Todo::List) else { panic!("no list") };
+
+                let list: wire::TodoList = serde_json::from_value(list).expect("a list");
+                assert_eq!(list.todos, [wire::TodoItem { id: milk, text: "buy milk".into(), done: true }]);
+            }
+        }
+
+        mod worktrees {
+            use super::*;
+
+            fn repo() -> (App, Receiver<AppEvent>, TempDir, TempDir, TempDir) {
+                let repo = git_repo(&[("README", "hi")]);
+                let (worktrees, config, config_path) = with_worktrees_config();
+                let (app, rx) = app_in(repo.path(), config_path);
+                (app, rx, repo, worktrees, config)
+            }
+
+            fn worktree(name: &str) -> Command {
+                Command::NewWorkspace(wire::NewWorkspace {
+                    name: name.into(),
+                    worktree: true,
+                    ..wire::NewWorkspace::default()
+                })
+            }
+
+            #[test]
+            fn a_worktree_opens_with_a_tab_and_leaves_the_window_as_it_is() {
+                let (mut app, rx, _repo, worktrees, _config) = repo();
+                let before = app.focus();
+
+                ask(&mut app, None, worktree("feat/x"));
+                let made = done(answered(&mut app, &rx, "git makes the worktree"));
+
+                let workspace =
+                    app.projects[0].workspaces.iter().find(|w| Some(w.id) == made.ids.workspace).expect("it");
+                assert_eq!((workspace.worktree, workspace.tabs.len(), app.focus()), (true, 1, before));
+                assert!(workspace.path.starts_with(worktrees.path()), "{}", workspace.path.display());
+            }
+
+            #[test]
+            fn removing_it_deletes_the_checkout() {
+                let (mut app, rx, _repo, _worktrees, _config) = repo();
+                ask(&mut app, None, worktree("feat/x"));
+                let made = done(answered(&mut app, &rx, "git makes the worktree"));
+                let id = made.ids.workspace.expect("the workspace");
+                let path = app.projects[0].workspaces.iter().find(|w| w.id == id).map(|w| w.path.clone()).expect("it");
+
+                let close = wire::Close { item: Item::Workspace(id), remove_worktree: true, force: false };
+                ask(&mut app, None, Command::Close(close));
+                done(answered(&mut app, &rx, "git removes the worktree"));
+
+                pump_until(&mut app, &rx, "the workspace goes", |a| {
+                    a.projects[0].workspaces.iter().all(|w| w.id != id)
+                });
+                assert!(!path.exists());
+            }
+
+            #[test]
+            fn only_a_repository_root_has_worktrees() {
+                let (mut app, _rx, _dirs) = app_with(1);
+
+                let message = error(now(&mut app, None, worktree("feat/x")));
+
+                assert!(message.contains("is not the root of a git repository"), "{message}");
+            }
         }
     }
 

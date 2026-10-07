@@ -3,7 +3,7 @@ title: Command line
 description: The cornercase command, its subcommands and the messages it can stop with.
 ---
 
-cornercase has a deliberately small command line. Everything else happens in the app.
+`cornercase` opens the window. Its other commands manage the server, or drive it from scripts and coding agents.
 
 ## Commands
 
@@ -12,7 +12,10 @@ cornercase              # open the UI, starting the server if needed
 cornercase update       # install the latest release and restart the server
 cornercase kill-server  # stop the server and every shell in it
 cornercase --version    # print the version
+cornercase --help       # list every command; cornercase COMMAND --help explains one
 ```
+
+The commands that drive a running server, `status`, `open`, `new-workspace`, `new-tab`, `split`, `start`, `send`, `keys`, `read`, `wait`, `close`, `rename`, `focus`, `notify`, `todo` and `skill`, have their own page: [Scripts and agents](../../guides/scripts-and-agents/).
 
 ### `cornercase`
 
@@ -85,13 +88,13 @@ CORNERCASE_SOCKET=/tmp/cc-demo/server.sock cornercase kill-server
 
 | Message | Meaning |
 | --- | --- |
-| `cornercase is already running in this terminal; nesting it is not supported` | You ran `cornercase` inside one of its own panes. Use another terminal. |
+| `cornercase is already running in this terminal; nesting it is not supported` | You ran `cornercase` inside one of its own panes. Use another terminal. The [other commands](../../guides/scripts-and-agents/) work in a pane. |
 | `the running cornercase server comes from another build. Run cornercase kill-server (it closes all its terminals) and start cornercase again` | You updated or rebuilt cornercase while the old server kept running, and didn't [restart it](#a-server-from-another-build). |
 | `the running cornercase server is incompatible with this build. Run cornercase kill-server …` | Same cause, detected while talking to the server. |
 | `failed to start the cornercase server; see <log>` | The server didn't come up within a few seconds. The log next to the socket says why. |
 | `a cornercase server is already running on <socket>` | Printed by `cornercase server` when another server holds the socket's lock. |
-| ``unknown command `…`; use `cornercase`, `cornercase update`, `cornercase kill-server` or `cornercase --version` `` | Only those four forms exist. |
-| ``unknown option `…`; use `cornercase update [--check] [--yes]` `` | `update` only takes those options. |
 | ``this is a development build; `cornercase update` only updates released builds`` | You ran `update` from a build made with `cargo run`. Pull and build again instead. |
+| `error: unrecognized subcommand '…'` | There is no such command; `cornercase --help` lists them. |
+| `error: unexpected argument '…' found` | The command has no such option; `cornercase COMMAND --help` lists its options. |
 
-On any of these, `cornercase` exits with a non-zero status.
+On any of these, `cornercase` exits with a non-zero status: 2 for the last two, which are mistakes in how it was called, and 1 for the others.

@@ -44,6 +44,7 @@ enum ServerEvent {
 
 enum Step {
     Refresh,
+    Answer,
     Draw,
     Save,
     Event(ServerEvent),
@@ -288,10 +289,11 @@ impl Server {
 
     fn serve_with(&mut self, rx: &Receiver<ServerEvent>, run: impl Fn(&mut Self, Step) -> ControlFlow<()>) {
         loop {
-            for step in [Step::Refresh, Step::Draw, Step::Save] {
+            for step in [Step::Refresh, Step::Answer, Step::Draw, Step::Save] {
                 self.contain(step, &run);
             }
-            let first = match rx.recv_timeout(self.app.tick().unwrap_or(TICK)) {
+            let tick = self.app.tick(Instant::now()).map_or(TICK, |tick| tick.min(TICK));
+            let first = match rx.recv_timeout(tick) {
                 Ok(ev) => Some(ev),
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => return,
@@ -307,6 +309,7 @@ impl Server {
     fn step(&mut self, step: Step) -> ControlFlow<()> {
         match step {
             Step::Refresh => self.app.refresh(Instant::now()),
+            Step::Answer => self.answer(),
             Step::Draw => self.draw(),
             Step::Save => self.save(),
             Step::Event(ev) => return self.handle(ev),
@@ -327,9 +330,18 @@ impl Server {
                     client.reset_screen(area);
                 }
             }
+            self.app.answer_lost_requests();
             self.app.report_bug();
         }
         done
+    }
+
+    fn answer(&mut self) {
+        for (id, text) in self.app.take_answers() {
+            if let Some(client) = self.clients.iter().find(|c| c.id == id) {
+                client.send(ServerMessage::Response(text));
+            }
+        }
     }
 
     fn save(&mut self) {
@@ -344,8 +356,7 @@ impl Server {
     }
 
     fn draw(&mut self) {
-        let Some(area) = self.area else { return };
-        let Self { app, clients, .. } = self;
+        let Self { app, clients, area, .. } = self;
         for bytes in app.take_host_writes() {
             for client in clients.iter().filter(|c| c.screen.is_some()) {
                 client.send(ServerMessage::Frame(bytes.clone()));
@@ -356,6 +367,7 @@ impl Server {
                 client.send(ServerMessage::Frame(notification.encode(client.notify)));
             }
         }
+        let Some(area) = *area else { return };
         app.resize(area);
         for screen in clients.iter_mut().filter_map(|c| c.screen.as_mut()) {
             let _ = screen.draw(|f| app.draw(f));
@@ -371,6 +383,9 @@ impl Server {
             ServerEvent::Message(id, ClientMessage::Event(ev)) => self.input(id, ev),
             ServerEvent::Message(_, ClientMessage::Restart) => {
                 self.restart = Some(std::env::current_exe().unwrap_or_default());
+            }
+            ServerEvent::Message(id, ClientMessage::Request(text)) => {
+                self.app.request(id, &text, self.area, Instant::now());
             }
             ServerEvent::Incompatible(id) => self.reject(id, OTHER_BUILD),
             ServerEvent::Gone(id) => self.remove(id),
@@ -489,6 +504,7 @@ impl Server {
     }
 
     fn remove(&mut self, id: u64) {
+        self.app.forget(id);
         let before = self.clients.len();
         self.clients.retain(|c| c.id != id);
         if self.clients.len() != before {

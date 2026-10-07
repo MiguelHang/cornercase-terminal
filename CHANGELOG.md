@@ -2,6 +2,15 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.10.0
+
+- cornercase can now be driven from the command line, by your scripts, git hooks and coding agents. `cornercase status` lists your projects, workspaces, tabs and panes with their ids; `open`, `new-workspace` (with `--worktree` for a git worktree), `new-tab` and `split` make them, typing a command if you give one; `start` starts an agent in a new tab or its own worktree and hands it a prompt; `send` and `keys` type into a pane, `read` prints its screen or its last lines, and `wait` waits until an agent stops working or needs you, a program ends, a line shows up or the output stops. `close`, `rename`, `focus`, `notify` and `todo` do what their buttons do. `cornercase --help` explains each one, and `--json` prints the answers as JSON.
+- So an agent in one tab can coordinate others: start them in their own worktrees, wait until they finish or ask something, read what they wrote and send the next step. Teach your agents with the skill: `npx skills add usecornercase/cornercase-terminal --skill cornercase -g`, or `cornercase skill` to print it.
+- These commands never move what your window shows, unless you ask with `focus` or `--focus`. Run inside a pane, a command acts on that pane: every shell now has `CORNERCASE_PANE` set to its pane's id.
+- `cornercase --help` and `cornercase COMMAND --help` now describe every command, and a mistake in how a command is called exits with status 2.
+- A server started before this update answers these commands with "too old": restart it once (cornercase offers to when you open it).
+- Pasting a long text into a pane whose program isn't reading it, such as one waiting in `sleep`, no longer freezes cornercase until the program reads.
+
 ## 0.9.2
 
 - In the compact layout (below 90 columns, as on a phone over SSH), every group, project, workspace and tab row now shows its `×` all the time, dimmed, instead of only on hover, which touch screens don't have.

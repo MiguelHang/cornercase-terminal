@@ -13,7 +13,11 @@ Not at the moment, on purpose. Inside cornercase's own dialogs, `Enter` confirms
 
 ### Does it replace tmux?
 
-It overlaps: both keep shells running after you detach and split them into panes. cornercase is organised around **projects, workspaces and git worktrees**, can start **coding agents** on issues, and is driven by the mouse. If you rely on tmux's scripting or scrollback, keep using it; you can even run cornercase inside a tmux window.
+It overlaps: both keep shells running after you detach and split them into panes, and both can be driven from scripts ([Scripts and agents](../../guides/scripts-and-agents/)). cornercase is organised around **projects, workspaces and git worktrees**, can start **coding agents** on issues, and is driven by the mouse. If you rely on tmux's scrollback or its many commands, keep using it; you can even run cornercase inside a tmux window.
+
+### Can an agent drive cornercase?
+
+Yes. The `cornercase` command opens tabs, types into panes, starts agents in their own worktrees, waits until they finish or need you, and reads what they wrote, so an agent in one tab can coordinate others. Install the [skill](../../guides/scripts-and-agents/#teach-your-agents) so your agents know about it.
 
 ### Is it fast?
 
