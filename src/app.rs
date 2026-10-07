@@ -1118,6 +1118,18 @@ impl App {
         if self.projects[p].closing && !self.projects[p].has_terms() {
             self.remove_project(p);
         }
+        if self.closing_gone() {
+            self.overlay = None;
+        }
+    }
+
+    fn closing_gone(&self) -> bool {
+        match self.overlay {
+            Some(Overlay::CloseProject { project }) => self.project_index(project).is_none(),
+            Some(Overlay::CloseWorkspace { project, workspace }) => self.workspace_index(project, workspace).is_none(),
+            Some(Overlay::CloseTab { project, workspace, tab }) => self.tab_index(project, workspace, tab).is_none(),
+            _ => false,
+        }
     }
 
     fn reap(&mut self) {
@@ -6570,6 +6582,18 @@ rm -f "$1/sessions/$$.json"
             confirm(&mut app);
 
             pump_until(&mut app, &rx, "the tab closes", |a| a.projects[0].workspaces[1].tabs.is_empty());
+        }
+
+        #[test]
+        fn the_question_goes_when_its_tab_exits_by_itself() {
+            let (mut app, rx, _dirs) = with_workspace(false);
+            click_close(&mut app, WorkspaceRow::Tab(1, 0));
+            let asked = confirmation(&app).is_some();
+
+            app.close_tab(0, 1, 0);
+
+            pump_until(&mut app, &rx, "the question goes", |a| a.overlay.is_none());
+            assert!(asked);
         }
 
         #[test]
