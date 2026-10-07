@@ -43,6 +43,15 @@ impl Status {
     pub fn needs_you(self) -> bool {
         matches!(self, Self::Done | Self::Waiting)
     }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Working => "working",
+            Self::Done => "done",
+            Self::Waiting => "waiting",
+        }
+    }
 }
 
 pub fn attention(statuses: impl IntoIterator<Item = Option<Status>>) -> Option<Status> {
@@ -56,6 +65,8 @@ pub struct Pane {
     unseen: bool,
     since: Option<Instant>,
     notified: bool,
+    worked: Option<Instant>,
+    moved: Option<Instant>,
 }
 
 impl Pane {
@@ -68,6 +79,12 @@ impl Pane {
     pub fn update(&mut self, activity: Option<Activity>, seen: bool, now: Instant) -> Option<Status> {
         let before = self.status();
         let finished = matches!(self.activity, Some(Activity::Working | Activity::Waiting));
+        if activity == Some(Activity::Working) {
+            self.worked = Some(now);
+        }
+        if activity.is_some() && self.activity.is_some() && activity != self.activity {
+            self.moved = Some(now);
+        }
         self.unseen = activity == Some(Activity::Idle) && !seen && (self.unseen || finished);
         self.activity = activity;
         let status = self.status();
@@ -87,6 +104,14 @@ impl Pane {
     pub fn see(&mut self) {
         self.unseen = false;
         self.notified = true;
+    }
+
+    pub fn agent(&self) -> Option<&str> {
+        self.agent.as_deref()
+    }
+
+    pub fn reacted(&self, since: Instant) -> bool {
+        [self.worked, self.moved].into_iter().flatten().any(|at| at >= since)
     }
 
     pub fn status(&self) -> Option<Status> {
@@ -312,6 +337,30 @@ mod tests {
         #[case::exited(&[(Some(Activity::Working), false), (Some(Activity::Idle), false), (None, false)], None)]
         fn follows_the_agent(#[case] steps: &[(Option<Activity>, bool)], #[case] expected: Option<Status>) {
             assert_eq!(after(steps), expected);
+        }
+
+        fn reacted(first: Option<Activity>, between: Option<Activity>, last: Option<Activity>) -> bool {
+            let mut pane = Pane::default();
+            let t0 = Instant::now();
+            pane.update(first, false, t0);
+            let sent = t0 + Duration::from_millis(500);
+            pane.update(between, false, sent + Duration::from_millis(500));
+            pane.update(last, false, sent + Duration::from_secs(1));
+            pane.reacted(sent)
+        }
+
+        #[rstest]
+        #[case::it_worked(Some(Activity::Idle), Some(Activity::Idle), Some(Activity::Working), true)]
+        #[case::its_question_was_answered(Some(Activity::Waiting), Some(Activity::Waiting), Some(Activity::Idle), true)]
+        #[case::it_stayed_idle(Some(Activity::Idle), Some(Activity::Idle), Some(Activity::Idle), false)]
+        #[case::it_only_lost_and_found_its_agent(Some(Activity::Idle), None, Some(Activity::Idle), false)]
+        fn reacting_is_working_or_changing_after_the_moment(
+            #[case] first: Option<Activity>,
+            #[case] between: Option<Activity>,
+            #[case] last: Option<Activity>,
+            #[case] expected: bool,
+        ) {
+            assert_eq!(reacted(first, between, last), expected);
         }
 
         #[test]

@@ -47,7 +47,7 @@ When `CORNERCASE_SOCKET` is set, everything moves next to that socket, so a sepa
 
 | Variable | Used for |
 | --- | --- |
-| `CORNERCASE_SOCKET` | Use another socket, which means another, independent server; its files live next to it. Keep the path short: Unix sockets allow about 100 bytes. |
+| `CORNERCASE_SOCKET` | Use another socket, which means another, independent server; its files live next to it. Keep the path short: Unix sockets allow about 100 bytes. cornercase doesn't add it to panes: a pane has it only when the server was started with it. |
 | `SHELL` | The shell started in every pane. Without it, `/bin/sh`. |
 | `SHORTCUT_API_TOKEN` | Shortcut token. Takes precedence over a saved one. |
 | `LINEAR_API_KEY` | Linear API key. Takes precedence over a saved one. |
@@ -82,7 +82,9 @@ To work out the size of Claude's context window, cornercase reads these from the
 | Variable | Value | Why |
 | --- | --- | --- |
 | `TERM` | `xterm-256color` | Tells programs what the emulator supports. |
-| `CORNERCASE` | `1` | Lets scripts know they run inside cornercase, and stops `cornercase` from starting inside itself. |
+| `CORNERCASE` | `1` | Lets scripts know they run inside cornercase, and stops `cornercase` from opening its window inside itself. |
+| `CORNERCASE_PANE` | The pane's id | Tells the [commands for scripts and agents](../../guides/scripts-and-agents/#ids-and-where-commands-act) which pane they run in. |
+| `CORNERCASE_SERVER` | A token of the server | Lets a server tell its own panes from another server's, which have the same ids. |
 
 ### Removed by cornercase in every pane
 

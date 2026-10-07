@@ -1,10 +1,11 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::Sender;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::thread;
+use std::time::Instant;
 
-use parking_lot::Mutex;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::activity;
@@ -12,6 +13,7 @@ use crate::agents;
 use crate::app::AppEvent;
 use crate::config::Config;
 use crate::context;
+use crate::control;
 use crate::emulator::Emulator;
 use crate::error::{Error, Result};
 use crate::host_theme::HostTheme;
@@ -25,8 +27,16 @@ const INTERPRETERS: [&str; 6] = ["node", "bun", "deno", "python", "python3", "ru
 const NODE_MAIN_THREAD: &str = "node-MainThread";
 const SCRIPT_EXTENSIONS: [&str; 9] = ["js", "mjs", "cjs", "ts", "mts", "cts", "py", "rb", "sh"];
 const NOT_A_SCRIPT: [&str; 6] = ["-e", "--eval", "-p", "--print", "-c", "-m"];
+const PASTE_START: &str = "\x1b[200~";
+const PASTE_END: &str = "\x1b[201~";
 
-type Writer = Arc<Mutex<Box<dyn Write + Send>>>;
+pub const MAX_QUEUED: usize = 16 * 1024 * 1024;
+
+#[derive(Clone)]
+struct Writer {
+    tx: Sender<Vec<u8>>,
+    queued: Arc<AtomicUsize>,
+}
 
 pub struct Term {
     pub id: u64,
@@ -34,6 +44,9 @@ pub struct Term {
     pub agent: activity::Pane,
     pub context: context::Pane,
     pub memory: memory::Pane,
+    pub output_at: Instant,
+    pub input_at: Option<Instant>,
+    pub submitted: Option<Instant>,
     master: Box<dyn MasterPty + Send>,
     writer: Writer,
     child: Box<dyn Child + Send + Sync>,
@@ -64,6 +77,8 @@ impl Term {
         cmd.args(args);
         cmd.env("TERM", "xterm-256color");
         cmd.env(protocol::NESTED_ENV, "1");
+        cmd.env(control::PANE_ENV, id.to_string());
+        cmd.env(control::SERVER_ENV, control::server_token());
         for key in activity::CLAUDE_SESSION_ENV {
             cmd.env_remove(key);
         }
@@ -81,10 +96,11 @@ impl Term {
         drop(pair.slave);
 
         let reader = pair.master.try_clone_reader().map_err(|e| Error::AttachPty(e.into()))?;
-        let writer: Writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| Error::AttachPty(e.into()))?));
-        let replies = Arc::clone(&writer);
-        let emulator = Emulator::new(rows, cols, SCROLLBACK, theme, Box::new(move |bytes| write_to(&replies, bytes)))
-            .map_err(|e| Error::Emulator(e.into()))?;
+        let writer = spawn_writer(pair.master.take_writer().map_err(|e| Error::AttachPty(e.into()))?);
+        let replies = writer.clone();
+        let emulator =
+            Emulator::new(rows, cols, SCROLLBACK, theme, Box::new(move |bytes| _ = write_to(&replies, bytes)))
+                .map_err(|e| Error::Emulator(e.into()))?;
         spawn_reader(id, reader, tx);
 
         Ok(Self {
@@ -93,6 +109,9 @@ impl Term {
             agent: activity::Pane::default(),
             context: context::Pane::default(),
             memory: memory::Pane::default(),
+            output_at: Instant::now(),
+            input_at: None,
+            submitted: None,
             master: pair.master,
             writer,
             child,
@@ -101,11 +120,21 @@ impl Term {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
+        self.output_at = Instant::now();
         self.emulator.feed(bytes);
     }
 
-    pub fn write(&mut self, bytes: &[u8]) {
-        write_to(&self.writer, bytes);
+    pub fn write(&mut self, bytes: &[u8]) -> bool {
+        self.input_at = Some(Instant::now());
+        write_to(&self.writer, bytes)
+    }
+
+    pub fn paste(&mut self, text: &str) -> bool {
+        if self.emulator.bracketed_paste() {
+            self.write(bracketed(text).as_bytes())
+        } else {
+            self.write(text.as_bytes())
+        }
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
@@ -167,6 +196,10 @@ impl Drop for Term {
     }
 }
 
+pub fn bracketed(text: &str) -> String {
+    format!("{PASTE_START}{}{PASTE_END}", text.replace(PASTE_END, ""))
+}
+
 pub fn program(config: &Config, name: &str, argv: &[String]) -> String {
     let name = if name == NODE_MAIN_THREAD { "node" } else { name };
     let interpreter = INTERPRETERS.contains(&name);
@@ -192,11 +225,27 @@ fn script(argv: &[String]) -> Option<String> {
     path.file_stem().and_then(|s| s.to_str()).filter(|s| !s.is_empty()).map(str::to_string)
 }
 
-fn write_to(writer: &Writer, bytes: &[u8]) {
-    let mut writer = writer.lock();
-    if writer.write_all(bytes).is_ok() {
-        let _ = writer.flush();
+fn write_to(writer: &Writer, bytes: &[u8]) -> bool {
+    if writer.queued.load(Ordering::Relaxed) >= MAX_QUEUED {
+        return false;
     }
+    writer.queued.fetch_add(bytes.len(), Ordering::Relaxed);
+    writer.tx.send(bytes.to_vec()).is_ok()
+}
+
+fn spawn_writer(mut pty: Box<dyn Write + Send>) -> Writer {
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let queued = Arc::new(AtomicUsize::new(0));
+    let written = Arc::clone(&queued);
+    thread::spawn(move || {
+        for bytes in rx {
+            if pty.write_all(&bytes).and_then(|()| pty.flush()).is_err() {
+                return;
+            }
+            written.fetch_sub(bytes.len(), Ordering::Relaxed);
+        }
+    });
+    Writer { tx, queued }
 }
 
 fn spawn_reader(id: u64, mut reader: Box<dyn Read + Send>, tx: Sender<AppEvent>) {
@@ -320,6 +369,52 @@ mod tests {
             term.write(b"echo x\r");
 
             assert_matches!(rx.recv_timeout(RECV_TIMEOUT), Ok(AppEvent::Output(1, _)));
+        }
+    }
+
+    mod writing {
+        use super::*;
+
+        struct Stuck(Receiver<()>);
+
+        impl Write for Stuck {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                let _ = self.0.recv();
+                Err(std::io::Error::other("released"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn a_terminal_that_stops_taking_input_gets_no_more_than_its_queue() {
+            let (release, stuck) = mpsc::channel();
+            let writer = spawn_writer(Box::new(Stuck(stuck)));
+
+            let taken = [write_to(&writer, &vec![b'x'; MAX_QUEUED]), write_to(&writer, b"y")];
+            drop(release);
+
+            assert_eq!(taken, [true, false]);
+        }
+
+        #[test]
+        fn a_paste_cannot_end_itself_early() {
+            assert_eq!(bracketed("ls\x1b[201~\rrm -rf x"), "\x1b[200~ls\rrm -rf x\x1b[201~");
+        }
+
+        #[test]
+        fn a_program_that_does_not_read_never_blocks_the_writer() {
+            let (mut term, _rx) = spawn_sh();
+            term.write(b"stty -echo; sleep 2; cat > /dev/null\r");
+            wait_until("sleep runs", || term.program(&Config::default()).as_deref() == Some("sleep"));
+            let lines = format!("{}\n", "x".repeat(63)).repeat(16 * 1024);
+
+            let started = Instant::now();
+            term.write(lines.as_bytes());
+
+            assert!(started.elapsed() < Duration::from_millis(500), "the write took {:?}", started.elapsed());
         }
     }
 
