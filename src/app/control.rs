@@ -44,6 +44,7 @@ type Handled = Result<Option<Value>, String>;
 #[derive(Default)]
 pub(super) struct Requests {
     pending: Vec<Pending>,
+    open: Vec<u64>,
     answers: Vec<(u64, String)>,
     launched: Vec<(u64, bool)>,
     next: u64,
@@ -218,6 +219,7 @@ fn parse(text: &str) -> Result<Request, String> {
 
 impl App {
     pub fn request(&mut self, client: u64, text: &str, area: Option<Rect>, now: Instant) {
+        self.requests.open.push(client);
         match parse(text).and_then(|request| self.handle_request(client, request, area, now)) {
             Ok(Some(value)) => self.answer(Some(client), Ok(value)),
             Ok(None) => {}
@@ -229,7 +231,17 @@ impl App {
         std::mem::take(&mut self.requests.answers)
     }
 
+    pub fn answer_lost_requests(&mut self) {
+        let Requests { pending, open, .. } = &self.requests;
+        let lost: Vec<u64> =
+            open.iter().copied().filter(|client| pending.iter().all(|p| p.client != Some(*client))).collect();
+        for client in lost {
+            self.answer(Some(client), Err(error::Error::Bug.to_string()));
+        }
+    }
+
     pub fn forget(&mut self, client: u64) {
+        self.requests.open.retain(|open| *open != client);
         for pending in self.requests.pending.iter_mut().filter(|p| p.client == Some(client)) {
             pending.client = None;
         }
@@ -238,6 +250,7 @@ impl App {
 
     fn answer(&mut self, client: Option<u64>, reply: Reply) {
         let Some(client) = client else { return };
+        self.requests.open.retain(|open| *open != client);
         let response = match reply {
             Ok(value) => Response::Ok(value),
             Err(message) => Response::Error(message),
@@ -1071,5 +1084,34 @@ impl App {
             }
         };
         Ok(Some(json(&done)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    use super::*;
+    use crate::host_theme::HostTheme;
+    use crate::test_util::TempDir;
+
+    mod answer_lost_requests {
+        use super::*;
+
+        #[test]
+        fn answers_the_bug_to_each_request_with_nothing_left_pending() {
+            let dir = TempDir::new();
+            let (tx, _rx) = mpsc::channel();
+            let mut app = App::new("/bin/sh".into(), HostTheme::default(), dir.path().join("config.json"), tx);
+            let removing =
+                Pending { client: Some(1), key: 1, timeout: None, done: Done::default(), stage: Stage::Removing };
+            app.requests.pending.push(removing);
+            app.requests.open.extend([1, 2]);
+
+            app.answer_lost_requests();
+
+            let bug = serde_json::to_string(&Response::Error(error::Error::Bug.to_string())).expect("json");
+            assert_eq!(app.take_answers(), [(2, bug)]);
+        }
     }
 }

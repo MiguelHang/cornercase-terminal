@@ -330,6 +330,7 @@ impl Server {
                     client.reset_screen(area);
                 }
             }
+            self.app.answer_lost_requests();
             self.app.report_bug();
         }
         done

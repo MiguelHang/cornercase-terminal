@@ -119,7 +119,7 @@ Sessions are restored only by a **new** server, and projects or workspaces whose
 
 ### "cornercase hit a bug, see server.log"
 
-Something went wrong inside cornercase itself. It dropped only what it was doing at that moment and carried on: your shells and agents keep running. A dialog or menu you had open may have closed. A dialog that was waiting for something in the background, such as creating a worktree, shows the message in red instead; close it or try again.
+Something went wrong inside cornercase itself. It dropped only what it was doing at that moment and carried on: your shells and agents keep running. A dialog or menu you had open may have closed. A dialog that was waiting for something in the background, such as creating a worktree, shows the message in red instead; close it or try again. A [command for scripts and agents](../../guides/scripts-and-agents/) that was running, such as `cornercase wait`, fails with the same message.
 
 `server.log` says where it happened, in a line starting with `cornercase server: thread 'main' panicked at` (or another thread's name), followed by a backtrace. Please [open an issue](https://github.com/usecornercase/cornercase-terminal/issues) with those lines and what you were doing. A bug that keeps happening is written in full only the first time, then without the backtrace and ever more rarely.
 
