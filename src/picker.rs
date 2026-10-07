@@ -80,7 +80,7 @@ impl Picker {
                 Some((rank, f))
             })
             .collect();
-        matches.sort_by_key(|(rank, _)| *rank);
+        matches.sort_by_key(|(rank, item)| (item.workspace, *rank));
         let parent = self.parent.as_ref().filter(|_| self.filter.is_empty());
         parent.into_iter().chain(matches.into_iter().map(|(_, f)| f)).collect()
     }
@@ -347,6 +347,17 @@ mod tests {
             picker.enter(2);
 
             assert_eq!(picker.dir(), tmp.path());
+        }
+
+        #[test]
+        fn filtering_keeps_them_after_the_folders() {
+            let tmp = tree(&["data"]);
+            std::fs::write(tmp.path().join("a.code-workspace"), "{}").expect("write file");
+            let mut picker = open(tmp.path());
+
+            picker.push('a');
+
+            assert_eq!(names(&picker), ["data", "a.code-workspace"]);
         }
 
         #[test]

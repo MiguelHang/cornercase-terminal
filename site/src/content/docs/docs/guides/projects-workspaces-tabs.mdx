@@ -41,7 +41,7 @@ Click **`+ new`** at the end of the list, then **open project**. A folder picker
 | Open the folder you are in | Click **open**, or press `Enter` when nothing is selected. |
 | Cancel | Click **cancel** or press `Esc`. |
 
-Folders that are git repositories show their current branch on the right. Opening a folder that is already a project switches to it instead of opening it twice. VS Code workspace files (`.code-workspace`) are listed after the folders, tagged `vs code`; choosing one [imports it as a group](#import-a-vs-code-workspace).
+Folders that are git repositories show their current branch on the right. Opening a folder that is already a project switches to it instead of opening it twice. VS Code workspace files (`.code-workspace`) are listed after the folders, tagged `vs code`, also while you filter; choosing one [imports it as a group](#import-a-vs-code-workspace).
 
 ## Groups
 
@@ -71,7 +71,7 @@ A new group goes at the end of the list; drag its header to move it. There is a 
 Coming from VS Code with one workspace per area of work? Open its `.code-workspace` file from the folder picker (**`+ new`**, then **open project**) and cornercase turns it into a group:
 
 - The group is named after the file: `work.code-workspace` becomes `work`. If a group with that name already exists, the folders go into it, so importing the file again brings in folders added since.
-- Each folder of the workspace opens as a project in the group. A folder with a `name` in the file gets that name. Relative paths are read from where the file is, as VS Code does.
+- Each folder of the workspace opens as a project in the group. A folder with a `name` in the file gets that name, unless you already renamed that project in cornercase. Relative paths are read from where the file is, as VS Code does.
 - A folder that is already open moves into the group instead of opening twice. Folders that don't exist, and remote ones, are skipped; a message says how many projects were imported and how many folders were not found.
 
 The import happens once: after that the group is cornercase's, and the `.code-workspace` file is never changed. Comments and trailing commas in the file are fine.

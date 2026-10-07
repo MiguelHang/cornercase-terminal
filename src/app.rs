@@ -2599,11 +2599,9 @@ impl App {
     }
 
     fn open_into(&mut self, dir: PathBuf, group: Option<u64>, name: Option<String>, area: Rect) -> Result<()> {
-        let before = self.projects.len();
         self.open_project(dir, area)?;
-        let added = self.projects.len() > before;
         let Some(project) = self.projects.get_mut(self.active) else { return Ok(()) };
-        if added && name.is_some() {
+        if project.name.is_none() {
             project.name = name;
         }
         if let Some(g) = group {
@@ -7204,6 +7202,21 @@ mod tests {
             import(&mut s, "w.code-workspace", r#"{"folders": [{"path": "api", "name": "Backend"}]}"#);
 
             assert_eq!(s.app.project().and_then(|p| p.name.as_deref()), Some("Backend"));
+        }
+
+        #[test]
+        fn an_open_project_gets_the_folder_name_unless_it_has_its_own() {
+            let mut s = open_picker();
+            s.app.projects[0].name = Some("mine".into());
+            let api = item_pos(&s.app, "api");
+            click(&mut s.app, api);
+            click(&mut s.app, button(0));
+
+            let text = r#"{"folders": [{"path": "active", "name": "Active"}, {"path": "api", "name": "Backend"}]}"#;
+            import(&mut s, "w.code-workspace", text);
+
+            let names: Vec<Option<&str>> = s.app.projects.iter().map(|p| p.name.as_deref()).collect();
+            assert_eq!(names, [Some("mine"), Some("Backend")]);
         }
 
         #[test]
