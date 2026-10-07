@@ -13,7 +13,7 @@ cargo run -- kill-server                    # stop the server and every shell in
 cargo test --locked                         # unit + snapshot + e2e tests
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo fmt
-cargo-machete                               # unused dependencies (not `cargo machete`, which errors)
+cargo-machete                               # unused dependencies
 npx -y jscpd@4.3.0                          # copy-paste detector, reads .jscpd.json
 ```
 
