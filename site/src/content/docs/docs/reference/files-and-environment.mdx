@@ -17,7 +17,7 @@ import { Aside } from '@astrojs/starlight/components';
 | `todos.json` | Your [TODO list](../../guides/todo/). | Next to `session.json` |
 | `server.sock` | The Unix socket clients use to reach the server. cornercase creates its folder private to you (mode `0700`), and refuses an existing folder that another user owns or can write to, or that is a symbolic link. | `$XDG_RUNTIME_DIR/cornercase/`, or `$TMPDIR/cornercase-<uid>/` |
 | `server.lock` | Makes sure only one server runs per socket. | Next to the socket |
-| `server.log` | What the server prints: errors, failed agent launches, files a worktree couldn't copy. | Next to the socket |
+| `server.log` | What the server prints: errors, failed agent launches, files a worktree couldn't copy, and the bugs it hit, with where they happened. | Next to the socket |
 
 The folders follow the XDG base directory variables: `config.json` goes in `$XDG_CONFIG_HOME/cornercase/` when it is set, and `session.json`, `issues.json` and `todos.json` in `$XDG_STATE_HOME/cornercase/`. When `$XDG_RUNTIME_DIR` isn't set, the socket goes in a `cornercase-<your user id>` folder in the system's temporary directory (`$TMPDIR`, usually `/tmp`).
 

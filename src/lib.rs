@@ -20,6 +20,7 @@ pub mod markdown;
 pub mod memory;
 pub mod mouse;
 pub mod notify;
+pub mod panics;
 pub mod picker;
 pub mod process;
 pub mod project;

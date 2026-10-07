@@ -23,6 +23,7 @@ use crate::project::{Project, Tab, Workspace};
 use crate::search::Goto;
 use crate::split::{self, Dir};
 use crate::term::{self, Term};
+use crate::ui;
 use crate::update;
 
 const STARTS_WITHIN: Duration = Duration::from_secs(10);
@@ -1045,7 +1046,7 @@ impl App {
             return Err("the notification needs a text".into());
         }
         self.notifications.extend(Notification::new(&message, &self.config.desktop_notifications));
-        self.toast = Some(Toast::new(message, None));
+        self.toast = Some(Toast::new(message, ui::ToastIcon::Check));
         Ok(Some(json(&Done::default())))
     }
 

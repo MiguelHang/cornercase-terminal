@@ -117,6 +117,14 @@ Sessions are restored only by a **new** server, and projects or workspaces whose
 
 ## Using cornercase
 
+### "cornercase hit a bug, see server.log"
+
+Something went wrong inside cornercase itself. It dropped only what it was doing at that moment and carried on: your shells and agents keep running. A dialog or menu you had open may have closed. A dialog that was waiting for something in the background, such as creating a worktree, shows the message in red instead; close it or try again.
+
+`server.log` says where it happened, in a line starting with `cornercase server: thread 'main' panicked at` (or another thread's name), followed by a backtrace. Please [open an issue](https://github.com/usecornercase/cornercase-terminal/issues) with those lines and what you were doing. A bug that keeps happening is written in full only the first time, then without the backtrace and ever more rarely.
+
+If the message keeps coming back, or the screen stays blank, the bug happens every time cornercase checks or draws something. Your shells still run, so finish what you're doing, then restart the server with `cornercase kill-server` (it closes them) and start cornercase again, or update once a fix is out.
+
 ### Copying doesn't reach my clipboard
 
 cornercase copies with the OSC 52 escape sequence, which your terminal has to allow:

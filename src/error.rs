@@ -69,6 +69,8 @@ pub enum Error {
     OldServer(&'static str),
     #[error("the cornercase server stopped before answering")]
     ServerGone,
+    #[error("cornercase hit a bug, see server.log")]
+    Bug,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
