@@ -154,12 +154,12 @@ impl App {
     }
 
     fn removed_todos(&mut self, message: String, removed: Removed) {
-        self.toast = Some(Toast { undo: Some(removed), ..Toast::new(message, None) });
+        self.toast = Some(Toast { undo: Some(removed), ..Toast::new(message, ui::ToastIcon::Check) });
     }
 
     pub(super) fn toast_mouse(&mut self, ev: MouseEvent, pos: Position, area: Rect) -> bool {
         let Some(toast) = self.toast.as_ref().filter(|t| t.undo.is_some()) else { return false };
-        let view = ui::Toast { message: &toast.message, status: toast.status, undo: true };
+        let view = ui::Toast { message: &toast.message, icon: toast.icon, undo: true };
         if ev.kind != MouseEventKind::Down(MouseButton::Left) || !ui::toast_undo(area, view).contains(pos) {
             return false;
         }

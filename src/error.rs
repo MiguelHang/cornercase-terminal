@@ -58,6 +58,8 @@ pub enum Error {
     Usage(String),
     #[error("`{0}` already exists")]
     PathExists(PathBuf),
+    #[error("cornercase hit a bug, see server.log")]
+    Bug,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
