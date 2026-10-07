@@ -2,6 +2,12 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.9.1
+
+- Most bugs in cornercase no longer take your shells and agents down with them. Until now, when the server hit a bug (a panic), it stopped, and every terminal and coding agent running in it went too. Now cornercase drops only what it was doing at that moment (a dialog or menu you had open may close), says `cornercase hit a bug, see server.log` for a few seconds and carries on.
+- `server.log` gets where the bug happened, with a backtrace. Please add it when you [open an issue](https://github.com/usecornercase/cornercase-terminal/issues).
+- A dialog waiting for something running in the background (creating or removing a worktree, installing an update, checking a token, starting an issue) no longer stays busy forever when that hits a bug: it shows the error, and you can close it or try again.
+
 ## 0.9.0
 
 - cornercase now starts with one column on the left, the projects on top and the active project's workspaces under them, so your panes get the width the workspaces column used to take. Drag the line between the two lists to share the height. If you prefer the three columns, pick **settings → TUI → sidebar → side_by_side**; a `config.json` that already names `side_by_side` keeps it.
