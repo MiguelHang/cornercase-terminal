@@ -2,6 +2,11 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.11.13
+
+- The server now keeps a log of what it does, so when something goes wrong there is a trail to follow: windows attaching, commands from scripts and their answers, tabs and panes opening and closing, each step of starting an agent, every change of an agent's status, dialogs opening, git runs and issue lists that failed or took long, and every error. It never holds what you type, paste or see in a pane, nor tokens. `cornercase logs` prints the end of it (`--follow` keeps printing, `--path` says where it is).
+- The log moved to `~/.local/state/cornercase/server.log`, next to your session, so it survives a logout or reboot. Past 8 MiB it moves to `server.log.1` and starts over. Restart the server with `CORNERCASE_LOG=debug` to log every click and key name it handled too.
+
 ## 0.11.12
 
 - Every project, group, workspace and tab row has a `⋯` button next to its `×`, shown while you hover the row (always, in the compact layout). It opens the same menu as a right-click: rename, move to group, icon and colour, delete group.

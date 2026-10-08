@@ -1,6 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, IsTerminal, Write, stdin, stdout};
 use std::net::Shutdown;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -23,6 +24,7 @@ use signal_hook::iterator::Signals;
 use crate::control::{self, Request, Response};
 use crate::error::{Error, Result};
 use crate::host_theme::{HostTheme, ThemeProbe};
+use crate::log;
 use crate::notify;
 use crate::protocol::{self, ClientMessage, Hello, ServerMessage};
 use crate::restart;
@@ -276,7 +278,7 @@ fn connect_or_start(path: &Path) -> Result<UnixStream> {
     if let Ok(stream) = UnixStream::connect(path) {
         return Ok(stream);
     }
-    let log = protocol::log_path(path);
+    let log = log::path();
     let start_error = |e| Error::ServerStart { log: log.clone(), source: Some(e) };
     let deadline = Instant::now() + SERVER_START_TIMEOUT;
     let mut server = start_server(&log).map_err(start_error)?;
@@ -297,7 +299,11 @@ fn connect_or_start(path: &Path) -> Result<UnixStream> {
 }
 
 fn start_server(log: &Path) -> io::Result<Child> {
-    let log = OpenOptions::new().create(true).append(true).open(log)?;
+    if let Some(dir) = log.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let log = OpenOptions::new().create(true).append(true).mode(log::PRIVATE).open(log)?;
+    log.set_permissions(fs::Permissions::from_mode(log::PRIVATE))?;
     Command::new(std::env::current_exe()?)
         .arg("server")
         .stdin(Stdio::null())
@@ -329,7 +335,7 @@ fn attach(stream: UnixStream, terminal: &DefaultTerminal) -> Result<Ending> {
     let size = terminal.size()?;
     let mut writer = stream.try_clone()?;
     let (version, build) = (protocol::VERSION, protocol::build_id());
-    let hello = Hello { version, build, cols: size.width, rows: size.height, theme, notify };
+    let hello = Hello { version, build, cols: size.width, rows: size.height, theme, notify, terminal: name };
     protocol::send(&mut writer, &ClientMessage::Hello(Box::new(hello)))?;
     spawn_input_thread(writer);
     spawn_signal_thread(stream.try_clone()?)?;
