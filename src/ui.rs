@@ -2250,6 +2250,7 @@ pub struct TabEntry {
     pub name: String,
     pub status: Option<Status>,
     pub details: Details,
+    pub others: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2273,7 +2274,7 @@ impl From<&str> for TabEntry {
 
 impl From<String> for TabEntry {
     fn from(name: String) -> Self {
-        Self { name, status: None, details: Details::default() }
+        Self { name, status: None, details: Details::default(), others: 0 }
     }
 }
 
@@ -3738,11 +3739,21 @@ fn draw_tab_band(f: &mut Frame, view: &View, band: Band, tab: &TabEntry, active:
     let icon_width = if icon.is_some() { 2 } else { 0 };
     let indent = band.lead_width() + icon_width;
     let max = band.room().saturating_sub(icon_width);
+    let others = (tab.others > 0).then(|| Span::styled(format!("+{}", tab.others), Style::default().fg(view.muted)));
+    let marks = Tags::fit(others.into_iter().collect(), max);
+    let name = if marks.is_empty() {
+        truncate_right(&tab.name, max)
+    } else {
+        let room = max.saturating_sub(marks.reserved());
+        truncate_right(&tab.name, room).chars().take(room).collect()
+    };
+    let used = name.chars().count();
     let mut line = band.lead;
     if let Some(icon) = icon {
         line.extend([icon, Span::raw(" ")]);
     }
-    line.push(Span::styled(truncate_right(&tab.name, max), style));
+    line.push(Span::styled(name, style));
+    marks.push_onto(&mut line, used, max);
     draw_band(f, band.r, Line::from(line), band.bg);
     if tab.details.lines() > 1 {
         let buttons = row_menu_button(band.r, band.pitch).union(row_close_button(band.r, band.pitch));
@@ -5140,7 +5151,7 @@ mod tests {
                 ],
             };
             let details = Details { model: Some("Opus 5.5".into()), percent: Some(23), memory: None };
-            let claude = TabEntry { name: "claude".into(), status: Some(Status::Working), details };
+            let claude = TabEntry { status: Some(Status::Working), details, ..TabEntry::from("claude") };
             let finished = TabEntry { status: Some(Status::Done), ..TabEntry::from("") };
             let workspaces = vec![
                 Vec::new(),
@@ -6191,6 +6202,47 @@ mod tests {
         fn a_tab_without_an_agent_has_no_icon() {
             let v = with_agents();
             assert_eq!(row_text(&render(&v), tab_row(&v, 0, 2)).trim_end(), "  ├ nvim");
+        }
+
+        #[test]
+        fn a_split_tab_shows_how_many_other_panes_it_has_at_the_end_of_its_row() {
+            let mut v = with_agents();
+            v.workspaces[0].tabs[2].others = 2;
+            let r = tab_row(&v, 0, 2);
+            let t = render(&v);
+            let end = r.right() - CLOSE_BUTTON_WIDTH - MENU_BUTTON_WIDTH - 2;
+            let count: String = (end - 1..=end).map(|x| t.backend().buffer()[(x, r.y)].symbol().to_string()).collect();
+            let text = row_text(&t, r).trim_end().to_string();
+            assert_eq!(
+                (text.starts_with("  ├ nvim "), count.as_str(), t.backend().buffer()[(end, r.y)].fg),
+                (true, "+2", Color::DarkGray),
+                "{text}"
+            );
+        }
+
+        #[test]
+        fn a_long_name_is_cut_before_the_count_is() {
+            let mut v = with_agents();
+            v.workspaces[0].tabs[1] = TabEntry { others: 1, ..tab("a-very-long-program-name", Some(Status::Working)) };
+            let text = row_text(&render(&v), tab_row(&v, 0, 1)).trim_end().to_string();
+            assert!(text.contains('…') && text.ends_with(" +1"), "{text}");
+        }
+
+        #[test]
+        fn a_row_too_narrow_for_the_name_still_shows_the_count() {
+            let v = with_agents();
+            let r = Rect::new(0, 0, 12, 1);
+            let band = Band { r, pitch: 1, lead: vec![Span::raw("  ├ ")], bg: Style::default() };
+            let tab = TabEntry { others: 1, .."claude".into() };
+            let mut t = Terminal::new(TestBackend::new(r.width, 1)).expect("test backend");
+            t.draw(|f| draw_tab_band(f, &v, band, &tab, false)).expect("draw");
+            assert_eq!(row_text(&t, r).trim_end(), "  ├ c +1");
+        }
+
+        #[test]
+        fn a_tab_with_one_pane_shows_no_count() {
+            let v = with_agents();
+            assert!(!row_text(&render(&v), tab_row(&v, 0, 2)).contains('+'));
         }
 
         #[test]
