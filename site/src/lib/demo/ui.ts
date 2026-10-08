@@ -272,6 +272,7 @@ export class Painter {
     }
     const areas = app.areas();
     this.pane(areas);
+    if (!isEmpty(areas.tabBar) && app.project()) this.tabBar(areas.tabBar);
     if (areas.compact) {
       this.bar(areas);
       if (app.nav) this.g.clear(areas.pane);
@@ -313,6 +314,47 @@ export class Painter {
     if (tab) this.tab(tab, areas.pane);
     else if (app.project()) this.centered(areas.pane, [[seg(NO_TAB, { fg: 8, add: BOLD })], [seg('+ tab', CYAN), seg(NO_TAB_HINT, DARK)]]);
     else if (!app.projects.length) this.welcome(areas.pane);
+  }
+
+  private tabBar(bar: Rect): void {
+    const app = this.app;
+    const p = app.active;
+    const project = app.projects[p];
+    const w = project.active;
+    const tabs = project.workspaces[w]?.tabs ?? [];
+    const strip = app.tabStrip(bar);
+    this.region({ r: bar, wheel: (dy) => app.scrollTabBar(bar, dy) });
+    tabs.forEach((tab, t) => {
+      const r = strip.item(t);
+      if (isEmpty(r)) return;
+      const active = tab === app.tab();
+      const bg = this.rowBackground(r, active);
+      const status = tabStatus(tab);
+      const line: Line = [seg(' ', bg)];
+      if (status) line.push({ ...STATUS_ICONS[status], s: { ...bg, ...STATUS_ICONS[status].s } }, seg(' ', bg));
+      const room = Math.max(0, r.w - width(line) - 3);
+      line.push(seg(truncateRight(tabLabel(tab), room), active ? { ...bg, fg: 15, add: BOLD } : { ...bg, fg: 7 }));
+      this.band(r, line, bg);
+      const grab: Target = { kind: 'tab', project: project.id, workspace: project.workspaces[w].id, tab: tab.id };
+      this.region({ r, click: () => app.selectTab(p, w, t), right: (x, y) => app.openMenu({ x, y }, grab), cursor: 'pointer' });
+      if (this.sidebarHovered(r)) {
+        const close = strip.close(t);
+        this.band(close, [seg(' ×')], this.hovered(close) ? { ...bg, fg: 1, add: BOLD } : { ...bg, fg: 8 });
+        this.region({ r: close, click: () => app.closeTab(p, w, t), cursor: 'pointer' });
+      }
+    });
+    const [before, after] = strip.hidden();
+    const arrows: [Rect, string, boolean, number][] = [[strip.left(), '‹', before, -1], [strip.right(), '›', after, 1]];
+    for (const [r, label, more, dy] of arrows) {
+      if (isEmpty(r)) continue;
+      this.band(r, [seg(` ${label} `)], more ? this.buttonStyle(r, CYAN, 6) : DARK);
+      if (more) this.region({ r, click: () => app.scrollTabBar(bar, dy), cursor: 'pointer' });
+    }
+    const add = strip.newButton();
+    this.band(add, [seg(' + ')], this.buttonStyle(add, CYAN, 6));
+    this.region({ r: add, click: () => app.addTab(p, w), cursor: 'pointer' });
+    const tab = app.tab();
+    if (tab) this.details(bar, 1, app.barDetails(), 1);
   }
 
   private tab(tab: Tab, area: Rect): void {
@@ -713,7 +755,7 @@ export class Painter {
       const mark = i === marked;
       const bg = this.rowBackground(r, mark || dragged(row));
       const spaces = seg(' '.repeat(2 * treeDepth(shape, row)));
-      const lead = [marker(mark), spaces, arrow(folded(row))];
+      const lead = [marker(mark), spaces, row.kind === 'ws' && shape.tabBar ? seg('  ') : arrow(folded(row))];
       const fold = arrowIn(r, shape, row);
       const button = ' '.repeat(treeIndent(shape, row) - 1);
       const guide = r.x + treeIndent(shape, row) - 2;
@@ -721,7 +763,7 @@ export class Painter {
       else if (row.kind === 'project') {
         this.projectRow({ r, pitch, lead, bg }, row.p, folded(row), (x, y) => (contains(fold, x, y) ? app.toggleFold(row.p) : app.selectProject(row.p)));
       } else if (row.kind === 'ws') {
-        this.workspaceRow({ r, pitch, lead, bg }, row.p, row.w, folded(row), (x, y) => (contains(fold, x, y) ? app.toggleFold(row.p, row.w) : app.selectWorkspace(row.p, row.w)));
+        this.workspaceRow({ r, pitch, lead, bg }, row.p, row.w, !!shape.tabBar || folded(row), (x, y) => (contains(fold, x, y) ? app.toggleFold(row.p, row.w) : app.selectWorkspace(row.p, row.w)));
       } else if (row.kind === 'tab') {
         this.tabRow({ r, pitch, lead: [marker(mark), spaces], bg }, row.p, row.w, row.t, mark);
         this.guide(guide, r, 'tee');
@@ -809,7 +851,7 @@ export class Painter {
     if (!p) return;
     const list = areas.workspacesList;
     const tabs = app.tabLines();
-    const all = workspaceRows(tabs);
+    const all = workspaceRows(tabs, app.tabsListed());
     const base = workspaceLayout(list, areas.pitch, all, tabs, app.workspacesScroll);
     const drag = app.rowDragView();
     const landing = drag?.list === 'workspaces' ? drag.landing : null;

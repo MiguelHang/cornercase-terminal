@@ -89,7 +89,7 @@ Keys are encoded in `keys.rs`: Ghostty's encoder for special keys, and for every
 | `log.rs` | `server.log`: levels, the `key=value` line format, the writer thread and its rotation, background job timings, and `cornercase logs`. `app/trace.rs` logs what changed in the app after each step of the server loop. |
 | `protocol.rs` | Messages, framing, socket and lock paths, build id. |
 | `app.rs` | Application state; turns events into actions; builds the `View`. `app/control.rs` answers the commands for scripts and keeps their waits. |
-| `ui.rs` | Layout, hit testing and drawing from a plain `View`. |
+| `ui.rs` | Layout, hit testing and drawing from a plain `View`; `ui/tab_bar.rs` lays out and draws the tab bar above the pane. |
 | `project.rs` | Project › workspace › tab › panes, labels, removal. |
 | `split.rs` | A tab's split tree: rects, dividers, splitting, removing, ratios. |
 | `term.rs` | A shell in a PTY, its emulator, and the reader thread. |

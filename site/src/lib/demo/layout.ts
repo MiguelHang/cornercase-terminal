@@ -51,12 +51,11 @@ export const sidebarLayout = (list: Rect, pitch: number, rows: SidebarRow[], scr
 
 export type WorkspaceRow = { kind: 'gap' } | { kind: 'ws'; w: number } | { kind: 'tab'; w: number; t: number } | { kind: 'new'; w: number } | { kind: 'landing' };
 
-export function workspaceRows(tabs: number[][]): WorkspaceRow[] {
+export function workspaceRows(tabs: number[][], listed = true): WorkspaceRow[] {
   return tabs.flatMap((lines, w) => [
     ...(w > 0 ? [{ kind: 'gap' } as WorkspaceRow] : []),
     { kind: 'ws', w } as WorkspaceRow,
-    ...lines.map((_, t) => ({ kind: 'tab', w, t }) as WorkspaceRow),
-    { kind: 'new', w } as WorkspaceRow,
+    ...(listed ? [...lines.map((_, t) => ({ kind: 'tab', w, t }) as WorkspaceRow), { kind: 'new', w } as WorkspaceRow] : []),
   ]);
 }
 
@@ -93,6 +92,7 @@ export interface ProjectShape {
 export interface TreeShape {
   groups: boolean[];
   projects: ProjectShape[];
+  tabBar?: boolean;
 }
 
 export type TreeRow =
@@ -113,7 +113,7 @@ export function treeRows(shape: TreeShape): TreeRow[] {
     if (project.collapsed) return [row];
     const workspaces = project.workspaces.flatMap((workspace, w): TreeRow[] => [
       { kind: 'ws', p, w },
-      ...(workspace.collapsed ? [] : [...workspace.tabs.map((_, t): TreeRow => ({ kind: 'tab', p, w, t })), { kind: 'newTab', p, w } as TreeRow]),
+      ...(workspace.collapsed || shape.tabBar ? [] : [...workspace.tabs.map((_, t): TreeRow => ({ kind: 'tab', p, w, t })), { kind: 'newTab', p, w } as TreeRow]),
     ]);
     return [row, ...workspaces, { kind: 'newWorkspace', p }];
   });
@@ -135,7 +135,7 @@ export function treeDepth(shape: TreeShape, row: TreeRow): number {
 export const treeIndent = (shape: TreeShape, row: TreeRow): number => 2 + 2 * treeDepth(shape, row);
 
 export const arrowIn = (r: Rect, shape: TreeShape, row: TreeRow): Rect =>
-  row.kind === 'group' || row.kind === 'project' || row.kind === 'ws' ? intersect(rect(r.x + treeIndent(shape, row), r.y, 2, 1), r) : EMPTY;
+  row.kind === 'group' || row.kind === 'project' || (row.kind === 'ws' && !shape.tabBar) ? intersect(rect(r.x + treeIndent(shape, row), r.y, 2, 1), r) : EMPTY;
 
 export const treeLayout = (list: Rect, shape: TreeShape, rows: TreeRow[], scroll: number) =>
   new Rows(list, rows.map((r) => treeHeight(shape, r)), 1, scroll);
@@ -167,6 +167,11 @@ export const SIDEBARS: [Sidebar, string][] = [
   ['projects_on_top', 'one column, workspaces below projects'],
   ['workspaces_on_top', 'one column, projects below workspaces'],
   ['tree', 'one list: projects, workspaces and tabs'],
+];
+export type Tabs = 'sidebar' | 'top';
+export const TABS: [Tabs, string][] = [
+  ['sidebar', 'under their workspace in the sidebar'],
+  ['top', "in a bar above the pane, only the active workspace's"],
 ];
 export const MIN_STACK_SECTION = 5;
 const STACK_FOOTER = 6;
@@ -276,6 +281,7 @@ export interface Areas {
   changesButton: Rect;
   todoButton: Rect;
   filesButton: Rect;
+  tabBar: Rect;
 }
 
 function column(r: Rect, lead: number): [Rect, Rect, Rect, Rect, Rect, Rect] {
@@ -288,7 +294,7 @@ function column(r: Rect, lead: number): [Rect, Rect, Rect, Rect, Rect, Rect] {
   return [title, list, separator, a, b, c];
 }
 
-export function layout(cols: number, rows: number, widths: Widths, nav: Nav, changes = false, sidebar: Sidebar = 'side_by_side', agents = false): Areas {
+export function layout(cols: number, rows: number, widths: Widths, nav: Nav, changes = false, sidebar: Sidebar = 'side_by_side', agents = false, tabs = false): Areas {
   const main = (c: number): Areas =>
     sidebar === 'side_by_side'
       ? wide(c, rows, widths, agents)
@@ -296,7 +302,7 @@ export function layout(cols: number, rows: number, widths: Widths, nav: Nav, cha
         ? treeColumn(c, rows, widths, agents)
         : stacked(c, rows, widths, sidebar, agents);
   const areas = cols < COMPACT_WIDTH ? compact(cols, rows, changes, agents) : changes ? withChanges(cols, rows, widths, main) : main(cols);
-  if (!areas.compact) return areas;
+  if (!areas.compact) return tabs ? withTabBar(areas) : areas;
   const projects =
     nav === 'projects' ? areas : { ...areas, sidebar: EMPTY, title: EMPTY, list: EMPTY, separator: EMPTY, settings: EMPTY, usage: EMPTY, quit: EMPTY, agentsButton: EMPTY };
   const workspaces =
@@ -304,6 +310,14 @@ export function layout(cols: number, rows: number, widths: Widths, nav: Nav, cha
       ? projects
       : { ...projects, workspaces: EMPTY, workspacesTitle: EMPTY, workspacesList: EMPTY, workspacesSeparator: EMPTY, issues: EMPTY, back: nav === 'agents' ? projects.back : EMPTY };
   return nav === 'agents' ? workspaces : { ...workspaces, agents: EMPTY, agentsTitle: EMPTY, agentsList: EMPTY };
+}
+
+export const TAB_BAR_HEIGHT = 2;
+
+function withTabBar(areas: Areas): Areas {
+  const { pane } = areas;
+  const h = Math.min(TAB_BAR_HEIGHT, pane.h);
+  return { ...areas, tabBar: rect(pane.x, pane.y, pane.w, h), pane: rect(pane.x, pane.y + h, pane.w, pane.h - h) };
 }
 
 function withChanges(cols: number, rows: number, widths: Widths, main: (cols: number) => Areas): Areas {
@@ -354,6 +368,7 @@ function wide(cols: number, rows: number, widths: Widths, agents: boolean): Area
     changesButton: EMPTY,
     todoButton: todoButton(todo),
     filesButton: filesButton(todo),
+    tabBar: EMPTY,
     ...agentsAreas,
   };
 }
@@ -422,6 +437,7 @@ function oneColumn(cols: number, rows: number, widths: Widths, keep: number, age
     changesButton: EMPTY,
     todoButton: todoButton(rect(0, footer + 2, inner, 1)),
     filesButton: filesButton(rect(0, footer + 2, inner, 1)),
+    tabBar: EMPTY,
     ...NO_AGENTS,
   };
   const [sections, agentsAreas] = agentsSection(rect(0, HEADER_HEIGHT, inner, footer - HEADER_HEIGHT), widths, keep, agents);
@@ -506,6 +522,7 @@ function compact(cols: number, rows: number, changes: boolean, agents: boolean):
     changesButton: rect(Math.max(0, cols - searchWidth - 3 * COMPACT_BUTTON_WIDTH), 0, Math.min(COMPACT_BUTTON_WIDTH, Math.max(0, cols - searchWidth - 2 * COMPACT_BUTTON_WIDTH)), pitch),
     filesButton: rect(Math.max(0, cols - searchWidth - 2 * COMPACT_BUTTON_WIDTH), 0, Math.min(COMPACT_BUTTON_WIDTH, Math.max(0, cols - searchWidth - COMPACT_BUTTON_WIDTH)), pitch),
     todoButton: rect(Math.max(0, cols - searchWidth - COMPACT_BUTTON_WIDTH), 0, Math.min(COMPACT_BUTTON_WIDTH, Math.max(0, cols - searchWidth)), pitch),
+    tabBar: EMPTY,
   };
 }
 
@@ -674,8 +691,8 @@ export function sidebarDrop(list: Rect, pitch: number, rows: SidebarRow[], scrol
   return at === null ? null : { at, spot: projectSpot(rows, [d, d + 1], at) };
 }
 
-export function workspaceDrop(list: Rect, pitch: number, tabs: number[][], scroll: number, dragged: WorkspaceRow, x: number, y: number): Landing | null {
-  const rows = workspaceRows(tabs);
+export function workspaceDrop(list: Rect, pitch: number, tabs: number[][], scroll: number, dragged: WorkspaceRow, x: number, y: number, listed = true): Landing | null {
+  const rows = workspaceRows(tabs, listed);
   const layout = workspaceLayout(list, pitch, rows, tabs, scroll);
   if (dragged.kind === 'ws') {
     const d = rows.findIndex((r) => sameRow(r, dragged));
@@ -882,3 +899,93 @@ export const styleIcon = (cols: number, rows: number, i: number) => gridCell(sty
 export const styleColour = (cols: number, rows: number, i: number) => gridCell(styleRows(cols, rows)[3], COLOURS_PER_ROW, COLOUR_CELL, i);
 
 export const styleDone = (cols: number, rows: number): Rect => rightAligned(styleRows(cols, rows)[4], [DONE], buttonWidth, 1)[0];
+
+const MAX_TAB_NAME = 24;
+const TAB_CLOSE_WIDTH = 3;
+const TAB_BUTTON_WIDTH = 3;
+
+export const tabWidth = (name: string, status: boolean): number => 1 + (status ? 2 : 0) + Math.min([...name].length, MAX_TAB_NAME) + TAB_CLOSE_WIDTH;
+
+export class Strip {
+  private readonly row: Rect;
+
+  constructor(
+    bar: Rect,
+    readonly widths: number[],
+    readonly scroll: number,
+  ) {
+    this.row = rect(bar.x, bar.y, bar.w, Math.min(1, bar.h));
+  }
+
+  private total(from: number, to: number): number {
+    return this.widths.slice(from, to).reduce((a, b) => a + b, 0);
+  }
+
+  private overflows(): boolean {
+    return this.total(0, this.widths.length) + TAB_BUTTON_WIDTH > this.row.w;
+  }
+
+  private start(): number {
+    return this.row.x + (this.overflows() ? TAB_BUTTON_WIDTH : 0);
+  }
+
+  private room(): number {
+    return Math.max(0, this.row.w - (this.overflows() ? 3 : 1) * TAB_BUTTON_WIDTH);
+  }
+
+  private fittingBefore(end: number): number {
+    let start = end;
+    while (start > 0 && (start === end || this.total(start - 1, end) <= this.room())) start--;
+    return start;
+  }
+
+  first(): number {
+    return Math.min(this.scroll, this.fittingBefore(this.widths.length));
+  }
+
+  end(): number {
+    const first = this.first();
+    let end = first;
+    while (end < this.widths.length && (end === first || this.total(first, end + 1) <= this.room())) end++;
+    return end;
+  }
+
+  item(i: number): Rect {
+    const first = this.first();
+    if (i < first || i >= this.end()) return EMPTY;
+    const area = intersect(rect(this.start(), this.row.y, this.room(), this.row.h), this.row);
+    return intersect(rect(this.start() + this.total(first, i), this.row.y, this.widths[i], this.row.h), area);
+  }
+
+  close(i: number): Rect {
+    const r = this.item(i);
+    return rect(right(r) - TAB_CLOSE_WIDTH, r.y, Math.min(TAB_CLOSE_WIDTH, r.w), r.h);
+  }
+
+  newButton(): Rect {
+    const x = this.overflows() ? right(this.row) - TAB_BUTTON_WIDTH : this.start() + this.total(this.first(), this.end());
+    return intersect(rect(x, this.row.y, TAB_BUTTON_WIDTH, this.row.h), this.row);
+  }
+
+  left(): Rect {
+    return this.overflows() ? intersect(rect(this.row.x, this.row.y, TAB_BUTTON_WIDTH, this.row.h), this.row) : EMPTY;
+  }
+
+  right(): Rect {
+    return this.overflows() ? intersect(rect(this.start() + this.room(), this.row.y, TAB_BUTTON_WIDTH, this.row.h), this.row) : EMPTY;
+  }
+
+  hidden(): [boolean, boolean] {
+    return [this.first() > 0, this.end() < this.widths.length];
+  }
+
+  scrolled(delta: number): number {
+    return Math.max(0, Math.min(this.fittingBefore(this.widths.length), this.first() + delta));
+  }
+
+  reveal(i: number): number {
+    const first = this.first();
+    if (i >= this.widths.length || (i >= first && i < this.end())) return first;
+    return i < first ? i : this.fittingBefore(i + 1);
+  }
+}

@@ -11,6 +11,8 @@ import {
   type Nav,
   type Rows,
   SIDEBARS,
+  Strip,
+  TABS,
   type Sidebar,
   type SidebarRow,
   type TreeRow,
@@ -21,6 +23,7 @@ import {
   bottom,
   dragged,
   draggedStacked,
+  isEmpty,
   layout,
   mainWidth,
   sidebarDrop,
@@ -28,6 +31,7 @@ import {
   sidebarRows,
   type Details,
   tabLines,
+  tabWidth,
   treeActiveRow,
   treeDrop,
   treeLayout,
@@ -283,6 +287,7 @@ export class App {
   active = 0;
   projectsScroll = 0;
   workspacesScroll = 0;
+  tabBarScroll = 0;
   agentsScroll = 0;
   overlay: Overlay | null = null;
   hover: Pos | null = null;
@@ -535,6 +540,7 @@ export class App {
 
   treeShape(): TreeShape {
     return {
+      tabBar: !this.tabsListed(),
       groups: this.groups.map((g) => g.collapsed),
       projects: this.projects.map((p) => ({
         group: this.groupIndex(p.group),
@@ -605,7 +611,7 @@ export class App {
   private agentsDragged(y: number): Widths {
     const end = bottom(this.areas().agents);
     const wanted = { ...this.widths, agents: Math.max(0, end - (y + 1)) };
-    const rows = layout(this.cols, this.rows, wanted, this.nav, this.panelShown(), this.sidebar(), true).agents.h;
+    const rows = layout(this.cols, this.rows, wanted, this.nav, this.panelShown(), this.sidebar(), true, this.tabsOnTop()).agents.h;
     return { ...wanted, agents: rows };
   }
 
@@ -620,7 +626,37 @@ export class App {
   }
 
   areas() {
-    return layout(this.cols, this.rows, this.widths, this.nav, this.panelShown(), this.sidebar(), this.config.agentsSection);
+    return layout(this.cols, this.rows, this.widths, this.nav, this.panelShown(), this.sidebar(), this.config.agentsSection, this.tabsOnTop());
+  }
+
+  tabsOnTop(): boolean {
+    return this.config.tabs === 'top';
+  }
+
+  tabsListed(): boolean {
+    return isEmpty(this.areas().tabBar);
+  }
+
+  tabStrip(bar: Rect): Strip {
+    const tabs = this.workspace()?.tabs ?? [];
+    return new Strip(bar, tabs.map((t) => tabWidth(tabLabel(t), !!tabStatus(t))), this.tabBarScroll);
+  }
+
+  barDetails(): Details {
+    const tab = this.tab();
+    const pane = tab?.panes.find((p) => p.id === tab.active);
+    const c = this.config;
+    return {
+      model: c.model ? (pane?.context?.model ?? null) : null,
+      percent: c.context ? (pane?.context?.percent ?? null) : null,
+      memory: null,
+    };
+  }
+
+  scrollTabBar(bar: Rect, dy: number): boolean {
+    this.tabBarScroll = this.tabStrip(bar).scrolled(Math.sign(dy));
+    this.dirty();
+    return true;
   }
 
   rowDragView(): RowDragView | null {
@@ -636,7 +672,7 @@ export class App {
     }
     if ((row.kind !== 'ws' && row.kind !== 'tab') || row.p !== this.active) return null;
     const listed: WorkspaceRow = row.kind === 'ws' ? { kind: 'ws', w: row.w } : { kind: 'tab', w: row.w, t: row.t };
-    const landing = workspaceDrop(areas.workspacesList, areas.pitch, this.tabLines(), this.workspacesScroll, listed, h.x, h.y);
+    const landing = workspaceDrop(areas.workspacesList, areas.pitch, this.tabLines(), this.workspacesScroll, listed, h.x, h.y, this.tabsListed());
     return { list: 'workspaces', row: listed, landing };
   }
 
@@ -680,7 +716,7 @@ export class App {
       ? treeLayout(areas.list, shape, treeRows(shape), this.projectsScroll)
       : sidebar
         ? sidebarLayout(areas.list, areas.pitch, this.sidebarRows(), this.projectsScroll)
-        : workspaceLayout(areas.workspacesList, areas.pitch, workspaceRows(this.tabLines()), this.tabLines(), this.workspacesScroll);
+        : workspaceLayout(areas.workspacesList, areas.pitch, workspaceRows(this.tabLines(), this.tabsListed()), this.tabLines(), this.workspacesScroll);
     const delta = rows.edge(h.x, h.y);
     if (!delta) return;
     if (sidebar) this.projectsScroll = rows.scrolled(delta);
@@ -692,17 +728,25 @@ export class App {
 
   private follow(): void {
     const p = this.project();
-    const { list, pitch, tree } = layout(this.cols, this.rows, this.widths, 'projects', false, this.sidebar(), this.config.agentsSection);
+    const { list, pitch, tree, tabBar } = layout(this.cols, this.rows, this.widths, 'projects', false, this.sidebar(), this.config.agentsSection, this.tabsOnTop());
     const focus: Focus = { project: p?.id ?? null, workspace: this.workspace()?.id ?? null, tab: this.tab()?.id ?? null, tree };
     const before = this.followed;
     if (focus.project === before.project && focus.workspace === before.workspace && focus.tab === before.tab && tree === before.tree) return;
     this.followed = focus;
     if (before.project !== null && (focus.project !== before.project || focus.workspace !== before.workspace)) this.unfoldFocus();
+    this.revealInTabBar(tabBar, focus.workspace !== before.workspace);
     if (tree) return this.revealInTree(list);
     if (!p || (focus.project === before.project && !before.tree)) return;
     const sidebar = this.sidebarRows();
     const i = activeRow(sidebar, this.active, this.groupIndex(p.group));
     if (i >= 0) this.projectsScroll = sidebarLayout(list, pitch, sidebar, this.projectsScroll).reveal(i);
+  }
+
+  private revealInTabBar(bar: Rect, moved: boolean): void {
+    if (moved) this.tabBarScroll = 0;
+    const w = this.workspace();
+    if (isEmpty(bar) || !w?.tabs.length) return;
+    this.tabBarScroll = this.tabStrip(bar).reveal(Math.max(0, w.tabs.indexOf(this.tab()!)));
   }
 
   private revealInTree(list: Rect): void {
@@ -1923,6 +1967,7 @@ export class App {
     }
     return [
       { id: 'sidebar', section: '', label: 'sidebar', value: this.sidebar(), note: 'how projects, workspaces and tabs are laid out' },
+      { id: 'tabs', section: '', label: 'tabs', value: this.tabsOnTop() ? 'top' : 'sidebar', note: "where a workspace's tabs are listed" },
       { id: 'agents', section: '', label: 'agents section', value: c.agentsSection ? '[x] shown' : '[ ] hidden', note: 'every running agent in the sidebar' },
       { id: 'counts', section: '', label: 'counts', value: c.counts ? '[x] shown' : '[ ] hidden', note: 'what a project or folded group holds, such as (3)' },
       { id: 'dim', section: '', label: 'inactive panes', value: c.dim ? '[x] dimmed' : '[ ] as bright as the active one', note: 'in a split tab' },
@@ -1978,6 +2023,10 @@ export class App {
     } else if (row.id === 'sidebar') {
       const items = SIDEBARS.map(([value, note]) => ({ value, note }));
       o.pick = { row: row.id, title: 'How should projects, workspaces and tabs be laid out?', items, selected: Math.max(0, items.findIndex((i) => i.value === this.sidebar())), filter: '' };
+    } else if (row.id === 'tabs') {
+      const items = TABS.map(([value, note]) => ({ value, note }));
+      const current = this.tabsOnTop() ? 'top' : 'sidebar';
+      o.pick = { row: row.id, title: "Where should a workspace's tabs go?", items, selected: Math.max(0, items.findIndex((i) => i.value === current)), filter: '' };
     } else if (row.id === 'notify') {
       const items = NOTIFY_CHOICES.map(([value, note]) => ({ value, note }));
       o.pick = { row: row.id, title: 'How should your terminal notify you?', items, selected: Math.max(0, items.findIndex((i) => i.value === c.notify)), filter: '' };
@@ -2075,6 +2124,9 @@ export class App {
     } else if (row === 'sidebar') {
       c.sidebar = item.value;
       o.notice = `sidebar: ${item.value}`;
+    } else if (row === 'tabs') {
+      c.tabs = item.value;
+      o.notice = `tabs: ${item.value}`;
     } else if (row === 'notify') {
       c.notify = item.value;
       o.notice = `desktop notifications: ${item.value}`;
