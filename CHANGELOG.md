@@ -2,6 +2,10 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.12.13
+
+- Nothing changes in the app. A test that checks how cornercase tells two opencode in one folder apart failed now and then on macOS; it now runs a fake opencode that cannot be mistaken for a second one.
+
 ## 0.12.12
 
 - `cornercase read --last-message` prints the last message the coding agent in a pane wrote, as plain text. It comes from the agent's own record (Claude Code's transcript, Codex's rollout, opencode's database) rather than the screen, so it is whole even once it scrolled off, and free of the input box, the status lines and Claude Code's grey suggestions. `--json` adds when it was written and whether the agent's turn is over. An agent that starts others can now read their answers directly, instead of asking each one to write its report to a file.
