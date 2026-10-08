@@ -2,6 +2,10 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.11.16
+
+- Tabs can move out of the sidebar into a bar above the terminal, like an editor's: set **Settings → UI → tabs** to *top*. Only the active workspace's tabs show there, each with its status (`!`, `✓`, `◐`, `○`), and the sidebar keeps groups, projects and workspaces, so more of them fit; in the tree it ends at the workspaces. A grey line under the tabs shows the model, context and memory of the pane you are in. Click a tab to show it, `×` on hover closes it, `+` opens a shell, drag a tab sideways to reorder it, and `‹` `›` or the wheel scroll the tabs when they don't fit. The default stays *sidebar*, and below 90 columns the compact menu lists the tabs as before.
+
 ## 0.11.15
 
 - Keep your agents on another machine and the window on your laptop: `cornercase remote devbox` attaches to the cornercase server on `devbox` over your own `ssh` (your config, keys and jump hosts apply), starting it there if needed. Keys, the mouse, your colours, copying and desktop notifications go through your local terminal. When the connection drops, after the laptop slept or the Wi-Fi changed, the window stays, says it is reconnecting and comes back by itself, with every shell still running there; `Esc` gives up. Both machines need the same version of cornercase, and it tells you which one to update when they differ.
