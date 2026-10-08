@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 pub mod changes;
 pub mod files;
 pub mod remote;
+pub mod tab_bar;
 pub mod todo;
 
 use crate::activity::{self, Status};
@@ -151,11 +152,45 @@ impl Sidebar {
     }
 
     pub fn from_setting(setting: &str) -> Self {
-        Self::ALL.into_iter().find(|s| s.id().eq_ignore_ascii_case(setting.trim())).unwrap_or_default()
+        from_setting(&Self::ALL, Self::id, setting)
     }
 
     pub fn stacked(self) -> bool {
         self != Self::SideBySide
+    }
+}
+
+fn from_setting<T: Copy + Default>(all: &[T], id: fn(T) -> &'static str, setting: &str) -> T {
+    all.iter().copied().find(|s| id(*s).eq_ignore_ascii_case(setting.trim())).unwrap_or_default()
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Tabs {
+    #[default]
+    Sidebar,
+    Top,
+}
+
+impl Tabs {
+    pub const ALL: [Self; 2] = [Self::Sidebar, Self::Top];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Sidebar => "sidebar",
+            Self::Top => "top",
+        }
+    }
+
+    pub fn choices() -> Vec<(&'static str, &'static str)> {
+        let note = |t: Self| match t {
+            Self::Sidebar => "under their workspace in the sidebar",
+            Self::Top => "in a bar above the pane, only the active workspace's",
+        };
+        Self::ALL.into_iter().map(|t| (t.id(), note(t))).collect()
+    }
+
+    pub fn from_setting(setting: &str) -> Self {
+        from_setting(&Self::ALL, Self::id, setting)
     }
 }
 
@@ -330,6 +365,7 @@ pub struct Areas {
     pub changes_button: Rect,
     pub todo_button: Rect,
     pub files_button: Rect,
+    pub tab_bar: Rect,
 }
 
 impl Areas {
@@ -351,6 +387,16 @@ impl Areas {
 
     pub fn compact(&self) -> bool {
         !self.bar.is_empty()
+    }
+
+    #[must_use]
+    pub fn with_tab_bar(self, shown: bool) -> Self {
+        if !shown || self.compact() {
+            return self;
+        }
+        let height = tab_bar::HEIGHT.min(self.pane.height);
+        let pane = Rect { y: self.pane.y + height, height: self.pane.height - height, ..self.pane };
+        Self { tab_bar: Rect { height, ..self.pane }, pane, ..self }
     }
 
     #[must_use]
@@ -675,6 +721,7 @@ fn compact_layout(area: Rect, changes: bool, agents: bool) -> Areas {
         changes_button,
         todo_button,
         files_button,
+        tab_bar: Rect::default(),
     }
 }
 
@@ -886,8 +933,28 @@ pub enum WorkspaceRow {
     Landing,
 }
 
-pub fn workspace_rows(tabs: &[Vec<u16>]) -> Vec<WorkspaceRow> {
-    tabs.iter()
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TabLines {
+    lines: Vec<Vec<u16>>,
+    listed: bool,
+}
+
+impl TabLines {
+    pub fn new(lines: Vec<Vec<u16>>, listed: bool) -> Self {
+        let lines = if listed { lines } else { vec![Vec::new(); lines.len()] };
+        Self { lines, listed }
+    }
+}
+
+impl From<Vec<Vec<u16>>> for TabLines {
+    fn from(lines: Vec<Vec<u16>>) -> Self {
+        Self::new(lines, true)
+    }
+}
+
+pub fn workspace_rows(tabs: &TabLines) -> Vec<WorkspaceRow> {
+    tabs.lines
+        .iter()
         .enumerate()
         .flat_map(|(w, lines)| {
             (w > 0)
@@ -895,32 +962,32 @@ pub fn workspace_rows(tabs: &[Vec<u16>]) -> Vec<WorkspaceRow> {
                 .into_iter()
                 .chain(std::iter::once(WorkspaceRow::Workspace(w)))
                 .chain((0..lines.len()).map(move |t| WorkspaceRow::Tab(w, t)))
-                .chain(std::iter::once(WorkspaceRow::NewTab(w)))
+                .chain(tabs.listed.then_some(WorkspaceRow::NewTab(w)))
         })
         .collect()
 }
 
-fn workspace_rows_layout(list: Rect, pitch: u16, rows: &[WorkspaceRow], tabs: &[Vec<u16>], scroll: usize) -> Rows {
+fn workspace_rows_layout(list: Rect, pitch: u16, rows: &[WorkspaceRow], tabs: &TabLines, scroll: usize) -> Rows {
     let heights = rows
         .iter()
         .map(|row| match *row {
             WorkspaceRow::Gap | WorkspaceRow::Landing => GAP,
-            WorkspaceRow::Tab(w, t) => pitch.max(tabs[w][t]),
+            WorkspaceRow::Tab(w, t) => pitch.max(tabs.lines[w][t]),
             WorkspaceRow::Workspace(_) | WorkspaceRow::NewTab(_) => pitch,
         })
         .collect();
     Rows { list, heights, button: pitch, scroll }
 }
 
-pub fn workspace_layout(list: Rect, pitch: u16, tabs: &[Vec<u16>], scroll: usize) -> Rows {
+pub fn workspace_layout(list: Rect, pitch: u16, tabs: &TabLines, scroll: usize) -> Rows {
     workspace_rows_layout(list, pitch, &workspace_rows(tabs), tabs, scroll)
 }
 
-pub fn new_workspace_button(list: Rect, pitch: u16, tabs: &[Vec<u16>]) -> Rect {
+pub fn new_workspace_button(list: Rect, pitch: u16, tabs: &TabLines) -> Rect {
     workspace_layout(list, pitch, tabs, 0).button()
 }
 
-pub fn workspace_row(list: Rect, pitch: u16, tabs: &[Vec<u16>], scroll: usize, row: WorkspaceRow) -> Rect {
+pub fn workspace_row(list: Rect, pitch: u16, tabs: &TabLines, scroll: usize, row: WorkspaceRow) -> Rect {
     row_rect(&workspace_layout(list, pitch, tabs, scroll), &workspace_rows(tabs), &row)
 }
 
@@ -983,7 +1050,7 @@ impl WorkspaceHit {
     }
 }
 
-pub fn workspace_hit(list: Rect, pitch: u16, tabs: &[Vec<u16>], scroll: usize, pos: Position) -> Option<WorkspaceHit> {
+pub fn workspace_hit(list: Rect, pitch: u16, tabs: &TabLines, scroll: usize, pos: Position) -> Option<WorkspaceHit> {
     if !list.contains(pos) {
         return None;
     }
@@ -1021,6 +1088,7 @@ pub fn agent_hit(list: Rect, pitch: u16, agents: usize, scroll: usize, pos: Posi
 pub struct TreeShape {
     pub groups: Vec<bool>,
     pub projects: Vec<ProjectShape>,
+    pub tab_bar: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1093,7 +1161,7 @@ pub fn tree_rows(shape: &TreeShape) -> Vec<TreeRow> {
                 }
                 for (w, workspace) in project.workspaces.iter().enumerate() {
                     rows.push(TreeRow::Workspace(p, w));
-                    if !workspace.collapsed {
+                    if !workspace.collapsed && !shape.tab_bar {
                         rows.extend((0..workspace.tabs.len()).map(|t| TreeRow::Tab(p, w, t)));
                         rows.push(TreeRow::NewTab(p, w));
                     }
@@ -1133,6 +1201,7 @@ fn tree_indent(shape: &TreeShape, row: TreeRow) -> u16 {
 
 fn arrow_in(r: Rect, shape: &TreeShape, row: TreeRow) -> Rect {
     match row {
+        TreeRow::Workspace(..) if shape.tab_bar => Rect::default(),
         TreeRow::Group(_) | TreeRow::Project(_) | TreeRow::Workspace(..) => {
             Rect { x: r.x.saturating_add(tree_indent(shape, row)), width: 2, height: 1, ..r }.intersection(r)
         }
@@ -1238,6 +1307,7 @@ pub enum Drag {
     Sidebar(SidebarRow, Option<Landing>),
     Workspaces(WorkspaceRow, Option<Landing>),
     Tree(TreeRow, Option<Landing>),
+    Bar(usize, Option<usize>),
     Todo(u64),
 }
 
@@ -1436,7 +1506,7 @@ pub fn sidebar_drop(
 pub fn workspace_drop(
     list: Rect,
     pitch: u16,
-    tabs: &[Vec<u16>],
+    tabs: &TabLines,
     scroll: usize,
     dragged: WorkspaceRow,
     pos: Position,
@@ -2360,6 +2430,7 @@ pub struct View<'a> {
     pub tree: Option<TreeView>,
     pub agents: Option<AgentsView>,
     pub counts: bool,
+    pub tab_bar: Option<tab_bar::TabBar>,
 }
 
 impl View<'_> {
@@ -2369,8 +2440,9 @@ impl View<'_> {
         sidebar_rows(&groups, &collapsed)
     }
 
-    pub fn tab_lines(&self) -> Vec<Vec<u16>> {
-        self.workspaces.iter().map(|w| w.tabs.iter().map(|t| t.details.lines()).collect()).collect()
+    pub fn tab_lines(&self) -> TabLines {
+        let lines = self.workspaces.iter().map(|w| w.tabs.iter().map(|t| t.details.lines()).collect()).collect();
+        TabLines::new(lines, self.tab_bar.is_none())
     }
 
     fn surface(&self) -> Color {
@@ -2435,7 +2507,12 @@ impl View<'_> {
 
 pub fn draw(f: &mut Frame, view: &View) {
     let panel = view.changes.is_some() || view.todo.is_some() || view.files.is_some();
-    let areas = full_layout(f.area(), view.widths, panel, view.sidebar, view.agents.is_some()).shown(view.nav);
+    let areas = full_layout(f.area(), view.widths, panel, view.sidebar, view.agents.is_some())
+        .with_tab_bar(view.tab_bar.is_some())
+        .shown(view.nav);
+    if let Some(bar) = view.tab_bar.as_ref().filter(|_| view.has_project && !areas.tab_bar.is_empty()) {
+        tab_bar::draw(f, view, bar, areas.tab_bar);
+    }
     match &view.tab {
         Some(tab) => draw_tab(f, view, tab, areas.pane),
         None if view.has_project => draw_no_tab(f, view.muted, areas.pane),
@@ -4177,9 +4254,10 @@ fn draw_tree(f: &mut Frame, view: &View, areas: &Areas) {
             }
             TreeRow::Workspace(p, w) => {
                 let Some(entry) = workspace(p, w) else { continue };
-                let band = band(vec![marker(mark), Span::raw(lead), arrow(view.muted, folded(shape, row))]);
+                let fold = if shape.tab_bar { Span::raw("  ") } else { arrow(view.muted, folded(shape, row)) };
+                let band = band(vec![marker(mark), Span::raw(lead), fold]);
                 let active = p == view.active && w == view.active_workspace;
-                draw_workspace_band(f, view, band, entry, active, folded(shape, row));
+                draw_workspace_band(f, view, band, entry, active, shape.tab_bar || folded(shape, row));
             }
             TreeRow::Tab(p, w, tab) => {
                 let Some(entry) = workspace(p, w).and_then(|w| w.tabs.get(tab)) else { continue };
@@ -4290,6 +4368,7 @@ mod tests {
             tree: None,
             agents: None,
             counts: true,
+            tab_bar: None,
         }
     }
 
@@ -4297,8 +4376,8 @@ mod tests {
         sidebar_rows(&vec![None; projects], &[])
     }
 
-    fn tabs(counts: &[usize]) -> Vec<Vec<u16>> {
-        counts.iter().map(|&n| vec![Details::default().lines(); n]).collect()
+    fn tabs(counts: &[usize]) -> TabLines {
+        TabLines::from(counts.iter().map(|&n| vec![Details::default().lines(); n]).collect::<Vec<_>>())
     }
 
     fn render(view: &View) -> Terminal<TestBackend> {
@@ -4991,6 +5070,7 @@ mod tests {
             let login = WorkspaceShape { collapsed: true, tabs: vec![1] };
             TreeShape {
                 groups: vec![false],
+                tab_bar: false,
                 projects: vec![
                     ProjectShape { group: None, collapsed: true, workspaces: vec![WorkspaceShape::default()] },
                     ProjectShape { group: Some(0), collapsed: false, workspaces: vec![main, login] },
@@ -5138,6 +5218,7 @@ mod tests {
         fn with_tree() -> View<'static> {
             let shape = TreeShape {
                 groups: vec![false],
+                tab_bar: false,
                 projects: vec![
                     ProjectShape { group: None, collapsed: true, workspaces: Vec::new() },
                     ProjectShape {
@@ -5283,6 +5364,7 @@ mod tests {
             let workspace = |tabs: usize| WorkspaceShape { collapsed: false, tabs: vec![1; tabs] };
             TreeShape {
                 groups: vec![false],
+                tab_bar: false,
                 projects: vec![
                     ProjectShape { group: None, collapsed: false, workspaces: vec![workspace(1)] },
                     ProjectShape { group: Some(0), collapsed: false, workspaces: vec![workspace(2), workspace(1)] },
@@ -8113,8 +8195,10 @@ mod tests {
 
         fn shown(sidebar: Sidebar, entries: Vec<AgentEntry>) -> View<'static> {
             let folded = ProjectShape { collapsed: true, ..ProjectShape::default() };
-            let tree =
-                TreeView { shape: TreeShape { groups: Vec::new(), projects: vec![folded; 3] }, workspaces: Vec::new() };
+            let tree = TreeView {
+                shape: TreeShape { groups: Vec::new(), projects: vec![folded; 3], tab_bar: false },
+                workspaces: Vec::new(),
+            };
             View {
                 has_project: true,
                 issues: true,
@@ -8308,6 +8392,69 @@ mod tests {
                     render_sized(&shown(sidebar, entries()), W, height);
                 }
             }
+        }
+    }
+
+    mod tab_bar_drawing {
+        use super::*;
+
+        fn with_bar() -> View<'static> {
+            let details = Details { model: Some("Opus 5.5".into()), percent: Some(15), memory: None };
+            let claude =
+                TabEntry { status: Some(Status::Working), details: details.clone(), ..TabEntry::from("claude") };
+            let tabs = vec![claude, TabEntry::from("zsh")];
+            View {
+                has_project: true,
+                workspaces: vec![WorkspaceEntry {
+                    name: "main".into(),
+                    tabs: tabs.clone(),
+                    behind: 0,
+                    removing: false,
+                }],
+                active_tab: Some(0),
+                tab_bar: Some(tab_bar::TabBar { tabs, active: Some(0), details, scroll: 0 }),
+                ..view(&["cornercase"])
+            }
+        }
+
+        fn bar() -> Rect {
+            layout(AREA, Widths::default()).with_tab_bar(true).tab_bar
+        }
+
+        #[test]
+        fn renders_the_tabs_above_the_pane_and_none_in_the_list() {
+            insta::assert_snapshot!(render(&with_bar()).backend());
+        }
+
+        #[test]
+        fn the_details_row_is_muted() {
+            let t = render(&with_bar());
+            let r = bar();
+            assert_eq!(row_text(&t, Rect { y: r.y + 1, height: 1, ..r }).trim(), "Opus 5.5 · 15%");
+            assert_eq!(t.backend().buffer()[(r.x + 1, r.y + 1)].fg, Color::DarkGray);
+        }
+
+        #[test]
+        fn the_active_tab_is_on_the_surface() {
+            let t = render(&with_bar());
+            let first = with_bar().tab_bar.expect("a bar").strip(bar()).item(0);
+            assert_eq!(t.backend().buffer()[(first.x, first.y)].bg, DARK_SURFACE);
+        }
+
+        #[test]
+        fn the_close_button_shows_only_on_hover() {
+            let v = with_bar();
+            let close = v.tab_bar.as_ref().expect("a bar").strip(bar()).close(1);
+            let symbol = |v: &View| render(v).backend().buffer()[(close.x + 1, close.y)].symbol().to_string();
+            assert_eq!(symbol(&v), " ");
+            assert_eq!(symbol(&View { hover: Some(close.as_position()), ..with_bar() }), "×");
+        }
+
+        #[test]
+        fn without_a_project_there_is_no_bar() {
+            let v = View { has_project: false, ..with_bar() };
+            let t = render(&v);
+            assert_eq!(row_text(&t, bar()).trim(), "");
         }
     }
 }

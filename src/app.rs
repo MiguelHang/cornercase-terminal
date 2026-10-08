@@ -14,6 +14,7 @@ use crate::changes::diff::File as ChangedFile;
 use crate::changes::{self, BranchPicker, Checkout, Tints};
 use crate::clipboard;
 use crate::config::{self, Config};
+use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::files;
 use crate::git;
@@ -550,6 +551,7 @@ pub struct App {
     projects_scroll: usize,
     workspaces_scroll: usize,
     agents_scroll: usize,
+    tab_bar_scroll: usize,
     followed: Focus,
     drawn: ui::Areas,
     nav: Option<ui::Nav>,
@@ -650,6 +652,7 @@ impl App {
             projects_scroll: 0,
             workspaces_scroll: 0,
             agents_scroll: 0,
+            tab_bar_scroll: 0,
             followed: Focus::default(),
             drawn: ui::Areas::default(),
             nav: None,
@@ -757,6 +760,7 @@ impl App {
 
     fn layout(&self, area: Rect) -> ui::Areas {
         ui::full_layout(area, self.widths, self.panel_shown(), self.sidebar(), self.config.agents_section)
+            .with_tab_bar(ui::Tabs::from_setting(&self.config.tabs) == ui::Tabs::Top)
     }
 
     fn panel_shown(&self) -> bool {
@@ -1147,7 +1151,7 @@ impl App {
 
     fn follow(&mut self, area: Rect) {
         let areas = self.layout(area);
-        let relayout = areas.tree != self.drawn.tree;
+        let relayout = areas.tree != self.drawn.tree || areas.tab_bar.is_empty() != self.drawn.tab_bar.is_empty();
         self.drawn = areas;
         let focus = self.focus();
         let before = std::mem::replace(&mut self.followed, focus);
@@ -1157,6 +1161,7 @@ impl App {
         if before.project.is_some() && (focus.project, focus.workspace) != (before.project, before.workspace) {
             self.unfold_focus();
         }
+        self.reveal_in_tab_bar(&areas, focus.workspace != before.workspace);
         if areas.tree {
             self.reveal_in_tree(areas.list);
             return;
@@ -1182,6 +1187,61 @@ impl App {
                 self.workspaces_scroll = layout.reveal(i);
             }
         }
+    }
+
+    fn reveal_in_tab_bar(&mut self, areas: &ui::Areas, moved: bool) {
+        if moved {
+            self.tab_bar_scroll = 0;
+        }
+        let Some(t) = self.project().and_then(Project::workspace).filter(|w| !w.tabs.is_empty()).map(|w| w.active)
+        else {
+            return;
+        };
+        self.tab_bar_scroll = self.tab_strip(areas).reveal(t);
+    }
+
+    fn tab_strip(&self, areas: &ui::Areas) -> ui::tab_bar::Strip {
+        ui::tab_bar::Strip::new(areas.tab_bar, &self.bar_tabs(), self.tab_bar_scroll)
+    }
+
+    fn bar_tabs(&self) -> Vec<ui::TabEntry> {
+        let workspace = self.project().and_then(Project::workspace);
+        workspace.map(|w| w.tabs.iter().map(|t| self.tab_entry(t)).collect()).unwrap_or_default()
+    }
+
+    fn tab_bar_view(&self) -> ui::tab_bar::TabBar {
+        let workspace = self.project().and_then(Project::workspace);
+        let pane = workspace.and_then(Workspace::tab).and_then(Tab::pane);
+        ui::tab_bar::TabBar {
+            tabs: self.bar_tabs(),
+            active: workspace.filter(|w| !w.tabs.is_empty()).map(|w| w.active),
+            details: self.details(pane.and_then(|t| t.context.context()), pane.and_then(|t| t.memory.bytes())),
+            scroll: self.tab_bar_scroll,
+        }
+    }
+
+    fn tab_bar_mouse(&mut self, areas: &ui::Areas, pos: Position, kind: MouseEventKind, area: Rect) -> Result<()> {
+        let Some(project) = self.project() else { return Ok(()) };
+        let (p, w) = (self.active, project.active);
+        let Some(workspace) = project.workspace() else { return Ok(()) };
+        let strip = self.tab_strip(areas);
+        let Some(hit) = strip.hit(pos) else { return Ok(()) };
+        let target = |t: usize| Target::Tab(project.id, workspace.id, workspace.tabs[t].id);
+        match (kind, hit) {
+            (MouseEventKind::Down(MouseButton::Left), ui::tab_bar::Hit::Tab(t)) => {
+                self.grab(target(t), strip.item(t), area, false);
+            }
+            (MouseEventKind::Down(MouseButton::Left), ui::tab_bar::Hit::Close(t)) => self.close_tab(p, w, t),
+            (MouseEventKind::Down(MouseButton::Left), ui::tab_bar::Hit::New) => self.add_tab(p, w, area)?,
+            (MouseEventKind::Down(MouseButton::Left), ui::tab_bar::Hit::Scroll(delta)) => {
+                self.tab_bar_scroll = strip.scrolled(delta);
+            }
+            (MouseEventKind::Down(MouseButton::Right), ui::tab_bar::Hit::Tab(t) | ui::tab_bar::Hit::Close(t)) => {
+                self.overlay = Some(Overlay::Menu { at: pos, actions: vec![MenuAction::Rename(target(t))] });
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn reveal_in_tree(&mut self, list: Rect) {
@@ -1677,6 +1737,13 @@ impl App {
         if self.nav.is_some() && areas.compact() {
             return Ok(());
         }
+        self.main_mouse(ev, pos, &areas, area)
+    }
+
+    fn main_mouse(&mut self, ev: MouseEvent, pos: Position, areas: &ui::Areas, area: Rect) -> Result<()> {
+        if areas.tab_bar.contains(pos) {
+            return self.tab_bar_mouse(areas, pos, ev.kind, area);
+        }
         self.pane_mouse(ev, pos, areas.pane);
         Ok(())
     }
@@ -1737,7 +1804,10 @@ impl App {
 
     fn scroll_column(&mut self, areas: &ui::Areas, pos: Position, delta: isize) -> bool {
         let items = if areas.pitch > 1 { delta.signum() } else { delta };
-        if areas.agents.contains(pos) {
+        if areas.tab_bar.contains(pos) {
+            self.tab_bar_scroll = self.tab_strip(areas).scrolled(delta.signum());
+            true
+        } else if areas.agents.contains(pos) {
             self.agents_scroll = self.agent_layout(areas).scrolled(items);
             true
         } else if areas.sidebar.contains(pos) {
@@ -2119,7 +2189,7 @@ impl App {
                 });
                 ui::ProjectShape { group, collapsed: p.collapsed, workspaces: workspaces.collect() }
             });
-        ui::TreeShape { groups, projects: projects.collect() }
+        ui::TreeShape { groups, projects: projects.collect(), tab_bar: !self.drawn.tab_bar.is_empty() }
     }
 
     fn sidebar_layout(&self, areas: &ui::Areas) -> ui::Rows {
@@ -2220,6 +2290,12 @@ impl App {
     fn drag_view(&self, target: Target, pos: Position, area: Rect) -> Option<ui::Drag> {
         let areas = self.layout(area).shown(self.nav);
         let row = self.tree_row_of(target)?;
+        if let ui::TreeRow::Tab(p, w, t) = row
+            && !areas.tab_bar.is_empty()
+        {
+            let shown = p == self.active && self.project().is_some_and(|project| project.active == w);
+            return shown.then(|| ui::Drag::Bar(t, self.tab_strip(&areas).drop(t, pos)));
+        }
         if areas.tree {
             let shape = self.tree_shape();
             return Some(ui::Drag::Tree(row, ui::tree_drop(areas.list, &shape, self.projects_scroll, row, pos)));
@@ -2242,13 +2318,14 @@ impl App {
     }
 
     fn drop_row(&mut self, target: Target, pos: Position, area: Rect) {
-        let Some(
-            ui::Drag::Sidebar(_, Some(landing))
-            | ui::Drag::Workspaces(_, Some(landing))
-            | ui::Drag::Tree(_, Some(landing)),
-        ) = self.drag_view(target, pos, area)
-        else {
-            return;
+        let landing = match self.drag_view(target, pos, area) {
+            Some(
+                ui::Drag::Sidebar(_, Some(landing))
+                | ui::Drag::Workspaces(_, Some(landing))
+                | ui::Drag::Tree(_, Some(landing)),
+            ) => landing,
+            Some(ui::Drag::Bar(_, Some(before))) => ui::Landing { at: before, spot: ui::Spot::Tab(before) },
+            _ => return,
         };
         let Some(row) = self.tree_row_of(target) else { return };
         log::info!("app", "row moved", row = format!("{target:?}"), to = format!("{:?}", landing.spot));
@@ -2300,6 +2377,13 @@ impl App {
             }
             Grab::Agent(_) => return,
         };
+        if matches!(target, Target::Tab(..)) && !areas.tab_bar.is_empty() {
+            if let Some(delta) = self.tab_strip(&areas).edge(pos) {
+                self.tab_bar_scroll = self.tab_strip(&areas).scrolled(delta);
+                self.row_drag = Some(RowDrag { scrolled: Some(now), ..drag });
+            }
+            return;
+        }
         let sidebar = areas.tree || matches!(target, Target::Group(_) | Target::Project(_));
         let rows = if sidebar {
             self.sidebar_layout(&areas)
@@ -2313,11 +2397,14 @@ impl App {
     }
 
     fn tab_details(&self, tab: &Tab) -> ui::Details {
-        let context = tab.context();
+        self.details(tab.context(), tab.memory())
+    }
+
+    fn details(&self, context: Option<&Context>, memory: Option<u64>) -> ui::Details {
         ui::Details {
             model: context.filter(|_| self.config.model).map(|c| c.model.clone()),
             percent: context.and_then(|c| c.percent).filter(|_| self.config.context),
-            memory: tab.memory().filter(|_| self.config.memory),
+            memory: memory.filter(|_| self.config.memory),
         }
     }
 
@@ -2349,11 +2436,7 @@ impl App {
                 agent: term.agent.agent().unwrap_or_default().to_string(),
                 project: self.project_label(project),
                 workspace: (project.workspaces.len() > 1).then(|| workspace.label()),
-                details: ui::Details {
-                    model: context.filter(|_| self.config.model).map(|c| c.model.clone()),
-                    percent: context.and_then(|c| c.percent).filter(|_| self.config.context),
-                    memory: None,
-                },
+                details: self.details(context, None),
                 active: focus.tab == Some(tab.id) && tab.active == i,
             }
         });
@@ -2397,9 +2480,10 @@ impl App {
         ui::Widths { agents: Some(rows), ..wanted }
     }
 
-    fn tab_lines(&self) -> Vec<Vec<u16>> {
+    fn tab_lines(&self) -> ui::TabLines {
         let lines = |w: &Workspace| -> Vec<u16> { w.tabs.iter().map(|t| self.tab_details(t).lines()).collect() };
-        self.project().map(|p| p.workspaces.iter().map(lines).collect()).unwrap_or_default()
+        let lines = self.project().map(|p| p.workspaces.iter().map(lines).collect()).unwrap_or_default();
+        ui::TabLines::new(lines, self.drawn.tab_bar.is_empty())
     }
 
     fn click_workspaces(&mut self, list: Rect, pitch: u16, pos: Position, area: Rect) -> Result<()> {
@@ -3946,7 +4030,7 @@ impl App {
         self.projects.get(p).and_then(|p| p.workspaces.get(w)).is_some_and(Workspace::removing)
     }
 
-    fn workspace_hit(&self, list: Rect, pitch: u16, tabs: &[Vec<u16>], pos: Position) -> Option<WorkspaceHit> {
+    fn workspace_hit(&self, list: Rect, pitch: u16, tabs: &ui::TabLines, pos: Position) -> Option<WorkspaceHit> {
         ui::workspace_hit(list, pitch, tabs, self.workspaces_scroll, pos)
             .filter(|hit| !hit.workspace().is_some_and(|w| self.removing(self.active, w)))
     }
@@ -4195,6 +4279,7 @@ impl App {
             files: if self.files_shown() { self.files_view() } else { None },
             attention,
             drag,
+            tab_bar: (!self.drawn.tab_bar.is_empty()).then(|| self.tab_bar_view()),
         };
         ui::draw(f, &view);
     }
@@ -8361,6 +8446,7 @@ rm -f "$1/sessions/$$.json"
                 form(&s.app).rows(),
                 [
                     Row::Sidebar,
+                    Row::Tabs,
                     Row::AgentsSection,
                     Row::Counts,
                     Row::DimPanes,
@@ -9300,6 +9386,132 @@ rm -f "$1/sessions/$$.json"
 
             let settings = areas().settings;
             assert_eq!(t.backend().buffer()[(settings.x + 2, settings.y)].fg, Color::Indexed(243));
+        }
+    }
+
+    mod tab_bar {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        use super::*;
+        use crate::ui::tab_bar::Strip;
+
+        fn drawn_in(app: &mut App, area: Rect) {
+            let mut t = Terminal::new(TestBackend::new(area.width, area.height)).expect("test backend");
+            t.draw(|f| app.draw(f)).expect("draw");
+        }
+
+        fn on_top(tabs: usize) -> (App, Receiver<AppEvent>, Vec<TempDir>) {
+            let (mut app, rx, dirs) = app_with(1);
+            app.config.tabs = ui::Tabs::Top.id().into();
+            for _ in 1..tabs {
+                app.add_tab(0, 0, AREA).expect("add a tab");
+            }
+            for (t, tab) in app.projects[0].workspaces[0].tabs.iter_mut().enumerate() {
+                tab.name = Some(format!("tab {t}"));
+            }
+            drawn_in(&mut app, AREA);
+            (app, rx, dirs)
+        }
+
+        fn strip(app: &App) -> Strip {
+            app.tab_strip(&app.layout(AREA))
+        }
+
+        fn ids(app: &App) -> Vec<u64> {
+            app.projects[0].workspaces[0].tabs.iter().map(|t| t.id).collect()
+        }
+
+        #[test]
+        fn the_pane_starts_below_the_bar() {
+            let (app, _rx, _dirs) = on_top(1);
+            let areas = app.layout(AREA);
+            assert_eq!((areas.tab_bar.height, areas.pane.y), (ui::tab_bar::HEIGHT, areas.tab_bar.bottom()));
+            assert_eq!(areas.pane.bottom(), ui::layout(AREA, ui::Widths::default()).pane.bottom());
+        }
+
+        #[test]
+        fn the_workspaces_list_leaves_the_tabs_out() {
+            let (app, _rx, _dirs) = on_top(2);
+            assert_eq!(ui::workspace_rows(&app.tab_lines()), [WorkspaceRow::Workspace(0)]);
+        }
+
+        #[test]
+        fn the_tree_ends_at_the_workspaces() {
+            let (mut app, _rx, _dirs) = on_top(2);
+            app.config.sidebar = ui::Sidebar::Tree.id().into();
+            drawn_in(&mut app, AREA);
+            let rows = ui::tree_rows(&app.tree_shape());
+            assert!(!rows.iter().any(|r| matches!(r, ui::TreeRow::Tab(..) | ui::TreeRow::NewTab(..))), "{rows:?}");
+        }
+
+        #[test]
+        fn compact_mode_keeps_the_tabs_in_its_menu() {
+            let (mut app, _rx, _dirs) = on_top(2);
+            drawn_in(&mut app, Rect { width: 80, ..AREA });
+            assert!(ui::workspace_rows(&app.tab_lines()).contains(&WorkspaceRow::Tab(0, 1)));
+        }
+
+        #[test]
+        fn a_click_on_a_tab_shows_it() {
+            let (mut app, _rx, _dirs) = on_top(2);
+            let pos = strip(&app).item(0).as_position();
+            click(&mut app, pos);
+            assert_eq!(app.projects[0].workspaces[0].active, 0);
+        }
+
+        #[test]
+        fn plus_opens_a_tab() {
+            let (mut app, _rx, _dirs) = on_top(1);
+            let pos = strip(&app).new_button().as_position();
+            click(&mut app, pos);
+            let workspace = &app.projects[0].workspaces[0];
+            assert_eq!((workspace.tabs.len(), workspace.active), (2, 1));
+        }
+
+        #[test]
+        fn the_close_button_closes_that_tab() {
+            let (mut app, rx, _dirs) = on_top(2);
+            let pos = strip(&app).close(0).as_position();
+            click(&mut app, pos);
+            pump_until(&mut app, &rx, "the first tab closes", |a| a.projects[0].workspaces[0].tabs.len() == 1);
+        }
+
+        #[test]
+        fn dragging_a_tab_moves_it() {
+            let (mut app, _rx, _dirs) = on_top(3);
+            let before = ids(&app);
+            let (from, to) = (strip(&app).item(0).as_position(), strip(&app).item(2).as_position());
+            press(&mut app, from);
+            mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), to);
+            mouse(&mut app, MouseEventKind::Up(MouseButton::Left), to);
+            assert_eq!(ids(&app), [before[1], before[2], before[0]]);
+            assert_eq!(app.projects[0].workspaces[0].tab().map(|t| t.id), Some(before[2]));
+        }
+
+        #[test]
+        fn the_wheel_scrolls_tabs_that_do_not_fit() {
+            let (mut app, _rx, _dirs) = on_top(12);
+            app.projects[0].workspaces[0].active = 0;
+            app.tab_bar_scroll = 0;
+            let at = app.layout(AREA).tab_bar.as_position();
+            mouse(&mut app, MouseEventKind::ScrollDown, at);
+            assert_eq!(app.tab_bar_scroll, 1);
+        }
+
+        #[test]
+        fn the_active_tab_is_scrolled_into_view() {
+            let (mut app, _rx, _dirs) = on_top(12);
+            assert!(!strip(&app).item(11).is_empty());
+            app.projects[0].workspaces[0].active = 0;
+            drawn_in(&mut app, AREA);
+            assert_eq!(app.tab_bar_scroll, 0);
+        }
+
+        #[test]
+        fn a_shell_tab_has_no_details() {
+            let (app, _rx, _dirs) = on_top(1);
+            assert_eq!(app.tab_bar_view().details, ui::Details::default());
         }
     }
 
