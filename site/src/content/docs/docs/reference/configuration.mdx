@@ -73,13 +73,14 @@ Modes whose name says *dangerous* are shown in red. Extra arguments are split li
 
 <Screen
   name="settings-ui"
-  crop={[2, 1, 106, 12]}
-  alt="The UI tab: sidebar projects_on_top, how projects, workspaces and tabs are laid out; agents section hidden, every running agent in the sidebar; counts shown, what a project or folded group holds, such as (3); inactive panes dimmed, in a split tab; model shown, under a Claude Code or Codex tab, such as Opus 5.5; context shown, how full its context is, such as 23%; memory hidden, the RAM its processes use, such as 1.2 GB; desktop notifications auto, when an agent in another tab needs you or finishes; check for updates every hour, asks GitHub for the latest release"
+  crop={[2, 1, 106, 13]}
+  alt="The UI tab: sidebar projects_on_top, how projects, workspaces and tabs are laid out; tabs sidebar, where a workspace's tabs are listed; agents section hidden, every running agent in the sidebar; counts shown, what a project or folded group holds, such as (3); inactive panes dimmed, in a split tab; model shown, under a Claude Code or Codex tab, such as Opus 5.5; context shown, how full its context is, such as 23%; memory hidden, the RAM its processes use, such as 1.2 GB; desktop notifications auto, when an agent in another tab needs you or finishes; check for updates every hour, asks GitHub for the latest release"
 />
 
 | Row | What it sets |
 | --- | --- |
 | **sidebar** | How projects, workspaces and tabs are laid out: *projects_on_top* (the default) and *workspaces_on_top* stack both lists in one column, *side_by_side* gives each its own column, and *tree* shows one list with every project, its workspaces and their tabs. See [Arrange the columns](../../guides/projects-workspaces-tabs/#arrange-the-columns). |
+| **tabs** | Where a workspace's tabs are listed: *sidebar* (the default) under their workspace, or *top* in a bar above the pane with only the active workspace's tabs. See [Tabs above the pane](../../guides/projects-workspaces-tabs/#tabs-above-the-pane). |
 | **agents section** | List every Claude Code and Codex, in every project, at the bottom of the sidebar; a click jumps to one. Off by default. See [The agents section](../../guides/projects-workspaces-tabs/#the-agents-section). |
 | **counts** | Show how many workspaces a project has, such as `(3)`, after its name, and how many projects a folded group holds. On by default. |
 | **inactive panes** | Dim the panes you aren't typing in, in a split tab. |
@@ -132,6 +133,7 @@ Every key is optional: a missing key takes its default. Here is a complete file,
   "trust_prompt_pattern": "trust the files|trust this (folder|directory|workspace|repository)|do you trust|yes, proceed",
   "gh": "gh",
   "sidebar": "projects_on_top",
+  "tabs": "sidebar",
   "agents_section": false,
   "counts": true,
   "dim_inactive_panes": true,
@@ -163,6 +165,7 @@ Every key is optional: a missing key takes its default. Here is a complete file,
 | [`trust_prompt_pattern`](#trust_prompt_pattern) | string | see below |
 | [`gh`](#gh) | string | `"gh"` |
 | [`sidebar`](#sidebar) | string | `"projects_on_top"` |
+| [`tabs`](#tabs) | string | `"sidebar"` |
 | [`agents_section`](#agents_section) | boolean | `false` |
 | [`counts`](#counts) | boolean | `true` |
 | [`dim_inactive_panes`](#dim_inactive_panes) | boolean | `true` |
@@ -239,6 +242,10 @@ The GitHub CLI to run for GitHub issues: a name looked up in your `PATH`, or a p
 #### `sidebar`
 
 How projects, workspaces and tabs are laid out: `"projects_on_top"` and `"workspaces_on_top"` stack both lists in one column, the first one named on top; `"side_by_side"` gives each its own column; `"tree"` shows [one list](../../guides/projects-workspaces-tabs/#the-tree) with every project, its workspaces and their tabs. An unknown value counts as the default, `"projects_on_top"`; before 0.9.0 the default was `"side_by_side"`, and a `config.json` that already names it keeps it. It applies from 90 columns up; below that the [compact layout](../../guides/small-terminals/) shows one list at a time.
+
+#### `tabs`
+
+Where a workspace's tabs are listed: `"sidebar"` under their workspace, in the workspaces list or the tree; `"top"` in a bar above the pane, with only the active workspace's tabs and, on a second line, the model and context of the one on screen. An unknown value counts as the default, `"sidebar"`. It applies from 90 columns up; the [compact layout](../../guides/small-terminals/) always lists the tabs in its menu. See [Tabs above the pane](../../guides/projects-workspaces-tabs/#tabs-above-the-pane).
 
 #### `agents_section`
 

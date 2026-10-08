@@ -257,6 +257,7 @@ When a program ends by itself, for example when you type `exit`, its pane closes
   - *tree* shows [one list](#the-tree) with every project, its workspaces and their tabs.
 
   Between stacked lists, drag the line to share the height, and double-click it to split it in half again.
+- **Move the tabs above the pane** with **settings → UI → tabs** set to *top*: see [Tabs above the pane](#tabs-above-the-pane).
 - The active project and tab are marked with a cyan bar `▌` on the left edge and a highlighted background; the active workspace's name is brighter than the others. Each workspace's tabs hang from it on thin tree lines.
 
 Column widths, the line between stacked lists, the height of the [agents section](#the-agents-section) and what is folded in the tree are saved with your session. On a small terminal the columns shrink to leave room for the panes, and below 90 columns cornercase switches to a [compact layout](../small-terminals/).
@@ -287,6 +288,26 @@ With **settings → UI → sidebar** set to *tree*, one list holds your groups, 
 - What you fold is saved with your session. Opening a project or a tab from search, or switching to it, unfolds the way to it.
 
 Below 90 columns the [compact layout](../small-terminals/) shows its usual menu, projects then workspaces.
+
+### Tabs above the pane
+
+With **settings → UI → tabs** set to *top*, a workspace's tabs leave the sidebar and sit in a bar above the pane, like an editor's, and only the active workspace's show there. The sidebar keeps groups, projects and workspaces, so more of them fit; in the tree, it ends at the workspaces.
+
+<Screen
+  name="tab-bar"
+  crop={[0, 0, 100, 8]}
+  alt="The tabs of the shop workspace in a bar above the pane: claude working and marked as the tab on screen, zsh and vim, then +; under them Opus 5.5 at 23%, the model and context of the pane in focus. The sidebar on the left lists the shop project and its workspaces without their tabs"
+  caption="Tabs on top: the sidebar keeps projects and workspaces, and the bar shows the active workspace's tabs."
+/>
+
+- Each tab shows its status and its name, and a split tab how many other panes it has (`+2`); the one on screen sits on a highlighted background. Click a tab to show it, hover it and click **`⋯`** for its menu or **`×`** to close it, and click **`+`** to open a shell.
+- The second line shows the model, the context and, if turned on, the memory of the pane you are in, in grey; a shell leaves it empty. The [model, context and memory](#how-full-the-context-is) switches apply as on the sidebar's tab rows.
+- Both lines are always there, so switching tabs never resizes the terminal.
+- When the tabs don't fit, **`‹`** and **`›`** at the ends and the mouse wheel scroll them; the tab you switch to always comes into view.
+- Drag a tab sideways to reorder it; right-click it, or use its `⋯`, to rename it.
+- A workspace row still shows `!` or `✓` when one of its tabs needs you.
+
+Below 90 columns the [compact layout](../small-terminals/) lists the tabs in its menu, as always.
 
 ### The agents section
 

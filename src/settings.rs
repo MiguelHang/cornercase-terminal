@@ -26,6 +26,7 @@ pub enum Row {
     Folder,
     Fetch,
     Sidebar,
+    Tabs,
     AgentsSection,
     Counts,
     DimPanes,
@@ -50,6 +51,7 @@ impl Row {
             Self::Folder
             | Self::Fetch
             | Self::Sidebar
+            | Self::Tabs
             | Self::AgentsSection
             | Self::Counts
             | Self::DimPanes
@@ -70,6 +72,7 @@ impl Row {
             Self::DefaultAgent | Self::Submit | Self::Trust | Self::Kind(_) | Self::AddAgent => Page::Agents,
             Self::Token(_) | Self::JiraSite | Self::JiraEmail | Self::JiraJql | Self::Tab(_) => Page::Issues,
             Self::Sidebar
+            | Self::Tabs
             | Self::AgentsSection
             | Self::Counts
             | Self::DimPanes
@@ -273,6 +276,7 @@ impl Settings {
         rows.extend([
             Row::AddAgent,
             Row::Sidebar,
+            Row::Tabs,
             Row::AgentsSection,
             Row::Counts,
             Row::DimPanes,
@@ -381,6 +385,7 @@ impl Settings {
                 self.save(config, detail.notice(on).into())
             }
             Row::Sidebar => self.pick_from(row, ui::Sidebar::choices()),
+            Row::Tabs => self.pick_from(row, ui::Tabs::choices()),
             Row::Notifications => self.pick_from(row, notify::choices()),
             Row::Updates => self.flip(
                 |c| &mut c.check_updates,
@@ -449,6 +454,7 @@ impl Settings {
         let current = match &row {
             Row::DefaultAgent => Some(self.config.agent.clone()),
             Row::Sidebar => Some(ui::Sidebar::from_setting(&self.config.sidebar).id().to_string()),
+            Row::Tabs => Some(ui::Tabs::from_setting(&self.config.tabs).id().to_string()),
             Row::Notifications => Some(self.config.desktop_notifications.trim().to_lowercase()),
             Row::Kind(kind) => Some(
                 agents::mode_of(&agents::args(&self.config, kind), &agents::modes(&self.config, kind))
@@ -484,6 +490,10 @@ impl Settings {
             Row::Sidebar => {
                 let notice = format!("sidebar: {value}");
                 self.save(Config { sidebar: value, ..self.config.clone() }, notice)
+            }
+            Row::Tabs => {
+                let notice = format!("tabs: {value}");
+                self.save(Config { tabs: value, ..self.config.clone() }, notice)
             }
             Row::Notifications => {
                 let notice = format!("desktop notifications: {value}");
@@ -811,12 +821,7 @@ impl Settings {
                 let value = if detail.on(config) { "[x] shown" } else { "[ ] hidden" };
                 (detail.label().into(), value.into(), detail.note().into(), false)
             }
-            Row::Sidebar => (
-                "sidebar".into(),
-                ui::Sidebar::from_setting(&config.sidebar).id().into(),
-                "how projects, workspaces and tabs are laid out".into(),
-                false,
-            ),
+            Row::Sidebar | Row::Tabs => layout_row(config, row),
             Row::Notifications => (
                 "desktop notifications".into(),
                 config.desktop_notifications.clone(),
@@ -872,6 +877,7 @@ impl Settings {
             let title = match &pick.row {
                 Row::DefaultAgent => "Which agent takes an issue by default?".to_string(),
                 Row::Sidebar => "How should projects, workspaces and tabs be laid out?".to_string(),
+                Row::Tabs => "Where should a workspace's tabs go?".to_string(),
                 Row::Notifications => "How should your terminal notify you?".to_string(),
                 Row::Kind(kind) => format!("How should {kind} start?"),
                 _ => "Which agent do you want to set up?".to_string(),
@@ -924,6 +930,15 @@ fn with_args(config: &Config, kind: &str, args: Vec<String>) -> Config {
         agent_args.insert(kind.to_string(), args);
     }
     Config { agent_args, ..config.clone() }
+}
+
+fn layout_row(config: &Config, row: &Row) -> (String, String, String, bool) {
+    let (label, value, note) = if *row == Row::Tabs {
+        ("tabs", ui::Tabs::from_setting(&config.tabs).id(), "where a workspace's tabs are listed")
+    } else {
+        ("sidebar", ui::Sidebar::from_setting(&config.sidebar).id(), "how projects, workspaces and tabs are laid out")
+    };
+    (label.into(), value.into(), note.into(), false)
 }
 
 fn jira_row(config: &Config, row: &Row) -> (String, String, String, bool) {
@@ -1341,7 +1356,7 @@ mod tests {
             s.open_page(Page::Ui);
             let ui::Overlay::Settings(view) = s.view() else { panic!("not the settings") };
             let rows: Vec<(&str, &str)> =
-                view.rows[4..7].iter().map(|r| (r.label.as_str(), r.value.as_str())).collect();
+                view.rows[5..8].iter().map(|r| (r.label.as_str(), r.value.as_str())).collect();
             assert_eq!(rows, [("model", "[x] shown"), ("context", "[ ] hidden"), ("memory", "[ ] hidden")]);
         }
     }
@@ -1357,6 +1372,7 @@ mod tests {
                 s.rows(),
                 [
                     Row::Sidebar,
+                    Row::Tabs,
                     Row::AgentsSection,
                     Row::Counts,
                     Row::DimPanes,
@@ -1387,6 +1403,23 @@ mod tests {
             let ui::Overlay::Settings(view) = s.view() else { panic!("not the settings") };
             let pick = view.pick.expect("a pick list");
             assert_eq!(pick.selected.map(|i| pick.items[i].0.as_str()), Some("projects_on_top"));
+        }
+
+        #[test]
+        fn the_tabs_are_picked_from_a_list() {
+            let mut s = settings();
+            go_to(&mut s, &Row::Tabs);
+            press(&mut s, KeyCode::Enter);
+            type_text(&mut s, "top");
+            assert_eq!(saved(press(&mut s, KeyCode::Enter)).tabs, "top");
+        }
+
+        #[test]
+        fn the_tabs_start_in_the_sidebar() {
+            let mut s = settings();
+            s.open_page(Page::Ui);
+            let ui::Overlay::Settings(view) = s.view() else { panic!("not the settings") };
+            assert_eq!((view.rows[1].label.as_str(), view.rows[1].value.as_str()), ("tabs", "sidebar"));
         }
 
         #[test]

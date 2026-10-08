@@ -352,8 +352,8 @@ fn workspaces_list() -> Rect {
     areas().workspaces_list
 }
 
-fn tab_lines(counts: &[usize]) -> Vec<Vec<u16>> {
-    counts.iter().map(|&n| vec![ui::Details::default().lines(); n]).collect()
+fn tab_lines(counts: &[usize]) -> ui::TabLines {
+    ui::TabLines::from(counts.iter().map(|&n| vec![ui::Details::default().lines(); n]).collect::<Vec<_>>())
 }
 
 fn workspace_row(tabs: &[usize], row: WorkspaceRow) -> Position {
