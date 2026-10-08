@@ -8457,6 +8457,17 @@ mod tests {
         }
 
         #[test]
+        fn a_split_tab_shows_how_many_other_panes_it_has() {
+            let mut v = with_bar();
+            v.tab_bar.as_mut().expect("a bar").tabs[1].others = 2;
+            let t = render(&v);
+            let item = v.tab_bar.as_ref().expect("a bar").strip(bar()).item(1);
+            assert_eq!(row_text(&t, item).trim_end(), " zsh +2");
+            let count = t.backend().buffer()[(item.x + 5, item.y)].clone();
+            assert_eq!((count.symbol(), count.fg), ("+", Color::DarkGray));
+        }
+
+        #[test]
         fn a_landing_scrolled_out_of_the_bar_draws_nothing() {
             let tabs: Vec<TabEntry> = (0..12).map(|i| TabEntry::from(format!("tab {i}"))).collect();
             let mut v = with_bar();

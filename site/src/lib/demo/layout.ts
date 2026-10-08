@@ -905,7 +905,12 @@ const TAB_CLOSE_WIDTH = 3;
 const TAB_MENU_WIDTH = 2;
 const TAB_BUTTON_WIDTH = 3;
 
-export const tabWidth = (name: string, status: boolean): number => 1 + (status ? 2 : 0) + Math.min([...name].length, MAX_TAB_NAME) + TAB_MENU_WIDTH + TAB_CLOSE_WIDTH;
+export const tabOthers = (others: number): string => (others > 0 ? `+${others}` : '');
+
+export const tabWidth = (name: string, status: boolean, others = 0): number => {
+  const count = tabOthers(others);
+  return 1 + (status ? 2 : 0) + Math.min([...name].length, MAX_TAB_NAME) + (count ? 1 + count.length : 0) + TAB_MENU_WIDTH + TAB_CLOSE_WIDTH;
+};
 
 export class Strip {
   private readonly row: Rect;

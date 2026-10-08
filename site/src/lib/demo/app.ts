@@ -640,7 +640,7 @@ export class App {
 
   tabStrip(bar: Rect): Strip {
     const tabs = this.workspace()?.tabs ?? [];
-    return new Strip(bar, tabs.map((t) => tabWidth(tabLabel(t), !!tabStatus(t))), this.tabBarScroll);
+    return new Strip(bar, tabs.map((t) => tabWidth(tabLabel(t), !!tabStatus(t), t.panes.length - 1)), this.tabBarScroll);
   }
 
   barDetails(): Details {

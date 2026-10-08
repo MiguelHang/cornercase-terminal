@@ -36,7 +36,12 @@ impl TabBar {
 pub fn width(tab: &TabEntry) -> u16 {
     let icon = if tab.status.is_some() { 2 } else { 0 };
     let name = tab.name.chars().count().min(MAX_NAME);
-    u16::try_from(1 + icon + name).unwrap_or(u16::MAX).saturating_add(MENU_WIDTH + CLOSE_WIDTH)
+    let others = others(tab).map_or(0, |n| 1 + n.chars().count());
+    u16::try_from(1 + icon + name + others).unwrap_or(u16::MAX).saturating_add(MENU_WIDTH + CLOSE_WIDTH)
+}
+
+fn others(tab: &TabEntry) -> Option<String> {
+    (tab.others > 0).then(|| format!("+{}", tab.others))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,8 +283,14 @@ fn draw_tab(f: &mut Frame, view: &View, tab: &TabEntry, (r, bg): (Rect, Style), 
         line.extend([Span::styled(icon.content, icon.style.patch(bg)), Span::styled(" ", bg)]);
         used += 2;
     }
-    let room = usize::from(r.width).saturating_sub(used + usize::from(MENU_WIDTH + CLOSE_WIDTH)).min(MAX_NAME);
+    let others = others(tab);
+    let reserved = others.as_ref().map_or(0, |n| 1 + n.chars().count());
+    let room =
+        usize::from(r.width).saturating_sub(used + reserved + usize::from(MENU_WIDTH + CLOSE_WIDTH)).min(MAX_NAME);
     line.push(Span::styled(truncate_right(&tab.name, room), style));
+    if let Some(n) = others {
+        line.extend([Span::styled(" ", bg), Span::styled(n, bg.fg(view.muted))]);
+    }
     f.render_widget(Paragraph::new(Line::from(line)).style(bg), r);
 }
 
@@ -336,6 +347,12 @@ mod tests {
         fn a_status_takes_two_more_cells() {
             let tab = TabEntry { status: Some(Status::Working), ..TabEntry::from("claude") };
             assert_eq!(width(&tab), 1 + 2 + 6 + MENU_WIDTH + CLOSE_WIDTH);
+        }
+
+        #[test]
+        fn the_other_panes_of_a_split_take_their_count() {
+            let tab = TabEntry { others: 2, ..TabEntry::from("zsh") };
+            assert_eq!(width(&tab), 1 + 3 + 3 + MENU_WIDTH + CLOSE_WIDTH);
         }
 
         #[test]

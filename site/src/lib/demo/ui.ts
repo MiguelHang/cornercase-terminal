@@ -42,6 +42,7 @@ import {
   styleLabels,
   type Details,
   tabLines,
+  tabOthers,
   tabsIn,
   treeActiveRow,
   treeDepth,
@@ -334,8 +335,10 @@ export class Painter {
       const status = tabStatus(tab);
       const line: Line = [seg(' ', bg)];
       if (status) line.push({ ...STATUS_ICONS[status], s: { ...bg, ...STATUS_ICONS[status].s } }, seg(' ', bg));
-      const room = Math.max(0, r.w - width(line) - 5);
+      const count = tabOthers(tab.panes.length - 1);
+      const room = Math.max(0, r.w - width(line) - 5 - (count ? 1 + count.length : 0));
       line.push(seg(truncateRight(tabLabel(tab), room), active ? { ...bg, fg: 15, add: BOLD } : { ...bg, fg: 7 }));
+      if (count) line.push(seg(' ', bg), seg(count, { ...bg, fg: 8 }));
       this.band(r, line, bg);
       const grab: Target = { kind: 'tab', project: project.id, workspace: project.workspaces[w].id, tab: tab.id };
       const menu = (x: number, y: number) => app.openMenu({ x, y }, grab);
