@@ -39,7 +39,9 @@ use crate::search::{self, Candidate, Goto, Kind, Search};
 use crate::secrets;
 use crate::settings::{self, Page, Settings, Status};
 use crate::split::{self, Dir};
-use crate::state::{self, ChangesState, IssuesState, PaneState, ProjectState, State, TabState, WorkspaceState};
+use crate::state::{
+    self, AgentState, ChangesState, IssuesState, PaneState, ProjectState, State, TabState, WorkspaceState,
+};
 use crate::term::{SpawnOptions, Term};
 use crate::todo::{self, Todos};
 use crate::ui::changes::{self as panel, Action as HunkAction, Hit as PanelHit};
@@ -275,6 +277,7 @@ const WATCH_AGENTS_EVERY: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const AUTO_SCROLL_EVERY: Duration = Duration::from_millis(150);
 const LAUNCH_EVERY: Duration = Duration::from_millis(100);
+const RESUME_GRACE: Duration = Duration::from_secs(30);
 const TOAST_FOR: Duration = Duration::from_secs(2);
 const UNDO_FOR: Duration = Duration::from_secs(6);
 const BUG_FOR: Duration = Duration::from_secs(6);
@@ -470,23 +473,45 @@ impl Toast {
     }
 }
 
-fn agent_in(config: &Config, dir: Option<&Path>, term: &mut Term) -> Option<(String, activity::Activity)> {
+fn agent_in(
+    config: &Config,
+    dir: Option<&Path>,
+    term: &mut Term,
+    now: Instant,
+) -> Option<(String, activity::Activity)> {
     let pid = term.foreground_pid();
     let args = pid.map(process::args).unwrap_or_default();
     match (pid, agents::detect(config, &args)) {
         (Some(pid), Some(agent)) if agent == agents::CLAUDE => {
             let claude = Claude { pid, args, session: Session::read(dir, pid) };
             term.context.update(dir, Some(&claude));
+            remember(config, term, Some((&agent, &claude.args)), now);
             Some((agent, claude.activity(&term.emulator.title())))
         }
         (Some(pid), Some(agent)) if agent == agents::CODEX => {
             term.context.update_codex(pid);
+            remember(config, term, Some((&agent, &args)), now);
             Some((agent, activity::codex(&term.emulator.title(), term.context.codex_turn())))
         }
         _ => {
             term.context.update(dir, None);
+            remember(config, term, None, now);
             None
         }
+    }
+}
+
+fn remember(config: &Config, term: &mut Term, agent: Option<(&str, &[String])>, now: Instant) {
+    let found = agent.zip(term.context.conversation()).map(|((agent, args), conversation)| AgentState {
+        kind: agent.to_string(),
+        conversation: conversation.to_string(),
+        mode: agents::mode_of(args, &agents::modes(config, agent)),
+    });
+    if found.is_some() {
+        term.resuming = None;
+    }
+    if found.is_some() || term.resuming.is_none_or(|until| now >= until) {
+        term.resume = found;
     }
 }
 
@@ -857,7 +882,7 @@ impl App {
                     let seen = visible == Some(tab.id);
                     for term in &mut tab.panes {
                         if read {
-                            let found = agent_in(config, dir, term);
+                            let found = agent_in(config, dir, term, now);
                             let activity = found.as_ref().map(|(_, activity)| *activity);
                             let before = term.agent.status();
                             term.agent.follow(found.as_ref().map(|(agent, _)| agent.as_str()));
@@ -1364,6 +1389,7 @@ impl App {
                                     .map(|term| PaneState {
                                         cwd: term.cwd(),
                                         right_clicks: t.right_clicks_to_pane(term.id),
+                                        agent: term.resume.clone(),
                                     })
                                     .collect(),
                                 active: t.active,
@@ -1479,13 +1505,25 @@ impl App {
         let mut panes = Vec::new();
         for pane in &saved.panes {
             let cwd = pane.cwd.clone().filter(|cwd| cwd.is_dir()).unwrap_or_else(|| dir.to_path_buf());
-            panes.push(self.spawn(area, cwd)?);
+            let mut term = self.spawn(area, cwd)?;
+            self.resume(&mut term, pane.agent.as_ref());
+            panes.push(term);
         }
         let mut tab = Tab::restored(self.take_id(), saved.name.clone(), panes, saved.layout.as_ref());
         tab.active = saved.active.min(tab.panes.len() - 1);
         tab.right_clicks =
             saved.panes.iter().zip(&tab.panes).filter(|(s, _)| s.right_clicks).map(|(_, t)| t.id).collect();
         Ok(tab)
+    }
+
+    fn resume(&mut self, term: &mut Term, agent: Option<&AgentState>) {
+        let Some(agent) = agent.filter(|_| self.config.resume_agents) else { return };
+        let Some(line) = agents::resume_line(&self.config, agent) else { return };
+        log::info!("app", "resuming a conversation", pane = term.id, agent = agent.kind);
+        let now = Instant::now();
+        self.launches.push(Launch::command(term.id, line, now));
+        term.resume = Some(agent.clone());
+        term.resuming = Some(now + RESUME_GRACE);
     }
 
     fn remove(&mut self, id: u64) {
@@ -6893,7 +6931,7 @@ mod tests {
         fn workspace(path: &Path, cwds: Vec<Option<PathBuf>>) -> WorkspaceState {
             let tabs = cwds.into_iter().map(|cwd| TabState {
                 name: None,
-                panes: vec![PaneState { cwd, right_clicks: false }],
+                panes: vec![PaneState { cwd, right_clicks: false, agent: None }],
                 active: 0,
                 layout: None,
             });
@@ -6981,7 +7019,11 @@ mod tests {
 
         fn with_a_locked_pane(dir: &Path, locked: &Locked) -> WorkspaceState {
             let mut ws = workspace(dir, vec![None, None]);
-            ws.tabs[0].panes.push(PaneState { cwd: Some(locked.path().to_path_buf()), right_clicks: false });
+            ws.tabs[0].panes.push(PaneState {
+                cwd: Some(locked.path().to_path_buf()),
+                right_clicks: false,
+                agent: None,
+            });
             ws
         }
 
@@ -7451,9 +7493,13 @@ rm -f "$1/sessions/$$.json"
             }
 
             fn start(&self, app: &mut App) {
+                self.start_with(app, "");
+            }
+
+            fn start_with(&self, app: &mut App, args: &str) {
                 app.claude_dir = Some(self.dir.path().to_path_buf());
                 let unset = format!("env -u {} -u {}", crate::context::NO_LONG_ENV, crate::context::NO_COMPACT_ENV);
-                type_line(app, &format!("{unset} {} {}", self.script.display(), self.dir.path().display()));
+                type_line(app, &format!("{unset} {} {} {args}", self.script.display(), self.dir.path().display()));
             }
 
             fn signal(&self, name: &str) {
@@ -7920,6 +7966,117 @@ rm -f "$1/sessions/$$.json"
             w.report("waiting", 6);
 
             assert_eq!(toast(&w.app), Some("codex needs you in shop]0;evil › default"));
+        }
+
+        mod resuming {
+            use super::*;
+
+            const CODEX_ID: &str = "019a1234-5678-7000-8000-000000000001";
+
+            fn saved_agent(saved: &State) -> Option<&AgentState> {
+                saved.projects[0].workspaces[0].tabs[0].panes[0].agent.as_ref()
+            }
+
+            fn remembered(app: &mut App, rx: &Receiver<AppEvent>) -> State {
+                watch_until(app, rx, "the conversation is known", |a| term(a, 0).resume.is_some());
+                app.state()
+            }
+
+            fn restored(saved: &State, kind: &str, on: bool) -> (App, Receiver<AppEvent>, TempDir) {
+                let (mut app, rx) = empty_app();
+                let bin = TempDir::new();
+                let fake = bin.path().join(kind);
+                write_executable(&fake, "#!/bin/sh\necho \"resumed: $*\"\n");
+                app.config.agent_commands.insert(kind.into(), fake.display().to_string());
+                app.config.resume_agents = on;
+                app.restore(saved, AREA);
+                (app, rx, bin)
+            }
+
+            fn squeezed(text: &str) -> String {
+                text.split_whitespace().collect()
+            }
+
+            fn wait_resumed(app: &mut App, rx: &Receiver<AppEvent>, line: &str) {
+                wait_until("the conversation is resumed", || {
+                    while let Ok(ev) = rx.try_recv() {
+                        app.handle_event(ev, AREA).expect("handle event");
+                    }
+                    app.refresh(Instant::now());
+                    squeezed(&screen(app)).contains(&squeezed(&format!("resumed: {line}")))
+                });
+            }
+
+            #[test]
+            fn claude_comes_back_in_its_conversation_and_mode() {
+                let (mut app, rx, _dirs) = app_with(1);
+                let claude = Claude::running(ANSWERING_CLAUDE);
+                claude.start_with(&mut app, "--permission-mode plan");
+                let saved = remembered(&mut app, &rx);
+                claude.signal("quit");
+                let (mut back, rx, _bin) = restored(&saved, agents::CLAUDE, true);
+
+                wait_resumed(&mut back, &rx, "--permission-mode plan --resume s1");
+
+                let expected =
+                    AgentState { kind: "claude".into(), conversation: "s1".into(), mode: Some("plan".into()) };
+                assert_eq!(saved_agent(&saved), Some(&expected));
+            }
+
+            #[test]
+            fn codex_comes_back_in_its_conversation() {
+                let (mut app, rx, _dirs) = app_with(1);
+                let codex = FakeCodex::new(CODEX_ID, "gpt-5.4", false);
+                type_line(&mut app, &codex.command_line());
+                let saved = remembered(&mut app, &rx);
+                codex.signal("quit", "");
+                let (mut back, rx, _bin) = restored(&saved, agents::CODEX, true);
+
+                wait_resumed(&mut back, &rx, &format!("resume {CODEX_ID}"));
+            }
+
+            #[test]
+            fn the_conversation_is_kept_until_its_agent_is_back_or_the_grace_runs_out() {
+                let (mut app, rx, _dirs) = app_with(1);
+                let claude = Claude::running(ANSWERING_CLAUDE);
+                claude.start(&mut app);
+                let saved = remembered(&mut app, &rx);
+                claude.signal("quit");
+                let (mut back, _rx, _bin) = restored(&saved, agents::CLAUDE, true);
+                back.launches.clear();
+                let now = Instant::now();
+
+                back.watch_agents(now + RESUME_GRACE / 2);
+                let kept = saved_agent(&back.state()).cloned();
+                back.watch_agents(now + RESUME_GRACE + WATCH_AGENTS_EVERY);
+
+                assert_eq!((kept.as_ref(), saved_agent(&back.state())), (saved_agent(&saved), None));
+            }
+
+            #[test]
+            fn a_pane_whose_agent_quit_comes_back_as_a_shell() {
+                let (mut app, rx, _dirs) = app_with(1);
+                let claude = Claude::running(ANSWERING_CLAUDE);
+                claude.start(&mut app);
+                remembered(&mut app, &rx);
+
+                claude.signal("quit");
+
+                watch_until(&mut app, &rx, "the conversation is forgotten", |a| saved_agent(&a.state()).is_none());
+            }
+
+            #[test]
+            fn nothing_resumes_when_it_is_turned_off() {
+                let (mut app, rx, _dirs) = app_with(1);
+                let claude = Claude::running(ANSWERING_CLAUDE);
+                claude.start(&mut app);
+                let saved = remembered(&mut app, &rx);
+                claude.signal("quit");
+
+                let (back, _rx, _bin) = restored(&saved, agents::CLAUDE, false);
+
+                assert_eq!((back.launches.len(), saved_agent(&back.state())), (0, None));
+            }
         }
 
         mod agents_section {
@@ -9415,7 +9572,7 @@ rm -f "$1/sessions/$$.json"
         fn a_tab_saved_without_a_layout_puts_its_panes_side_by_side() {
             let dir = TempDir::new();
             let (mut app, _rx) = empty_app();
-            let pane_state = PaneState { cwd: None, right_clicks: false };
+            let pane_state = PaneState { cwd: None, right_clicks: false, agent: None };
             let tab = TabState { name: None, panes: vec![pane_state.clone(), pane_state], active: 1, layout: None };
             let workspace = WorkspaceState {
                 path: dir.path().to_path_buf(),
