@@ -9,11 +9,15 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::activity::Claude;
+use crate::agents;
 use crate::log::Stamp;
 use crate::process;
 
 mod codex;
+mod message;
 mod opencode;
+
+pub use message::{Record, Said};
 
 const TAIL: u64 = 1024 * 1024;
 const DIR_NAME_MAX: usize = 200;
@@ -147,6 +151,18 @@ impl Pane {
 
     pub fn opencode_turn(&self) -> Option<bool> {
         self.opencode.as_ref().map(|session| session.turn)
+    }
+
+    pub fn record_for(&self, agent: &str) -> Option<Record> {
+        Some(match agent {
+            agents::CLAUDE => Record::Claude(self.transcript.as_ref()?.path.clone()),
+            agents::CODEX => Record::Codex(self.codex.as_ref()?.path.clone()),
+            agents::OPENCODE => {
+                let place = self.opencode.as_ref()?.place.clone()?;
+                Record::Opencode { database: place.database, session: place.id }
+            }
+            _ => return None,
+        })
     }
 
     pub fn conversation(&self) -> Option<&str> {
@@ -286,7 +302,7 @@ impl Transcript {
 }
 
 #[derive(Deserialize)]
-struct Record {
+struct Line {
     #[serde(rename = "type")]
     kind: Option<String>,
     #[serde(rename = "isSidechain")]
@@ -296,7 +312,7 @@ struct Record {
     origin: Option<Origin>,
     operation: Option<String>,
     content: Option<Value>,
-    message: Option<Said>,
+    message: Option<Sent>,
     timestamp: Option<String>,
 }
 
@@ -306,7 +322,7 @@ struct Origin {
 }
 
 #[derive(Deserialize)]
-struct Said {
+struct Sent {
     content: Option<Value>,
 }
 
@@ -315,7 +331,7 @@ fn prompt(line: &[u8], read_at: SystemTime) -> Option<SystemTime> {
     if ![TYPED, QUEUED, COMMAND, SHELL_INPUT].iter().any(|marker| line.contains(marker)) {
         return None;
     }
-    let record: Record = serde_json::from_str(line).ok()?;
+    let record: Line = serde_json::from_str(line).ok()?;
     if record.sidechain == Some(true) || record.meta == Some(true) {
         return None;
     }
@@ -1029,6 +1045,23 @@ mod tests {
 
     mod pane {
         use super::*;
+
+        #[test]
+        fn the_record_is_the_one_of_the_agent_asked_for() {
+            let place = opencode::Place { database: "/d/opencode.db".into(), id: "ses".into() };
+            let replaced = Pane {
+                codex: Some(codex::Rollout::new("/c/rollout.jsonl".into())),
+                opencode: Some(opencode::Session { place: Some(place), ..opencode::Session::default() }),
+                ..Pane::default()
+            };
+
+            let found = [agents::OPENCODE, agents::CLAUDE].map(|agent| replaced.record_for(agent));
+
+            assert_eq!(
+                found,
+                [Some(Record::Opencode { database: "/d/opencode.db".into(), session: "ses".into() }), None]
+            );
+        }
 
         fn answered() -> (Setup, Pane) {
             let s = Setup::new(&[]);

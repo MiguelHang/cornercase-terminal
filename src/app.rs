@@ -14,7 +14,7 @@ use crate::changes::diff::File as ChangedFile;
 use crate::changes::{self, BranchPicker, Checkout, Tints};
 use crate::clipboard;
 use crate::config::{self, Config};
-use crate::context::Context;
+use crate::context::{self, Context};
 use crate::error::{Error, Result};
 use crate::files;
 use crate::git;
@@ -163,6 +163,10 @@ pub enum AppEvent {
     UpdateChecked(Result<Option<Release>>),
     Updated(Result<()>),
     Usage(usage::Agent, Result<usage::Report>),
+    LastMessage {
+        request: u64,
+        result: Result<Option<context::Said>>,
+    },
 }
 
 impl AppEvent {
@@ -190,6 +194,7 @@ impl AppEvent {
             Self::UpdateChecked(_) => "update checked",
             Self::Updated(_) => "updated",
             Self::Usage(..) => "usage",
+            Self::LastMessage { .. } => "last message",
         }
     }
 }
@@ -1673,6 +1678,7 @@ impl App {
             AppEvent::UpdateChecked(result) => self.update_checked(result),
             AppEvent::Updated(result) => self.updated(result),
             AppEvent::Usage(agent, result) => self.usage.answered(agent, result, Instant::now()),
+            AppEvent::LastMessage { request, result } => self.message_read(request, result),
             AppEvent::Output(id, bytes) => {
                 for launch in self.launches.iter_mut().filter(|l| l.term == id) {
                     launch.output(Instant::now());
@@ -7886,7 +7892,7 @@ rm -f "$1/sessions/$$.json"
 
             fn start_with(&self, app: &mut App, args: &str) {
                 app.claude_dir = Some(self.dir.path().to_path_buf());
-                let unset = format!("env -u {} -u {}", crate::context::NO_LONG_ENV, crate::context::NO_COMPACT_ENV);
+                let unset = format!("env -u {} -u {}", context::NO_LONG_ENV, context::NO_COMPACT_ENV);
                 type_line(app, &format!("{unset} {} {} {args}", self.script.display(), self.dir.path().display()));
             }
 
@@ -13245,6 +13251,20 @@ rm -f "$s"
             }
 
             #[test]
+            fn the_last_message_needs_an_agent_that_keeps_one() {
+                let (mut app, _rx) = app();
+                let id = first(&app);
+                let last = Command::LastMessage(wire::LastMessage { pane: Some(id), tab: None });
+
+                let message = error(now(&mut app, None, last));
+
+                assert!(
+                    message.starts_with(&format!("pane {id} runs no agent, and cornercase only reads")),
+                    "{message}"
+                );
+            }
+
+            #[test]
             fn wait_until_shell_ends_once_the_program_does() {
                 let (mut app, rx) = app();
                 let id = first(&app);
@@ -13782,6 +13802,96 @@ rm -f "$s"
 
                 assert!(message.contains("waiting for an answer"), "{message}");
                 assert_eq!(agent.status(id), Some(activity::Status::Waiting));
+            }
+
+            fn last_message(pane: u64) -> Command {
+                Command::LastMessage(wire::LastMessage { pane: Some(pane), tab: None })
+            }
+
+            impl Agent {
+                fn transcript(&mut self, id: u64, lines: &[&str]) {
+                    let (app, rx) = (&mut self.app, &self.rx);
+                    refreshing(app, rx, "the pane knows its conversation", |a| {
+                        pane(a, id).context.record_for(crate::agents::CLAUDE).is_some()
+                    });
+                    let Some(context::Record::Claude(path)) =
+                        pane(&self.app, id).context.record_for(crate::agents::CLAUDE)
+                    else {
+                        panic!("not a transcript")
+                    };
+                    let mut file =
+                        std::fs::OpenOptions::new().create(true).append(true).open(path).expect("open the transcript");
+                    let text: String = lines.iter().flat_map(|line| [*line, "\n"]).collect();
+                    std::io::Write::write_all(&mut file, text.as_bytes()).expect("write the transcript");
+                }
+            }
+
+            #[test]
+            fn read_last_message_gives_what_the_agent_wrote_last_and_whether_its_turn_is_over() {
+                let mut agent = Agent::new();
+                let id = agent.start(None);
+                agent.transcript(id, &[
+                    r#"{"type":"user","message":{"role":"user","content":"fix the login"}}"#,
+                    r#"{"type":"assistant","timestamp":"2026-10-08T19:56:37.241Z","message":{"id":"m1","model":"claude-opus-5-5","content":[{"type":"text","text":"Fixed the login form."}]}}"#,
+                ]);
+                ask(&mut agent.app, None, send_text(id, "next step", true, false));
+                done(agent.answered("the enter is pressed"));
+                let (app, rx) = (&mut agent.app, &agent.rx);
+                refreshing(app, rx, "the agent works", |a| {
+                    pane(a, id).agent.status() == Some(activity::Status::Working)
+                });
+
+                ask(&mut agent.app, None, last_message(id));
+                let working = done(agent.answered("the transcript is read"));
+                agent.finish();
+                let (app, rx) = (&mut agent.app, &agent.rx);
+                refreshing(app, rx, "the agent stops", |a| {
+                    pane(a, id).agent.status() != Some(activity::Status::Working)
+                });
+                ask(&mut agent.app, None, last_message(id));
+                let over = done(agent.answered("the transcript is read again"));
+
+                assert_eq!(working.text.as_deref(), Some("Fixed the login form."));
+                assert_eq!(
+                    (working.agent.as_deref(), working.written.as_deref()),
+                    (Some("claude"), Some("2026-10-08T19:56:37.241Z"))
+                );
+                assert_eq!((working.turn_over, over.turn_over), (Some(false), Some(true)));
+                assert_eq!(working.ids.pane, Some(id));
+            }
+
+            #[test]
+            fn the_record_of_another_agent_is_not_read() {
+                let mut agent = Agent::new();
+                let id = agent.start(None);
+                let (app, rx) = (&mut agent.app, &agent.rx);
+                refreshing(app, rx, "the pane knows its conversation", |a| {
+                    pane(a, id).context.record_for(crate::agents::CLAUDE).is_some()
+                });
+                let term = agent.app.projects.iter_mut().flat_map(Project::terms_mut).find(|t| t.id == id);
+                term.expect("the agent's pane").agent.follow(Some(crate::agents::CODEX));
+
+                let message = error(now(&mut agent.app, None, last_message(id)));
+
+                assert!(
+                    message.starts_with(&format!("cornercase has not found where the codex agent in pane {id}")),
+                    "{message}"
+                );
+            }
+
+            #[test]
+            fn an_agent_that_has_not_written_yet_has_no_last_message() {
+                let mut agent = Agent::new();
+                let id = agent.start(None);
+                let (app, rx) = (&mut agent.app, &agent.rx);
+                refreshing(app, rx, "the pane knows its conversation", |a| {
+                    pane(a, id).context.record_for(crate::agents::CLAUDE).is_some()
+                });
+
+                ask(&mut agent.app, None, last_message(id));
+
+                let message = error(agent.answered("the transcript is looked for"));
+                assert_eq!(message, format!("the claude agent in pane {id} has not written a message yet"));
             }
         }
 
