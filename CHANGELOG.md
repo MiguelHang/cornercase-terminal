@@ -2,6 +2,10 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.12.7
+
+- `cornercase wait` can watch several panes at once: repeat `--pane` or `--tab` and add `--any` to return as soon as one of them meets the condition, or `--all` to return once every one has. It prints one line per pane, its id and how it ended (`15 idle`), and `--json` gives the same as a list. A pane that closes meanwhile ends as `closed` instead of failing the wait. An agent coordinating others no longer needs one background wait per agent.
+
 ## 0.12.6
 
 - Commands for scripts and agents can name a workspace by its branch: wherever they take `--workspace ID` (`new-tab`, `close`, `rename`, `focus`), `--worktree BRANCH` picks the workspace on that branch in the current project, the way `start --worktree` already did. So `cornercase close --worktree feat/x --remove-worktree` takes down a worktree an agent started, without looking its id up in `cornercase status`. A branch no workspace is on, or one several are on, exits with status 2 and lists the workspaces to pick from.
