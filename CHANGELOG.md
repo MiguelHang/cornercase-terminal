@@ -4,7 +4,7 @@ Every pull request that changes the app adds a section here for its new version.
 
 ## 0.11.16
 
-- Tabs can move out of the sidebar into a bar above the terminal, like an editor's: set **Settings → UI → tabs** to *top*. Only the active workspace's tabs show there, each with its status (`!`, `✓`, `◐`, `○`), and the sidebar keeps groups, projects and workspaces, so more of them fit; in the tree it ends at the workspaces. A grey line under the tabs shows the model, context and memory of the pane you are in. Click a tab to show it, `×` on hover closes it, `+` opens a shell, drag a tab sideways to reorder it, and `‹` `›` or the wheel scroll the tabs when they don't fit. The default stays *sidebar*, and below 90 columns the compact menu lists the tabs as before.
+- Tabs can move out of the sidebar into a bar above the terminal, like an editor's: set **Settings → UI → tabs** to *top*. Only the active workspace's tabs show there, each with its status (`!`, `✓`, `◐`, `○`), and the sidebar keeps groups, projects and workspaces, so more of them fit; in the tree it ends at the workspaces. A grey line under the tabs shows the model, context and memory of the pane you are in. Click a tab to show it, `⋯` and `×` on hover open its menu and close it, `+` opens a shell, drag a tab sideways to reorder it, and `‹` `›` or the wheel scroll the tabs when they don't fit. The default stays *sidebar*, and below 90 columns the compact menu lists the tabs as before.
 
 ## 0.11.15
 

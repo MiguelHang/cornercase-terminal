@@ -6,11 +6,15 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::{Details, Drag, TabEntry, View, button_style, draw_close, draw_details, status_icon, truncate_right};
+use super::{
+    Details, Drag, ROW_MENU_ICON, TabEntry, View, button_style, centered, draw_band, draw_details, hovered,
+    status_icon, truncate_right,
+};
 
 pub const HEIGHT: u16 = 2;
 const MAX_NAME: usize = 24;
 const CLOSE_WIDTH: u16 = 3;
+const MENU_WIDTH: u16 = 2;
 const BUTTON_WIDTH: u16 = 3;
 const NEW_LABEL: &str = "+";
 const LEFT_LABEL: &str = "‹";
@@ -32,7 +36,7 @@ impl TabBar {
 pub fn width(tab: &TabEntry) -> u16 {
     let icon = if tab.status.is_some() { 2 } else { 0 };
     let name = tab.name.chars().count().min(MAX_NAME);
-    u16::try_from(1 + icon + name).unwrap_or(u16::MAX).saturating_add(CLOSE_WIDTH)
+    u16::try_from(1 + icon + name).unwrap_or(u16::MAX).saturating_add(MENU_WIDTH + CLOSE_WIDTH)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +50,7 @@ pub struct Strip {
 pub enum Hit {
     Tab(usize),
     Close(usize),
+    Menu(usize),
     New,
     Scroll(isize),
 }
@@ -108,6 +113,12 @@ impl Strip {
     pub fn close(&self, i: usize) -> Rect {
         let r = self.item(i);
         Rect { x: r.right().saturating_sub(CLOSE_WIDTH), width: CLOSE_WIDTH.min(r.width), ..r }
+    }
+
+    pub fn menu(&self, i: usize) -> Rect {
+        let close = self.close(i);
+        let x = close.x.saturating_sub(MENU_WIDTH).max(self.item(i).x);
+        Rect { x, width: close.x - x, ..close }
     }
 
     pub fn at(&self, pos: Position) -> Option<usize> {
@@ -180,7 +191,13 @@ impl Strip {
             return Some(Hit::Scroll(1));
         }
         let i = self.at(pos)?;
-        Some(if self.close(i).contains(pos) { Hit::Close(i) } else { Hit::Tab(i) })
+        Some(if self.close(i).contains(pos) {
+            Hit::Close(i)
+        } else if self.menu(i).contains(pos) {
+            Hit::Menu(i)
+        } else {
+            Hit::Tab(i)
+        })
     }
 
     pub fn drop(&self, dragged: usize, pos: Position) -> Option<usize> {
@@ -224,9 +241,11 @@ pub fn draw(f: &mut Frame, view: &View, bar: &TabBar, r: Rect) {
         }
         let active = bar.active == Some(i);
         let lifted = dragged.is_some_and(|(t, _)| t == i);
-        draw_tab(f, view, &bar.tabs[i], item, active || lifted);
+        let marked = active || lifted;
+        let bg = view.row_background(item, marked);
+        draw_tab(f, view, &bar.tabs[i], (item, bg), marked);
         if view.row_hovered(item) {
-            draw_close(f.buffer_mut(), strip.close(i), view.hover, view.muted);
+            draw_tab_buttons(f, view, (strip.menu(i), strip.close(i)), bg);
         }
     }
     let (before, after) = strip.hidden();
@@ -247,8 +266,7 @@ pub fn draw(f: &mut Frame, view: &View, bar: &TabBar, r: Rect) {
     }
 }
 
-fn draw_tab(f: &mut Frame, view: &View, tab: &TabEntry, r: Rect, marked: bool) {
-    let bg = view.row_background(r, marked);
+fn draw_tab(f: &mut Frame, view: &View, tab: &TabEntry, (r, bg): (Rect, Style), marked: bool) {
     let style = if marked { bg.fg(Color::White).add_modifier(Modifier::BOLD) } else { bg.fg(Color::Gray) };
     let mut line = vec![Span::styled(" ", bg)];
     let mut used = 1;
@@ -257,9 +275,20 @@ fn draw_tab(f: &mut Frame, view: &View, tab: &TabEntry, r: Rect, marked: bool) {
         line.extend([Span::styled(icon.content, icon.style.patch(bg)), Span::styled(" ", bg)]);
         used += 2;
     }
-    let room = usize::from(r.width).saturating_sub(used + usize::from(CLOSE_WIDTH)).min(MAX_NAME);
+    let room = usize::from(r.width).saturating_sub(used + usize::from(MENU_WIDTH + CLOSE_WIDTH)).min(MAX_NAME);
     line.push(Span::styled(truncate_right(&tab.name, room), style));
     f.render_widget(Paragraph::new(Line::from(line)).style(bg), r);
+}
+
+fn draw_tab_buttons(f: &mut Frame, view: &View, (menu, close): (Rect, Rect), bg: Style) {
+    let style = |r: Rect, lit: Color| {
+        if hovered(view, r) { bg.fg(lit).add_modifier(Modifier::BOLD) } else { bg.fg(view.muted) }
+    };
+    let menu_style = style(menu, Color::Cyan);
+    let menu_text = format!("{ROW_MENU_ICON:>width$}", width = usize::from(menu.width));
+    draw_band(f, menu, Span::styled(menu_text, menu_style), menu_style);
+    let close_style = style(close, Color::Red);
+    draw_band(f, close, Span::styled(centered("×", close.width), close_style), close_style);
 }
 
 fn draw_button(f: &mut Frame, view: &View, r: Rect, label: &str, more: bool) {
@@ -297,24 +326,24 @@ mod tests {
 
         #[test]
         fn a_tab_is_its_name_padded_with_room_for_the_close_button() {
-            assert_eq!(width(&TabEntry::from("zsh")), 1 + 3 + CLOSE_WIDTH);
+            assert_eq!(width(&TabEntry::from("zsh")), 1 + 3 + MENU_WIDTH + CLOSE_WIDTH);
         }
 
         #[test]
         fn a_status_takes_two_more_cells() {
             let tab = TabEntry { status: Some(Status::Working), ..TabEntry::from("claude") };
-            assert_eq!(width(&tab), 1 + 2 + 6 + CLOSE_WIDTH);
+            assert_eq!(width(&tab), 1 + 2 + 6 + MENU_WIDTH + CLOSE_WIDTH);
         }
 
         #[test]
         fn a_long_name_is_cut() {
-            assert_eq!(width(&TabEntry::from("x".repeat(80).as_str())), 1 + 24 + CLOSE_WIDTH);
+            assert_eq!(width(&TabEntry::from("x".repeat(80).as_str())), 1 + 24 + MENU_WIDTH + CLOSE_WIDTH);
         }
 
         #[test]
         fn tabs_that_fit_sit_side_by_side_with_the_new_button_after_them() {
             let s = strip(&["zsh", "claude"], 0);
-            assert_eq!((s.item(0).x, s.item(1).x, s.new_button().x), (10, 17, 27));
+            assert_eq!((s.item(0).x, s.item(1).x, s.new_button().x), (10, 19, 31));
             assert_eq!((s.left(), s.right()), (Rect::default(), Rect::default()));
         }
 
@@ -357,8 +386,9 @@ mod tests {
 
         #[rstest]
         #[case::the_name(11, Some(Hit::Tab(0)))]
-        #[case::the_close_button(15, Some(Hit::Close(0)))]
-        #[case::the_new_button(28, Some(Hit::New))]
+        #[case::the_menu_button(15, Some(Hit::Menu(0)))]
+        #[case::the_close_button(17, Some(Hit::Close(0)))]
+        #[case::the_new_button(32, Some(Hit::New))]
         #[case::past_the_tabs(40, None)]
         fn on_a_bar_that_fits(#[case] x: u16, #[case] hit: Option<Hit>) {
             assert_eq!(strip(&["zsh", "claude"], 0).hit(Position::new(x, 0)), hit);

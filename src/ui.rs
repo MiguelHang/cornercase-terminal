@@ -8442,12 +8442,18 @@ mod tests {
         }
 
         #[test]
-        fn the_close_button_shows_only_on_hover() {
+        fn the_menu_and_close_buttons_show_only_on_hover() {
             let v = with_bar();
-            let close = v.tab_bar.as_ref().expect("a bar").strip(bar()).close(1);
-            let symbol = |v: &View| render(v).backend().buffer()[(close.x + 1, close.y)].symbol().to_string();
-            assert_eq!(symbol(&v), " ");
-            assert_eq!(symbol(&View { hover: Some(close.as_position()), ..with_bar() }), "×");
+            let strip = v.tab_bar.as_ref().expect("a bar").strip(bar());
+            let (menu, close) = (strip.menu(1), strip.close(1));
+            let symbols = |v: &View| {
+                let t = render(v);
+                let cell = |x: u16, y: u16| t.backend().buffer()[(x, y)].symbol().to_string();
+                (cell(menu.right() - 1, menu.y), cell(close.x + 1, close.y))
+            };
+            assert_eq!(symbols(&v), (" ".into(), " ".into()));
+            let hovered = View { hover: Some(close.as_position()), ..with_bar() };
+            assert_eq!(symbols(&hovered), (ROW_MENU_ICON.into(), "×".into()));
         }
 
         #[test]

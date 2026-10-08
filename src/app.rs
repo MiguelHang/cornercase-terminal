@@ -1236,7 +1236,11 @@ impl App {
             (MouseEventKind::Down(MouseButton::Left), ui::tab_bar::Hit::Scroll(delta)) => {
                 self.tab_bar_scroll = strip.scrolled(delta);
             }
-            (MouseEventKind::Down(MouseButton::Right), ui::tab_bar::Hit::Tab(t) | ui::tab_bar::Hit::Close(t)) => {
+            (MouseEventKind::Down(MouseButton::Left), ui::tab_bar::Hit::Menu(t))
+            | (
+                MouseEventKind::Down(MouseButton::Right),
+                ui::tab_bar::Hit::Tab(t) | ui::tab_bar::Hit::Close(t) | ui::tab_bar::Hit::Menu(t),
+            ) => {
                 self.overlay = Some(Overlay::Menu { at: pos, actions: vec![MenuAction::Rename(target(t))] });
             }
             _ => {}
@@ -9475,6 +9479,18 @@ rm -f "$1/sessions/$$.json"
             let pos = strip(&app).close(0).as_position();
             click(&mut app, pos);
             pump_until(&mut app, &rx, "the first tab closes", |a| a.projects[0].workspaces[0].tabs.len() == 1);
+        }
+
+        #[test]
+        fn the_menu_button_opens_the_tab_menu() {
+            let (mut app, _rx, _dirs) = on_top(2);
+            let pos = strip(&app).menu(1).as_position();
+            press(&mut app, pos);
+            let tab = app.projects[0].workspaces[0].tabs[1].id;
+            let Some(Overlay::Menu { actions, .. }) = &app.overlay else {
+                panic!("no menu: {:?}", app.overlay.is_some())
+            };
+            assert!(matches!(actions[..], [MenuAction::Rename(Target::Tab(_, _, id))] if id == tab));
         }
 
         #[test]

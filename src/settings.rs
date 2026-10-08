@@ -821,18 +821,7 @@ impl Settings {
                 let value = if detail.on(config) { "[x] shown" } else { "[ ] hidden" };
                 (detail.label().into(), value.into(), detail.note().into(), false)
             }
-            Row::Sidebar => (
-                "sidebar".into(),
-                ui::Sidebar::from_setting(&config.sidebar).id().into(),
-                "how projects, workspaces and tabs are laid out".into(),
-                false,
-            ),
-            Row::Tabs => (
-                "tabs".into(),
-                ui::Tabs::from_setting(&config.tabs).id().into(),
-                "where a workspace's tabs are listed".into(),
-                false,
-            ),
+            Row::Sidebar | Row::Tabs => layout_row(config, row),
             Row::Notifications => (
                 "desktop notifications".into(),
                 config.desktop_notifications.clone(),
@@ -941,6 +930,15 @@ fn with_args(config: &Config, kind: &str, args: Vec<String>) -> Config {
         agent_args.insert(kind.to_string(), args);
     }
     Config { agent_args, ..config.clone() }
+}
+
+fn layout_row(config: &Config, row: &Row) -> (String, String, String, bool) {
+    let (label, value, note) = if *row == Row::Tabs {
+        ("tabs", ui::Tabs::from_setting(&config.tabs).id(), "where a workspace's tabs are listed")
+    } else {
+        ("sidebar", ui::Sidebar::from_setting(&config.sidebar).id(), "how projects, workspaces and tabs are laid out")
+    };
+    (label.into(), value.into(), note.into(), false)
 }
 
 fn jira_row(config: &Config, row: &Row) -> (String, String, String, bool) {

@@ -332,15 +332,20 @@ export class Painter {
       const status = tabStatus(tab);
       const line: Line = [seg(' ', bg)];
       if (status) line.push({ ...STATUS_ICONS[status], s: { ...bg, ...STATUS_ICONS[status].s } }, seg(' ', bg));
-      const room = Math.max(0, r.w - width(line) - 3);
+      const room = Math.max(0, r.w - width(line) - 5);
       line.push(seg(truncateRight(tabLabel(tab), room), active ? { ...bg, fg: 15, add: BOLD } : { ...bg, fg: 7 }));
       this.band(r, line, bg);
       const grab: Target = { kind: 'tab', project: project.id, workspace: project.workspaces[w].id, tab: tab.id };
-      this.region({ r, click: () => app.selectTab(p, w, t), right: (x, y) => app.openMenu({ x, y }, grab), cursor: 'pointer' });
+      const menu = (x: number, y: number) => app.openMenu({ x, y }, grab);
+      this.region({ r, click: () => app.selectTab(p, w, t), right: menu, cursor: 'pointer' });
       if (this.sidebarHovered(r)) {
+        const style = (b: Rect, lit: number): Style => (this.hovered(b) ? { ...bg, fg: lit, add: BOLD } : { ...bg, fg: 8 });
+        const m = strip.menu(t);
+        this.band(m, [seg(ROW_MENU_ICON.padStart(m.w))], style(m, 6));
+        this.region({ r: m, click: menu, right: menu, cursor: 'pointer' });
         const close = strip.close(t);
-        this.band(close, [seg(' ×')], this.hovered(close) ? { ...bg, fg: 1, add: BOLD } : { ...bg, fg: 8 });
-        this.region({ r: close, click: () => app.closeTab(p, w, t), cursor: 'pointer' });
+        this.band(close, [seg(centered('×', close.w))], style(close, 1));
+        this.region({ r: close, click: () => app.closeTab(p, w, t), right: menu, cursor: 'pointer' });
       }
     });
     const [before, after] = strip.hidden();

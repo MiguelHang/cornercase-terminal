@@ -902,9 +902,10 @@ export const styleDone = (cols: number, rows: number): Rect => rightAligned(styl
 
 const MAX_TAB_NAME = 24;
 const TAB_CLOSE_WIDTH = 3;
+const TAB_MENU_WIDTH = 2;
 const TAB_BUTTON_WIDTH = 3;
 
-export const tabWidth = (name: string, status: boolean): number => 1 + (status ? 2 : 0) + Math.min([...name].length, MAX_TAB_NAME) + TAB_CLOSE_WIDTH;
+export const tabWidth = (name: string, status: boolean): number => 1 + (status ? 2 : 0) + Math.min([...name].length, MAX_TAB_NAME) + TAB_MENU_WIDTH + TAB_CLOSE_WIDTH;
 
 export class Strip {
   private readonly row: Rect;
@@ -960,6 +961,12 @@ export class Strip {
   close(i: number): Rect {
     const r = this.item(i);
     return rect(right(r) - TAB_CLOSE_WIDTH, r.y, Math.min(TAB_CLOSE_WIDTH, r.w), r.h);
+  }
+
+  menu(i: number): Rect {
+    const close = this.close(i);
+    const x = Math.max(this.item(i).x, close.x - TAB_MENU_WIDTH);
+    return rect(x, close.y, close.x - x, close.h);
   }
 
   newButton(): Rect {
