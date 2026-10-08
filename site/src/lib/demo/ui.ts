@@ -323,12 +323,14 @@ export class Painter {
     const w = project.active;
     const tabs = project.workspaces[w]?.tabs ?? [];
     const strip = app.tabStrip(bar);
+    const drag = app.rowDragView();
+    const dragged = drag?.list === 'bar' && drag.row.kind === 'tab' ? drag.row.t : null;
     this.region({ r: bar, wheel: (dy) => app.scrollTabBar(bar, dy) });
     tabs.forEach((tab, t) => {
       const r = strip.item(t);
       if (isEmpty(r)) return;
       const active = tab === app.tab();
-      const bg = this.rowBackground(r, active);
+      const bg = this.rowBackground(r, active || dragged === t);
       const status = tabStatus(tab);
       const line: Line = [seg(' ', bg)];
       if (status) line.push({ ...STATUS_ICONS[status], s: { ...bg, ...STATUS_ICONS[status].s } }, seg(' ', bg));
@@ -337,7 +339,7 @@ export class Painter {
       this.band(r, line, bg);
       const grab: Target = { kind: 'tab', project: project.id, workspace: project.workspaces[w].id, tab: tab.id };
       const menu = (x: number, y: number) => app.openMenu({ x, y }, grab);
-      this.region({ r, click: () => app.selectTab(p, w, t), right: menu, cursor: 'pointer' });
+      this.region({ r, click: () => app.selectTab(p, w, t), right: menu, grab, cursor: 'pointer' });
       if (this.sidebarHovered(r)) {
         const style = (b: Rect, lit: number): Style => (this.hovered(b) ? { ...bg, fg: lit, add: BOLD } : { ...bg, fg: 8 });
         const m = strip.menu(t);
@@ -355,6 +357,8 @@ export class Painter {
       this.band(r, [seg(` ${label} `)], more ? this.buttonStyle(r, CYAN, 6) : DARK);
       if (more) this.region({ r, click: () => app.scrollTabBar(bar, dy), cursor: 'pointer' });
     }
+    const landing = drag?.list === 'bar' && drag.landing ? strip.landing(drag.landing.at) : null;
+    if (landing && !isEmpty(landing)) this.g.put(landing.x, landing.y, '│', { fg: 6, add: BOLD });
     const add = strip.newButton();
     this.band(add, [seg(' + ')], this.buttonStyle(add, CYAN, 6));
     this.region({ r: add, click: () => app.addTab(p, w), cursor: 'pointer' });

@@ -175,7 +175,8 @@ export interface AgentRow {
 export type RowDragView =
   | { list: 'sidebar'; row: SidebarRow; landing: Landing | null }
   | { list: 'workspaces'; row: WorkspaceRow; landing: Landing | null }
-  | { list: 'tree'; row: TreeRow; landing: Landing | null };
+  | { list: 'tree'; row: TreeRow; landing: Landing | null }
+  | { list: 'bar'; row: TreeRow; landing: Landing | null };
 
 function moveBefore<T>(items: T[], from: number, before: number, active: number): number {
   const to = before > from ? before - 1 : before;
@@ -649,7 +650,7 @@ export class App {
     return {
       model: c.model ? (pane?.context?.model ?? null) : null,
       percent: c.context ? (pane?.context?.percent ?? null) : null,
-      memory: null,
+      memory: c.memory ? (pane?.memory ?? null) : null,
     };
   }
 
@@ -666,6 +667,11 @@ export class App {
     const areas = this.areas();
     const row = this.treeRowOf(d.target);
     if (!row) return null;
+    if (row.kind === 'tab' && !isEmpty(areas.tabBar)) {
+      if (row.p !== this.active || row.w !== this.projects[row.p].active) return null;
+      const before = this.tabStrip(areas.tabBar).drop(row.t, h.x, h.y);
+      return { list: 'bar', row, landing: before === null ? null : { at: before, spot: { kind: 'tab', before } } };
+    }
     if (areas.tree) return { list: 'tree', row, landing: treeDrop(areas.list, this.treeShape(), this.projectsScroll, row, h.x, h.y) };
     if (row.kind === 'group' || row.kind === 'project') {
       return { list: 'sidebar', row, landing: sidebarDrop(areas.list, areas.pitch, this.sidebarRows(), this.projectsScroll, row, h.x, h.y) };
@@ -710,6 +716,16 @@ export class App {
     const h = this.hover;
     if (!d?.moved || !d.target || !h || this.now() - d.scrolled < AUTO_SCROLL_EVERY) return;
     const areas = this.areas();
+    if (d.target.kind === 'tab' && !isEmpty(areas.tabBar)) {
+      const strip = this.tabStrip(areas.tabBar);
+      const delta = strip.edge(h.x, h.y);
+      if (!delta) return;
+      this.tabBarScroll = strip.scrolled(delta);
+      d.scrolled = this.now();
+      this.dirty();
+      this.after(AUTO_SCROLL_EVERY, () => this.autoScroll());
+      return;
+    }
     const shape = this.treeShape();
     const sidebar = areas.tree || d.target.kind === 'group' || d.target.kind === 'project';
     const rows = areas.tree
@@ -728,7 +744,8 @@ export class App {
 
   private follow(): void {
     const p = this.project();
-    const { list, pitch, tree, tabBar } = layout(this.cols, this.rows, this.widths, 'projects', false, this.sidebar(), this.config.agentsSection, this.tabsOnTop());
+    const { tabBar } = this.areas();
+    const { list, pitch, tree } = layout(this.cols, this.rows, this.widths, 'projects', false, this.sidebar(), this.config.agentsSection, this.tabsOnTop());
     const focus: Focus = { project: p?.id ?? null, workspace: this.workspace()?.id ?? null, tab: this.tab()?.id ?? null, tree };
     const before = this.followed;
     if (focus.project === before.project && focus.workspace === before.workspace && focus.tab === before.tab && tree === before.tree) return;

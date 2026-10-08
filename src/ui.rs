@@ -8457,6 +8457,16 @@ mod tests {
         }
 
         #[test]
+        fn a_landing_scrolled_out_of_the_bar_draws_nothing() {
+            let tabs: Vec<TabEntry> = (0..12).map(|i| TabEntry::from(format!("tab {i}"))).collect();
+            let mut v = with_bar();
+            v.tab_bar = Some(tab_bar::TabBar { tabs, active: Some(11), details: Details::default(), scroll: 6 });
+            v.drag = Some(Drag::Bar(11, Some(0)));
+            let t = render(&v);
+            assert_ne!(t.backend().buffer()[(0, 0)].symbol(), "│");
+        }
+
+        #[test]
         fn without_a_project_there_is_no_bar() {
             let v = View { has_project: false, ..with_bar() };
             let t = render(&v);

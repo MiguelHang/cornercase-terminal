@@ -259,7 +259,10 @@ pub fn draw(f: &mut Frame, view: &View, bar: &TabBar, r: Rect) {
     );
     if let Some((_, Some(landing))) = dragged {
         let line = strip.landing(landing);
-        f.buffer_mut().set_string(line.x, line.y, "│", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+        if !line.is_empty() {
+            let style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+            f.buffer_mut().set_string(line.x, line.y, "│", style);
+        }
     }
     if bar.details.lines() > 1 {
         draw_details(f, view.muted, (r, Rect::default()), &bar.details, None, 1);

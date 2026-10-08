@@ -982,6 +982,28 @@ export class Strip {
     return this.overflows() ? intersect(rect(this.start() + this.room(), this.row.y, TAB_BUTTON_WIDTH, this.row.h), this.row) : EMPTY;
   }
 
+  edge(x: number, y: number): number {
+    const [before, after] = this.hidden();
+    if (before && contains(this.left(), x, y)) return -1;
+    return after && contains(this.right(), x, y) ? 1 : 0;
+  }
+
+  drop(dragged: number, x: number, y: number): number | null {
+    if (contains(this.left(), x, y)) return this.first();
+    if (!contains(this.row, x, y)) return null;
+    const i = this.widths.findIndex((_, j) => contains(this.item(j), x, y));
+    if (i < 0) return this.end();
+    if (i === dragged) return null;
+    return i < dragged ? i : i + 1;
+  }
+
+  landing(before: number): Rect {
+    const [first, end] = [this.first(), this.end()];
+    if (before >= first && before < end) return rect(this.item(before).x, this.row.y, 1, this.row.h);
+    if (before === end && end > first) return rect(right(this.item(end - 1)) - 1, this.row.y, 1, this.row.h);
+    return EMPTY;
+  }
+
   hidden(): [boolean, boolean] {
     return [this.first() > 0, this.end() < this.widths.length];
   }

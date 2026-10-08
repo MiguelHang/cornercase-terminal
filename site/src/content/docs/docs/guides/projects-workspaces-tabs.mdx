@@ -293,10 +293,12 @@ Below 90 columns the [compact layout](../small-terminals/) shows its usual menu,
 
 With **settings → UI → tabs** set to *top*, a workspace's tabs leave the sidebar and sit in a bar above the pane, like an editor's, and only the active workspace's show there. The sidebar keeps groups, projects and workspaces, so more of them fit; in the tree, it ends at the workspaces.
 
-```
- ◐ claude    zsh    ! codex    +
- Opus 5.5 · 15%
-```
+<Screen
+  name="tab-bar"
+  crop={[0, 0, 100, 8]}
+  alt="The tabs of the shop workspace in a bar above the pane: claude working and marked as the tab on screen, zsh and vim, then +; under them Opus 5.5 at 23%, the model and context of the pane in focus. The sidebar on the left lists the shop project and its workspaces without their tabs"
+  caption="Tabs on top: the sidebar keeps projects and workspaces, and the bar shows the active workspace's tabs."
+/>
 
 - Each tab shows its status and its name; the one on screen sits on a highlighted background. Click a tab to show it, hover it and click **`⋯`** for its menu or **`×`** to close it, and click **`+`** to open a shell.
 - The second line shows the model, the context and, if turned on, the memory of the pane you are in, in grey; a shell leaves it empty. The [model, context and memory](#how-full-the-context-is) switches apply as on the sidebar's tab rows.
