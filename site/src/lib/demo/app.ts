@@ -927,7 +927,12 @@ export class App {
     this.overlay = {
       kind: 'menu',
       at,
-      actions: [{ kind: 'rename', target: { kind: 'group', group: id } }, { kind: 'groupStyle', group: id }, { kind: 'deleteGroup', group: id }],
+      actions: [
+        { kind: 'addProject', group: id },
+        { kind: 'rename', target: { kind: 'group', group: id } },
+        { kind: 'groupStyle', group: id },
+        { kind: 'deleteGroup', group: id },
+      ],
     };
     this.dirty();
   }
@@ -1564,6 +1569,7 @@ export class App {
     }
     if (a.kind === 'groupStyle') return 'icon and colour';
     if (a.kind === 'deleteGroup') return 'delete group';
+    if (a.kind === 'addProject') return 'add project';
     if (a.kind === 'openProject') return 'open project';
     if (a.kind === 'newGroup') return 'new group';
     if (a.kind === 'base') return a.branch;
@@ -1617,7 +1623,8 @@ export class App {
     else if (a.kind === 'base') {
       this.changesBase = a.branch;
       this.changesScroll = 0;
-    } else if (a.kind === 'openProject') return this.openPicker();
+    } else if (a.kind === 'addProject') return this.openPicker(a.group);
+    else if (a.kind === 'openProject') return this.openPicker();
     else if (a.kind === 'newGroup') {
       this.nav = null;
       this.overlay = { kind: 'newGroup', input: '' };
@@ -1721,9 +1728,9 @@ export class App {
     } else finish();
   }
 
-  openPicker(): void {
+  openPicker(group?: number): void {
     this.nav = null;
-    this.overlay = { kind: 'picker', dir: ['code'], filter: '', selected: null, scroll: 0 };
+    this.overlay = { kind: 'picker', dir: ['code'], filter: '', selected: null, scroll: 0, group };
     this.emit('narrate', 'Pick a folder. Type to filter, Enter to go in, open to add it.');
     this.dirty();
   }
@@ -1797,14 +1804,18 @@ export class App {
     const root = this.pickerPath(o).replace(/\/$/, '');
     const existing = this.projects.findIndex((p) => p.root === root);
     this.overlay = null;
+    const group = o.group === undefined ? undefined : this.group(o.group);
+    if (group) group.collapsed = false;
     if (existing >= 0) {
+      if (group) this.projects[existing].group = group.id;
       this.selectProject(existing);
       return;
     }
     const folder = dir[dir.length - 1] ?? '~';
     const known = dir.length === 2 && dir[0] === 'code' ? FOLDERS[folder] : undefined;
     const tree = this.pickerNode(dir) ?? {};
-    this.addProject(folder, root, !!known?.repo, known?.tree ?? tree);
+    const added = this.addProject(folder, root, !!known?.repo, known?.tree ?? tree);
+    if (group) added.group = group.id;
     this.active = this.projects.length - 1;
     this.emit('narrate', `Opened ${root}. Each project keeps its own workspaces and tabs.`);
     this.dirty();

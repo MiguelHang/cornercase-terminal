@@ -52,6 +52,8 @@ pub enum Error {
     Api(String),
     #[error("{0}")]
     Usage(String),
+    #[error("cannot read `{}`: {reason}", path.display())]
+    CodeWorkspace { path: PathBuf, reason: String },
     #[error("`{0}` already exists")]
     PathExists(PathBuf),
     #[error("no cornercase server is running")]

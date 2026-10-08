@@ -2,6 +2,11 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.12.0
+
+- Bring your VS Code workspaces along: `.code-workspace` files now show up in the folder picker (**`+ new`** → **open project**), and opening one turns it into a group named after the file, with each of its folders as a project. Folders you already had open move into the group, and folders that no longer exist are skipped. Importing the same file again adds the folders that are new.
+- Right-click a group, or click its `⋯`, and choose **add project** to open a folder straight into that group. The picker starts next to the group's projects.
+
 ## 0.11.16
 
 - Tabs can move out of the sidebar into a bar above the terminal, like an editor's: set **Settings → UI → tabs** to *top*. Only the active workspace's tabs show there, each with its status (`!`, `✓`, `◐`, `○`), and the sidebar keeps groups, projects and workspaces, so more of them fit; in the tree it ends at the workspaces. A grey line under the tabs shows the model, context and memory of the pane you are in. Click a tab to show it, `⋯` and `×` on hover open its menu and close it, `+` opens a shell, drag a tab sideways to reorder it, and `‹` `›` or the wheel scroll the tabs when they don't fit. The default stays *sidebar*, and below 90 columns the compact menu lists the tabs as before.

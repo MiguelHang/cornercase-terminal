@@ -42,6 +42,7 @@ pub mod ui;
 pub mod update;
 pub mod upstream;
 pub mod usage;
+pub mod vscode;
 pub mod worktree;
 
 #[cfg(test)]

@@ -41,7 +41,7 @@ Click **`+ new`** at the end of the list, then **open project**. A folder picker
 | Open the folder you are in | Click **open**, or press `Enter` when nothing is selected. |
 | Cancel | Click **cancel** or press `Esc`. |
 
-Folders that are git repositories show their current branch on the right. Opening a folder that is already a project switches to it instead of opening it twice.
+Folders that are git repositories show their current branch on the right. Opening a folder that is already a project switches to it instead of opening it twice. VS Code workspace files (`.code-workspace`) are listed after the folders, tagged `vs code`, also while you filter; choosing one [imports it as a group](#import-a-vs-code-workspace).
 
 ## Groups
 
@@ -57,6 +57,7 @@ When the projects column gets long, put projects in **groups**: work, personal, 
 | To | Do |
 | --- | --- |
 | Create a group | Click **`+ new`**, then **new group**, and type its name. It gets its own icon and colour: the first eight groups each get a different one, starting with a blue `●`. |
+| Add a project to a group | Click its header's `⋯` or right-click it, then **add project**. The folder picker opens next to the group's projects, and the folder you open goes straight into the group. |
 | Put a project in a group | Click the project's `⋯` or right-click it, choose **move to group**, then the group. **no group** takes it out again. You can also [drag it](#reorder) onto the group's header or between its projects. |
 | Collapse or expand a group | Click its header. A collapsed group shows how many projects it holds, and gets the cyan `▌` when the active project is inside. |
 | Rename a group | Click its `⋯` or right-click its header, then **rename group**. |
@@ -64,6 +65,16 @@ When the projects column gets long, put projects in **groups**: work, personal, 
 | Delete a group | Hover its header and click the `×` at its right end, or open its menu and choose **delete group**. cornercase asks first; its projects stay open and lose their group. |
 
 A new group goes at the end of the list; drag its header to move it. There is a single level: a group can't hold another group.
+
+### Import a VS Code workspace
+
+Coming from VS Code with one workspace per area of work? Open its `.code-workspace` file from the folder picker (**`+ new`**, then **open project**) and cornercase turns it into a group:
+
+- The group is named after the file: `work.code-workspace` becomes `work`. If a group with that name already exists, the folders go into it, so importing the file again brings in folders added since.
+- Each folder of the workspace opens as a project in the group. A folder with a `name` in the file gets that name, unless you already renamed that project in cornercase. Relative paths are read from where the file is, as VS Code does.
+- A folder that is already open moves into the group instead of opening twice. Folders that don't exist, and remote ones, are skipped; a message says how many projects were imported and how many folders were not found. A folder whose shell can't start (one you may not enter, for example) is skipped too and the rest still open; the message counts it, and `server.log` says which folder failed and why.
+
+The import happens once: after that the group is cornercase's, and the `.code-workspace` file is never changed. Comments and trailing commas in the file are fine.
 
 ### Icon and colour
 
