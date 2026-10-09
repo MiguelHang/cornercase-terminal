@@ -18,6 +18,7 @@ use crate::context::{self, Context};
 use crate::error::{Error, Result};
 use crate::files;
 use crate::git;
+use crate::graphics::encode;
 use crate::host_theme::HostTheme;
 use crate::issues::browser::{self, Action, Browser, Connection, Place, Screen, Tab as IssueTab};
 use crate::issues::cache::{Cache as IssueCache, Key as CacheKey};
@@ -55,11 +56,13 @@ use crate::worktree;
 mod control;
 mod events;
 mod files_panel;
+mod images;
 mod shortcuts;
 mod todo_panel;
 mod trace;
 
 pub use events::Streamed;
+pub use images::{Placed, Sight};
 
 #[derive(Debug)]
 pub enum AppEvent {
@@ -166,6 +169,10 @@ pub enum AppEvent {
         request: u64,
         result: Result<Option<context::Said>>,
     },
+    Encoded {
+        key: encode::Key,
+        result: Result<Vec<u8>>,
+    },
 }
 
 impl AppEvent {
@@ -194,6 +201,7 @@ impl AppEvent {
             Self::Updated(_) => "updated",
             Self::Usage(..) => "usage",
             Self::LastMessage { .. } => "last message",
+            Self::Encoded { .. } => "image encoded",
         }
     }
 }
@@ -672,6 +680,7 @@ pub struct App {
     todos: Todos,
     todo: todo::Panel,
     files: files::Panel,
+    images: images::Payloads,
     requests: control::Requests,
     events: events::Events,
     seen: trace::Seen,
@@ -775,6 +784,7 @@ impl App {
             todos: Todos::default(),
             todo: todo::Panel::default(),
             files: files::Panel::default(),
+            images: images::Payloads::default(),
             requests: control::Requests::default(),
             events: events::Events::default(),
             seen: trace::Seen::default(),
@@ -1680,6 +1690,7 @@ impl App {
             AppEvent::Updated(result) => self.updated(result),
             AppEvent::Usage(agent, result) => self.usage.answered(agent, result, Instant::now()),
             AppEvent::LastMessage { request, result } => self.message_read(request, result),
+            AppEvent::Encoded { key, result } => self.encoded(key, result),
             AppEvent::Output(id, bytes) => {
                 for launch in self.launches.iter_mut().filter(|l| l.term == id) {
                     launch.output(Instant::now());
@@ -4386,7 +4397,7 @@ impl App {
         }
     }
 
-    pub fn draw(&mut self, f: &mut Frame) {
+    pub fn draw(&mut self, f: &mut Frame, sight: &Sight) -> Option<Placed> {
         self.follow(f.area());
         if !self.drawn.compact() {
             self.nav = None;
@@ -4418,6 +4429,8 @@ impl App {
         };
         let area = f.area();
         let overlay = self.overlay.as_ref().and_then(|o| self.overlay_view(o, area));
+        let modal = overlay.as_ref().is_some_and(ui::Overlay::is_modal);
+        let (files, placed) = self.files_seen(sight, area, modal);
         let dim_inactive = self.config.dim_inactive_panes;
         let dragging = self.divider_drag.clone();
         let pane_area = self.layout(area).shown(self.nav).pane;
@@ -4478,12 +4491,13 @@ impl App {
             changes: if self.changes_shown() { self.panel_view() } else { None },
             changes_button: self.changes_label().map(|label| ui::ChangesButton { label, open: self.changes.open }),
             todo: self.todo.open.then(|| self.todo_view(self.layout(area).shown(self.nav).changes)),
-            files: if self.files_shown() { self.files_view() } else { None },
+            files,
             attention,
             drag,
             tab_bar: (!self.drawn.tab_bar.is_empty()).then(|| self.tab_bar_view()),
         };
         ui::draw(f, &view);
+        placed.map(|placed| images::owned(f.buffer_mut(), placed))
     }
 
     fn tab_entry(&self, t: &Tab) -> ui::TabEntry {
@@ -7953,7 +7967,7 @@ rm -f "$1/sessions/$$.json"
 
         fn rendered(app: &mut App, area: Rect) -> Terminal<TestBackend> {
             let mut t = Terminal::new(TestBackend::new(area.width, area.height)).expect("test backend");
-            t.draw(|f| app.draw(f)).expect("draw");
+            t.draw(|f| _ = app.draw(f, &Sight::default())).expect("draw");
             t
         }
 
@@ -8848,7 +8862,7 @@ rm -f "$1/sessions/$$.json"
             let (mut app, _rx) = app();
             open_menu(&mut app);
             let mut t = Terminal::new(TestBackend::new(AREA.width, AREA.height)).expect("test backend");
-            t.draw(|f| app.draw(f)).expect("draw");
+            t.draw(|f| _ = app.draw(f, &Sight::default())).expect("draw");
             assert_eq!(app.nav, None);
         }
 
@@ -9599,7 +9613,7 @@ rm -f "$1/sessions/$$.json"
                 .map(|at| Toast { at, ..Toast::new(COPIED, ui::ToastIcon::Check) });
             let mut t = Terminal::new(TestBackend::new(AREA.width, AREA.height)).expect("test backend");
 
-            t.draw(|f| app.draw(f)).expect("draw");
+            t.draw(|f| _ = app.draw(f, &Sight::default())).expect("draw");
 
             assert_eq!(app.toast, None);
         }
@@ -10288,7 +10302,7 @@ rm -f "$1/sessions/$$.json"
             });
             let mut t = Terminal::new(TestBackend::new(AREA.width, AREA.height)).expect("test backend");
 
-            t.draw(|f| app.draw(f)).expect("draw");
+            t.draw(|f| _ = app.draw(f, &Sight::default())).expect("draw");
 
             let settings = areas().settings;
             assert_eq!(t.backend().buffer()[(settings.x + 2, settings.y)].fg, Color::Indexed(243));
@@ -10360,7 +10374,7 @@ rm -f "$1/sessions/$$.json"
 
         fn drawn_in(app: &mut App, area: Rect) {
             let mut t = Terminal::new(TestBackend::new(area.width, area.height)).expect("test backend");
-            t.draw(|f| app.draw(f)).expect("draw");
+            t.draw(|f| _ = app.draw(f, &Sight::default())).expect("draw");
         }
 
         fn on_top(tabs: usize) -> (App, Receiver<AppEvent>, Vec<TempDir>) {
@@ -10500,7 +10514,7 @@ rm -f "$1/sessions/$$.json"
 
         fn drawn(app: &mut App) {
             let mut t = Terminal::new(TestBackend::new(TALL.width, TALL.height)).expect("test backend");
-            t.draw(|f| app.draw(f)).expect("draw");
+            t.draw(|f| _ = app.draw(f, &Sight::default())).expect("draw");
         }
 
         fn tree(n: usize) -> (App, Receiver<AppEvent>, Vec<TempDir>) {
@@ -12389,7 +12403,7 @@ rm -f "$1/sessions/$$.json"
         }
 
         fn action_pos(app: &App, action: Action) -> Position {
-            panel::action(panel_area(app), action).as_position()
+            panel::action(panel_area(app), &file(app), action).as_position()
         }
 
         fn show(app: &mut App, rx: &Receiver<AppEvent>, path: &str) {
@@ -12633,6 +12647,183 @@ rm -f "$1/sessions/$$.json"
             restored.restore(&saved, AREA);
             assert_eq!((restored.files.open, restored.todo.open, restored.changes.open), (true, false, false));
         }
+
+        mod images {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+            use ratatui::buffer::{Buffer, CellDiffOption};
+
+            use super::*;
+            use crate::files::disk::Body;
+            use crate::graphics::{CellSize, Missing, Protocol, Support, Tmux};
+            use crate::ui::files::MARKER;
+
+            const PLACEHOLDER: char = '\u{10EEEE}';
+
+            fn png(dir: &Path, name: &str, width: u32, height: u32) {
+                let pixels = image::RgbaImage::from_pixel(width, height, image::Rgba([200, 30, 30, 255]));
+                pixels.save_with_format(dir.join(name), image::ImageFormat::Png).expect("write a png");
+            }
+
+            fn sight(protocol: Option<Protocol>) -> Sight {
+                let support = Support {
+                    protocol,
+                    missing: protocol.is_none().then(|| Missing::Cannot { name: "st".into() }),
+                    cell: Some(CellSize { width: 10, height: 20 }),
+                    tmux: Tmux::None,
+                    id_hi: 42,
+                };
+                Sight { support, lo: 0xF0, ..Sight::default() }
+            }
+
+            fn shown(dir: &TempDir) -> (App, Receiver<AppEvent>) {
+                png(dir.path(), "logo.png", 400, 200);
+                let (mut app, rx) = opened(dir);
+                let pos = row_pos(&app, "logo.png");
+                click(&mut app, pos);
+                settle(
+                    &mut app,
+                    &rx,
+                    "the image is read",
+                    |v| matches!(&v.screen, Screen::File(f) if f.content.as_ref().is_some_and(|c| c.is_image())),
+                );
+                (app, rx)
+            }
+
+            fn draw(app: &mut App, sight: &Sight) -> (Buffer, Option<Placed>) {
+                let mut terminal = Terminal::new(TestBackend::new(AREA.width, AREA.height)).expect("terminal");
+                let mut placed = None;
+                let buffer = terminal.draw(|f| placed = app.draw(f, sight)).expect("draw").buffer.clone();
+                (buffer, placed)
+            }
+
+            fn ready(app: &mut App, rx: &Receiver<AppEvent>, sight: &Sight) -> (Buffer, Placed) {
+                let mut last = None;
+                wait_until("the payload is ready", || {
+                    while let Ok(ev) = rx.try_recv() {
+                        app.handle_event(ev, AREA).expect("handle event");
+                    }
+                    last = Some(draw(app, sight));
+                    last.as_ref().is_some_and(|(_, p)| p.as_ref().is_some_and(|p| p.payload.is_some()))
+                });
+                let (buffer, placed) = last.expect("drawn");
+                (buffer, placed.expect("placed"))
+            }
+
+            fn cells(buffer: &Buffer, rect: Rect, what: impl Fn(&str) -> bool) -> usize {
+                rect.positions().filter(|&p| what(buffer[p].symbol())).count()
+            }
+
+            fn text(buffer: &Buffer) -> String {
+                buffer.content().iter().map(ratatui::buffer::Cell::symbol).collect()
+            }
+
+            #[test]
+            fn an_image_says_what_it_is_and_offers_only_its_path() {
+                let dir = repo();
+                let (mut app, _rx) = shown(&dir);
+                let Some(Body::Image(picture)) = file(&app).content.map(|c| c.body.clone()) else { panic!("an image") };
+
+                assert_eq!((picture.width, picture.height), (400, 200));
+                assert_eq!(panel::action(panel_area(&app), &file(&app), Action::Open), Rect::default());
+                let ask = action_pos(&app, Action::Ask);
+                click(&mut app, ask);
+                let copy = action_pos(&app, Action::Copy);
+                click(&mut app, copy);
+                assert_eq!(app.take_host_writes(), [clipboard::osc52("logo.png"), clipboard::osc52("logo.png")]);
+            }
+
+            #[test]
+            fn kitty_gets_placeholder_cells_once_its_payload_is_ready() {
+                let dir = repo();
+                let (mut app, rx) = shown(&dir);
+                let kitty = sight(Some(Protocol::Kitty));
+
+                let (first, placed) = draw(&mut app, &kitty);
+                assert!(placed.is_some_and(|p| !p.drawn), "blank until the payload comes");
+                assert_eq!(cells(&first, panel_area(&app), |s| s.starts_with(PLACEHOLDER)), 0);
+                let (buffer, placed) = ready(&mut app, &rx, &kitty);
+
+                assert_eq!(cells(&buffer, placed.rect, |s| s.starts_with(PLACEHOLDER)), placed.rect.area() as usize);
+                assert_eq!(placed.key.kitty_id, crate::graphics::kitty::id(42, 0xF0));
+            }
+
+            #[test]
+            fn iterm_and_sixel_get_markers_the_diff_skips() {
+                let dir = repo();
+                let (mut app, rx) = shown(&dir);
+
+                let (buffer, placed) = ready(&mut app, &rx, &sight(Some(Protocol::Iterm)));
+
+                assert!(placed.drawn);
+                assert!(placed.rect.positions().all(|p| buffer[p].diff_option == CellDiffOption::Skip));
+                assert_eq!(cells(&buffer, placed.rect, |s| s == MARKER), placed.rect.area() as usize);
+            }
+
+            #[test]
+            fn a_terminal_without_images_says_why() {
+                let dir = repo();
+                let (mut app, _rx) = shown(&dir);
+                let blind = sight(None);
+
+                let (buffer, placed) = draw(&mut app, &blind);
+
+                assert!(placed.is_none());
+                let missing = blind.support.missing.expect("missing");
+                assert!(text(&buffer).contains(&missing.lines()[0][..12]), "{}", text(&buffer));
+            }
+
+            #[test]
+            fn a_dialog_hides_the_picture_until_it_closes() {
+                let dir = repo();
+                let (mut app, rx) = shown(&dir);
+                let kitty = sight(Some(Protocol::Kitty));
+                ready(&mut app, &rx, &kitty);
+                let settings = app.layout(AREA).settings.as_position();
+                click(&mut app, settings);
+
+                let (buffer, placed) = draw(&mut app, &kitty);
+                let placed = placed.expect("placed");
+                assert!(!placed.drawn);
+                assert_eq!(cells(&buffer, placed.rect, |s| s.starts_with(PLACEHOLDER)), 0);
+
+                send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+                assert!(draw(&mut app, &kitty).1.is_some_and(|p| p.drawn));
+            }
+
+            #[test]
+            fn a_menu_over_the_markers_is_drawn_and_the_picture_waits() {
+                let dir = repo();
+                let (mut app, rx) = shown(&dir);
+                let iterm = sight(Some(Protocol::Iterm));
+                let (_, placed) = ready(&mut app, &rx, &iterm);
+                let pane = app.layout(AREA).pane;
+                right_click(&mut app, Position::new(pane.right() - 1, placed.rect.y));
+
+                let (buffer, placed) = draw(&mut app, &iterm);
+                let placed = placed.expect("placed");
+                let covered: Vec<Position> =
+                    placed.rect.positions().filter(|&p| buffer[p].symbol() != MARKER).collect();
+
+                assert!(!covered.is_empty(), "the menu reaches the picture");
+                assert!(!placed.drawn);
+                assert!(covered.iter().all(|&p| buffer[p].diff_option == CellDiffOption::None));
+            }
+
+            #[test]
+            fn a_window_that_sees_less_gets_a_smaller_picture() {
+                let dir = repo();
+                let (mut app, rx) = shown(&dir);
+                let kitty = sight(Some(Protocol::Kitty));
+                let (_, wide) = ready(&mut app, &rx, &kitty);
+                let narrow = Sight { visible: Rect::new(0, 0, wide.rect.x + 6, AREA.height), ..kitty };
+
+                let (_, placed) = draw(&mut app, &narrow);
+
+                let placed = placed.expect("placed");
+                assert!(placed.rect.right() <= narrow.visible.right() && placed.rect.width < wide.rect.width);
+            }
+        }
     }
 
     mod path_links {
@@ -12709,7 +12900,7 @@ rm -f "$1/sessions/$$.json"
             let (mut app, _rx) = showing(&repo, "open src/main.rs now");
             mouse(&mut app, MouseEventKind::Moved, cell(7, 0));
             let mut t = Terminal::new(TestBackend::new(AREA.width, AREA.height)).expect("test backend");
-            t.draw(|f| app.draw(f)).expect("draw");
+            t.draw(|f| _ = app.draw(f, &Sight::default())).expect("draw");
             let lined = |col: u16| t.backend().buffer()[cell(col, 0)].modifier.contains(Modifier::UNDERLINED);
             assert_eq!([lined(4), lined(5), lined(15), lined(16)], [false, true, true, false]);
         }
