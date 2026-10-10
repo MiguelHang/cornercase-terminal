@@ -379,6 +379,7 @@ export const MODES: Record<string, [string, string][]> = {
   ],
   gemini: [
     ['auto edit', '--approval-mode auto_edit'],
+    ['plan', '--approval-mode plan'],
     ['yolo (dangerous)', '--yolo'],
   ],
 };
