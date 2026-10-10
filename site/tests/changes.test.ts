@@ -34,11 +34,11 @@ for (const columns of [140, 80]) {
 
   test(`files sit beyond their workspace headers at ${columns} columns`, () => {
     const app = demo(columns);
-    app.projects[0].workspaces[0].flags.fixed = true;
+    app.projects[0].workspaces[1].flags.fixed = true;
     app.setChangesScope('every');
     app.render();
-    const header = app.textAt('▾ shop');
-    const workspace = app.textAt('▾ main');
+    const header = app.textAt('▾ web-shop');
+    const workspace = app.textAt('▾ feat/dark-mode');
     const file = app.textAt('▸ M');
     assert.ok(header && workspace && file);
     assert.ok(header.x < workspace.x && workspace.x <= file.x);
@@ -51,7 +51,7 @@ for (const columns of [140, 80]) {
       app.config.sidebar = 'tree';
       app.setChangesScope('every');
       app.render();
-      const file = app.changesDiff().find((f) => f.owner?.project.folder === 'api');
+      const file = app.changesDiff().find((f) => f.owner?.project.folder === 'orders-api');
       assert.ok(file?.owner);
       const { project, workspace } = file.owner;
       project.collapsed = true;
@@ -85,7 +85,8 @@ for (const columns of [140, 80]) {
     });
     steps.push({ run: () => { finished = true; } });
     await play({ app } as Mounted, null, steps, { instant: true }).done;
-    assert.ok(finished && app.changesOpen);
+    assert.ok(finished);
+    assert.equal(app.changesOpen, columns >= 90);
     app.destroy();
   });
 }
