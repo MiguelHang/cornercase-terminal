@@ -2,6 +2,10 @@
 
 Every pull request that changes the app adds a section here for its new version. The section becomes the notes of the GitHub Release and shows up in the app's update dialog, so write it for users.
 
+## 0.12.26
+
+- Deleting a group that holds projects now asks what to do with them: **keep projects** leaves them open without a group, as before, and **close projects** closes them along with the group, stopping their shells, instead of closing them one by one afterwards. Folders and worktrees stay on disk. `Enter` still keeps the projects.
+
 ## 0.12.25
 
 - Review uncommitted changes across every project in the Changes panel, grouped by project and workspace. Files start folded and load their diff when opened; filters, viewed marks and hunk actions work across the collection.
