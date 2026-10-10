@@ -1656,7 +1656,6 @@ impl App {
         self.projects.remove(p);
         shift_active(&mut self.active, p);
         let projects = &self.projects;
-        self.deleting_groups.retain(|id| !projects.iter().any(|p| p.group == Some(*id) && !p.closing));
         let empty = |id: &u64| !projects.iter().any(|p| p.group == Some(*id));
         let gone: Vec<u64> = self.deleting_groups.iter().copied().filter(empty).collect();
         for id in gone {
@@ -2529,6 +2528,7 @@ impl App {
         let Some(p) = self.project_index(id) else { return };
         let mut project = self.projects.remove(p);
         project.group = group;
+        self.cancel_pending_group_deletion(group, project.closing);
         let at = before.and_then(|q| self.project_index(q)).unwrap_or_else(|| {
             self.projects.iter().rposition(|p| p.group == group).map_or(self.projects.len(), |i| i + 1)
         });
@@ -2776,6 +2776,8 @@ impl App {
         }
         if let Some(g) = group {
             project.group = Some(g);
+            let closing = project.closing;
+            self.cancel_pending_group_deletion(group, closing);
             if let Some(entry) = self.group_mut(g) {
                 entry.collapsed = false;
             }
@@ -3756,6 +3758,7 @@ impl App {
             MenuAction::SetGroup(project, group) => {
                 if let Some(p) = self.project_index(project) {
                     self.projects[p].group = group;
+                    self.cancel_pending_group_deletion(group, self.projects[p].closing);
                 }
             }
             MenuAction::GroupStyle(group) => self.overlay = Some(Overlay::GroupStyle { group }),
@@ -3782,6 +3785,12 @@ impl App {
         self.deleting_groups.retain(|&g| g != id);
         for p in self.projects.iter_mut().filter(|p| p.group == Some(id)) {
             p.group = None;
+        }
+    }
+
+    fn cancel_pending_group_deletion(&mut self, group: Option<u64>, closing: bool) {
+        if !closing {
+            self.deleting_groups.retain(|&id| Some(id) != group);
         }
     }
 
@@ -6492,6 +6501,22 @@ mod tests {
             pump_until(&mut app, &rx, "the moved project closes", App::is_empty);
 
             assert_eq!(app.groups.len(), 1);
+        }
+
+        #[test]
+        fn a_project_moved_into_the_group_and_closed_before_the_others_still_keeps_it() {
+            let (mut app, rx, _dirs) = asked_to_delete(1, 2);
+            let work = group_label(&app, 0);
+            let moved = app.projects[1].id;
+            click(&mut app, extra_button());
+            move_to(&mut app, 1, &work);
+            app.projects[1].workspaces[0].tabs.clear();
+
+            app.close_project(moved);
+            let closed_first = app.projects.len() == 1 && app.projects[0].closing;
+            pump_until(&mut app, &rx, "the old project closes", App::is_empty);
+
+            assert_eq!((closed_first, app.groups.len()), (true, 1));
         }
 
         #[test]
