@@ -6,7 +6,7 @@ description: Every mouse gesture cornercase understands, the optional prefix key
 import { Aside } from '@astrojs/starlight/components';
 import Screen from '../../../../components/Screen.astro';
 
-cornercase is driven with the mouse. Out of the box it has **no keyboard shortcuts** of its own: outside of its dialogs, the changes panel's filter field, the files panel's search bar and the TODO panel's text field (and `Esc` while you drag a row or while the changes, files or TODO panel is open), every key you press goes to the program in the active pane. That's a deliberate choice, so that nothing you type is ever taken away from your shell, your editor or your agent: `Ctrl+B`, `Ctrl+A`, `Alt` and `Option` combinations all reach them untouched.
+cornercase is driven with the mouse. Out of the box it has **no keyboard shortcuts** of its own: outside of its dialogs, the changes panel's filter field, the files panel's search bar and the TODO panel's text field (and `Esc` while you drag a row, a border or a divider, or while the changes, files or TODO panel is open), every key you press goes to the program in the active pane. That's a deliberate choice, so that nothing you type is ever taken away from your shell, your editor or your agent: `Ctrl+B`, `Ctrl+A`, `Alt` and `Option` combinations all reach them untouched.
 
 If your hands would rather stay on the keyboard, or your terminal can't send clicks, you can turn on a **prefix key** that opens a menu of [keyboard shortcuts](#keyboard-shortcuts). It takes that one key, and only once you choose it.
 
@@ -27,7 +27,7 @@ If your hands would rather stay on the keyboard, or your terminal can't send cli
 | Right-click, or hover and click `⋯` | A group header | Opens its menu: **add project**, **rename group**, **icon and colour**, **delete group** (which asks first). |
 | Click | `▸` / `▾` in the [tree](../../guides/projects-workspaces-tabs/#the-tree) | Collapses or expands a project or workspace. A click on the rest of its row opens it and expands it. |
 | Wheel | The projects, workspaces or tree list | Scrolls the list. |
-| Drag | The border at the right of a column | Resizes the column. |
+| Drag | The border at the right of a column | Resizes the column. `Esc` ends the drag where it is. |
 | Double-click | A column border | Resets that column's width. |
 | Drag | The line between projects and workspaces, in a stacked sidebar | Shares the height between the two lists. |
 | Double-click | That line | Splits the height in half again. |
@@ -54,7 +54,7 @@ If your hands would rather stay on the keyboard, or your terminal can't send cli
 | Click | An inactive pane | Makes it active. The click isn't passed to the program. |
 | Right-click | Any pane | Opens the pane menu on release: split right, split down, right-clicks, close. |
 | Right-button drag | From a pane onto another pane | Near an edge, moves the pane to that side of the other one; in the middle, swaps them. See [Move and swap panes](../../guides/panes-and-splits/#move-and-swap-panes). |
-| Drag | A divider between panes | Resizes the panes. |
+| Drag | A divider between panes | Resizes the panes. `Esc` ends the drag where it is. |
 | Double-click | A divider | Splits the space in half again. |
 | Press, drag, release | Text, when the program doesn't use the mouse | Selects the text and copies it to your clipboard. |
 | Wheel | Any pane, when its program doesn't use the mouse | Scrolls back through what it printed, without making it active; in `less`, `man` and other full-screen programs, sends the arrows. See [Scroll back](../../guides/panes-and-splits/#scroll-back). |
@@ -122,6 +122,12 @@ See [TODO list](../../guides/todo/).
 
 Click buttons and rows to use them. In lists (the folder picker, the issue browser, the settings, search results) and in an update's release notes, the wheel scrolls. A right-click menu closes when you click anywhere else, and so do the search and every dialog, as its cancel button would, so whatever you typed in it is dropped. A dialog that is busy (creating a worktree, installing an update, checking a token, starting an issue) stays open until it is done.
 
+### The resize pointer
+
+Every border that drags (the borders between columns, the line between stacked lists, the line above the agents section, the panel's left border and the dividers between panes) lights up cyan under the mouse. Where the terminal can change the mouse pointer, cornercase also asks for a resize arrow there: ↔ on a border between columns or a divider between panes side by side, ↕ on a line between rows. The arrow stays while you drag, even when the mouse leaves the border, and the usual pointer comes back once the mouse leaves it, when you release the button, when you press `Esc` (which ends the drag where it is), when a dialog opens and when the window quits or detaches.
+
+It works in Ghostty, kitty 0.31 or later and foot 1.12 or later, which cornercase recognises from their answer to its startup question. Other terminals keep their usual pointer: WezTerm, Konsole, Alacritty and GNOME Terminal (VTE) have no way to change it, and iTerm2 and xterm understand other names for the shapes. Inside tmux, screen or Zellij the pointer is never changed: the multiplexer shares the window between panes and would leave the arrow in them.
+
 ## Keyboard shortcuts
 
 Off by default. To turn them on, open **Settings → UI**, select **prefix key** and press the combination you want, such as `Ctrl+]`, `Alt+K` or `F12`. It must use `Ctrl` or `Alt` with a key, or be a function key; `Ctrl+C`, `Ctrl+D` and `Ctrl+Z` are refused, and the row warns you when the key you picked already means something, like `Ctrl+B` for tmux or `Ctrl+A` for the start of the line. `Backspace` there turns the shortcuts off again. The key is saved as [`prefix_key`](../configuration/#prefix_key).
@@ -168,6 +174,7 @@ While a dialog, the search, the settings, the issue browser, the changes panel's
 | New workspace | `Tab` toggles **with its own worktree**. |
 | Right-click menus | `Esc` closes the menu. Other keys still go to the active pane. |
 | While dragging a row or a pane | `Esc` cancels the drag. Other keys still go to the active pane. |
+| While dragging a border or a divider | `Esc` ends the drag where it is. Other keys still go to the active pane. |
 | Folder picker | Type to filter. `↑` `↓` select. `→` or `Tab` go into the selected folder, `←` goes up. `Enter` goes into the selected folder, or opens the folder you are in. `~` goes home and `/` to the root when the filter is empty. `Backspace` on an empty filter goes up. |
 | Search | Type to search. `↑` `↓` select. `Enter` goes to the result. `Esc` closes. |
 | Issue list | Type to filter. `↑` `↓` `PgUp` `PgDn` select. `Enter` reads the issue. `Tab` / `Shift+Tab` switch sources. `Esc` closes. |

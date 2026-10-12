@@ -33,6 +33,7 @@ use crate::mouse;
 use crate::notify::{self, Notification};
 use crate::panics;
 use crate::picker::Picker;
+use crate::pointer;
 use crate::process;
 use crate::project::{Group, Phase, Project, Tab, Workspace, move_before, shift_active};
 use crate::restart;
@@ -852,6 +853,46 @@ impl App {
     fn layout(&self, area: Rect) -> ui::Areas {
         ui::full_layout(area, self.widths, self.panel_shown(), self.sidebar(), self.config.agents_section)
             .with_tab_bar(ui::Tabs::from_setting(&self.config.tabs) == ui::Tabs::Top)
+    }
+
+    pub fn pointer(&self, area: Rect) -> pointer::Shape {
+        let areas = self.layout(area).shown(self.nav);
+        let border = |border: ui::Border| match border {
+            ui::Border::Stack | ui::Border::Agents => pointer::Shape::Rows,
+            ui::Border::Projects | ui::Border::Workspaces | ui::Border::Changes => pointer::Shape::Columns,
+        };
+        let divider = |dir: Dir| match dir {
+            Dir::Right => pointer::Shape::Columns,
+            Dir::Down => pointer::Shape::Rows,
+        };
+        if let Some(b) = self.resizing {
+            return border(b);
+        }
+        if let Some((tab, path)) = &self.divider_drag {
+            let dividers = self.tab().filter(|t| t.id == *tab).map(|t| t.layout.dividers(areas.pane));
+            return dividers
+                .and_then(|d| d.into_iter().find(|d| d.path == *path))
+                .map_or(pointer::Shape::Default, |d| divider(d.dir));
+        }
+        let busy = self.row_drag.is_some()
+            || self.pane_drag.is_some()
+            || self.selecting.is_some()
+            || self.files.selecting.is_some()
+            || self.link_press.is_some();
+        let Some(pos) = self.hover.filter(|_| self.overlay.is_none() && !busy) else {
+            return pointer::Shape::Default;
+        };
+        if self.panel_shown() && areas.changes.contains(pos) {
+            return pointer::Shape::Default;
+        }
+        if let Some(b) = areas.border_hit(pos) {
+            return border(b);
+        }
+        let in_pane = areas.pane.contains(pos) && !(self.nav.is_some() && areas.compact());
+        self.tab()
+            .filter(|_| in_pane)
+            .and_then(|t| t.layout.divider_at(areas.pane, pos))
+            .map_or(pointer::Shape::Default, |d| divider(d.dir))
     }
 
     fn panel_shown(&self) -> bool {
@@ -1774,12 +1815,21 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent, area: Rect) -> Result<()> {
-        if key.code == KeyCode::Esc && (self.row_drag.take().is_some() || self.pane_drag.take().is_some()) {
+        let dragging = |app: &mut Self| {
+            app.row_drag.take().is_some()
+                || app.pane_drag.take().is_some()
+                || app.resizing.take().is_some()
+                || app.divider_drag.take().is_some()
+        };
+        if key.code == KeyCode::Esc && dragging(self) {
             return Ok(());
         }
         match &self.overlay {
             Some(Overlay::Keys(group)) => return self.keys_key(*group, key, area),
-            Some(Overlay::Menu { .. }) | None if self.is_prefix(key) => self.overlay = Some(Overlay::Keys(None)),
+            Some(Overlay::Menu { .. }) | None if self.is_prefix(key) => {
+                dragging(self);
+                self.overlay = Some(Overlay::Keys(None));
+            }
             Some(Overlay::Menu { .. }) if key.code == KeyCode::Esc => self.overlay = None,
             None if self.nav.is_some() && key.code == KeyCode::Esc => self.nav = None,
             Some(Overlay::Picker { .. }) => return self.picker_key(key, area),
@@ -10400,6 +10450,51 @@ rm -f "$1/sessions/$$.json"
         }
 
         #[test]
+        fn hovering_a_divider_asks_for_a_resize_pointer_across_it() {
+            let (mut right, _rx) = split_right();
+            let (mut down, _rx2) = app();
+            split(&mut down, inside(pane()), "split down");
+            let line = |app: &App| {
+                let r = divider(app).line;
+                Position::new(r.x, r.y + r.height / 2)
+            };
+
+            let on = |app: &mut App| {
+                let at = line(app);
+                mouse(app, MouseEventKind::Moved, at);
+                app.pointer(AREA)
+            };
+
+            assert_eq!((on(&mut right), on(&mut down)), (pointer::Shape::Columns, pointer::Shape::Rows));
+        }
+
+        #[test]
+        fn the_pointer_follows_a_divider_drag_until_release() {
+            let (mut app, _rx) = split_right();
+            let from = divider(&app).line.as_position();
+            press(&mut app, from);
+            let away = Position::new(pane().x, from.y + 3);
+            mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), away);
+            let dragging = app.pointer(AREA);
+
+            mouse(&mut app, MouseEventKind::Up(MouseButton::Left), away);
+
+            assert_eq!((dragging, app.pointer(AREA)), (pointer::Shape::Columns, pointer::Shape::Default));
+        }
+
+        #[test]
+        fn esc_ends_a_divider_drag() {
+            let (mut app, _rx) = split_right();
+            let from = divider(&app).line.as_position();
+            press(&mut app, from);
+            mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), Position::new(pane().x, from.y));
+
+            send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+            assert_eq!((app.divider_drag.is_none(), app.pointer(AREA)), (true, pointer::Shape::Default));
+        }
+
+        #[test]
         fn a_right_click_in_a_pane_opens_its_menu() {
             let (mut app, _rx) = app();
             right_click(&mut app, inside(pane()));
@@ -10867,6 +10962,8 @@ rm -f "$1/sessions/$$.json"
     }
 
     mod resize_columns {
+        use rstest::rstest;
+
         use super::*;
 
         fn border(app: &App, border: ui::Border) -> Position {
@@ -10928,6 +11025,104 @@ rm -f "$1/sessions/$$.json"
             mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), Position::new(45, from.y));
 
             assert_eq!((app.resizing, app.widths.projects), (None, 40));
+        }
+
+        fn hover(app: &mut App, pos: Position) {
+            mouse(app, MouseEventKind::Moved, pos);
+        }
+
+        #[rstest]
+        #[case::projects(ui::Sidebar::SideBySide, ui::Border::Projects, pointer::Shape::Columns)]
+        #[case::workspaces(ui::Sidebar::SideBySide, ui::Border::Workspaces, pointer::Shape::Columns)]
+        #[case::stack(ui::Sidebar::ProjectsOnTop, ui::Border::Stack, pointer::Shape::Rows)]
+        #[case::agents(ui::Sidebar::ProjectsOnTop, ui::Border::Agents, pointer::Shape::Rows)]
+        fn hovering_a_border_asks_for_a_resize_pointer(
+            #[case] sidebar: ui::Sidebar,
+            #[case] which: ui::Border,
+            #[case] expected: pointer::Shape,
+        ) {
+            let (mut app, _rx) = app();
+            app.config.sidebar = sidebar.id().into();
+            app.config.agents_section = true;
+            let r = app.layout(AREA).border(which);
+
+            hover(&mut app, Position::new(r.x + r.width / 2, r.y));
+
+            assert_eq!(app.pointer(AREA), expected);
+        }
+
+        #[test]
+        fn the_changes_border_asks_for_a_sideways_pointer() {
+            let (mut app, _rx) = app();
+            app.todo.open = true;
+            let from = border(&app, ui::Border::Changes);
+
+            hover(&mut app, from);
+
+            assert_eq!(app.pointer(AREA), pointer::Shape::Columns);
+        }
+
+        #[test]
+        fn leaving_the_border_brings_back_the_default_pointer() {
+            let (mut app, _rx) = app();
+            let from = border(&app, ui::Border::Projects);
+            hover(&mut app, from);
+
+            hover(&mut app, Position::new(from.x + 4, from.y));
+
+            assert_eq!(app.pointer(AREA), pointer::Shape::Default);
+        }
+
+        #[test]
+        fn the_pointer_stays_while_dragging_away_from_the_border_and_goes_on_release() {
+            let (mut app, _rx) = app();
+            let from = border(&app, ui::Border::Projects);
+            press(&mut app, from);
+            let away = Position::new(AREA.width - 1, from.y + 4);
+            mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), away);
+            let dragging = app.pointer(AREA);
+
+            mouse(&mut app, MouseEventKind::Up(MouseButton::Left), away);
+
+            assert_eq!((dragging, app.pointer(AREA)), (pointer::Shape::Columns, pointer::Shape::Default));
+        }
+
+        #[test]
+        fn esc_ends_the_drag_where_it_is() {
+            let (mut app, _rx) = app();
+            let from = border(&app, ui::Border::Projects);
+            press(&mut app, from);
+            mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), Position::new(AREA.width - 1, from.y + 4));
+            let widths = app.widths;
+
+            send_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+            assert_eq!((app.resizing, app.widths, app.pointer(AREA)), (None, widths, pointer::Shape::Default));
+        }
+
+        #[test]
+        fn the_prefix_key_ends_the_drag_and_brings_back_the_default_pointer() {
+            let (mut app, _rx) = app();
+            app.config.prefix_key = "ctrl+]".into();
+            let from = border(&app, ui::Border::Projects);
+            press(&mut app, from);
+            mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), Position::new(AREA.width - 1, from.y + 4));
+
+            send_key(&mut app, KeyCode::Char(']'), KeyModifiers::CONTROL);
+
+            assert!(matches!(app.overlay, Some(Overlay::Keys(None))));
+            assert_eq!((app.resizing, app.pointer(AREA)), (None, pointer::Shape::Default));
+        }
+
+        #[test]
+        fn an_overlay_brings_back_the_default_pointer() {
+            let (mut app, _rx) = app();
+            let at = border(&app, ui::Border::Projects);
+            hover(&mut app, at);
+
+            app.overlay = Some(Overlay::Search(Search::default()));
+
+            assert_eq!(app.pointer(AREA), pointer::Shape::Default);
         }
 
         #[test]
@@ -14567,6 +14762,18 @@ rm -f "$1/sessions/$$.json"
             assert_eq!((app.row_drag.is_none(), app.panel_shown()), (true, true));
             esc(&mut app);
             assert!(!app.panel_shown());
+        }
+
+        #[test]
+        fn a_drag_of_the_panel_border_takes_esc_first_and_puts_the_pointer_back() {
+            let (mut app, _rx, _repo) = with_cat();
+            open(&mut app, Side::Todo);
+            let r = app.layout(AREA).border(ui::Border::Changes);
+            press(&mut app, Position::new(r.x, r.y + 1));
+            mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), Position::new(AREA.width - 1, r.y + 1));
+            assert_eq!(app.pointer(AREA), pointer::Shape::Columns);
+            esc(&mut app);
+            assert_eq!((app.resizing, app.panel_shown(), app.pointer(AREA)), (None, true, pointer::Shape::Default));
         }
 
         #[test]
