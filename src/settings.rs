@@ -442,11 +442,7 @@ impl Settings {
                 |c| &mut c.remote,
                 ["remote access is on: click Remote to connect a phone", "remote access is off"],
             ),
-            Row::Browsers => {
-                self.notice = Some("paired browsers forgotten: each one needs a new code".into());
-                self.browsers = 0;
-                Action::ForgetBrowsers
-            }
+            Row::Browsers => Action::ForgetBrowsers,
             Row::Resume => self.flip(
                 |c| &mut c.resume_agents,
                 ["conversations resume after a restart", "agents no longer resume after a restart"],
@@ -1631,13 +1627,12 @@ mod tests {
         }
 
         #[test]
-        fn enter_on_paired_browsers_forgets_them() {
+        fn enter_on_paired_browsers_asks_to_forget_them_and_keeps_the_row_until_they_are() {
             let mut s = settings();
             s.browsers = 1;
             go_to(&mut s, &Row::Browsers);
             assert_eq!(press(&mut s, KeyCode::Enter), Action::ForgetBrowsers);
-            s.open_page(Page::Ui);
-            assert!(!s.rows().contains(&Row::Browsers));
+            assert!(s.rows().contains(&Row::Browsers) && s.notice.is_none());
         }
     }
 

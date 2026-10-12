@@ -11,6 +11,7 @@ use crate::web::{self, Web};
 
 const CONNECTED: &str = "a browser connected";
 const STARTING: &str = "starting…";
+const FORGOTTEN: &str = "paired browsers forgotten: each one needs a new code";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Phase {
@@ -181,10 +182,10 @@ impl App {
         self.overlay = Some(Overlay::Remote);
     }
 
-    pub(super) fn forget_browsers(&mut self) -> Result<(), String> {
+    pub(super) fn forget_browsers(&mut self) -> Result<&'static str, String> {
         self.remote.web.forget().map_err(|e| format!("failed to forget the paired browsers: {e}"))?;
         self.refresh_remote_note();
-        Ok(())
+        Ok(FORGOTTEN)
     }
 
     pub(super) fn refresh_remote_note(&mut self) {

@@ -159,8 +159,13 @@
         term.write(new Uint8Array(event.data));
         return;
       }
-      var message = JSON.parse(event.data);
-      if (message.type === 'end') {
+      var message;
+      try {
+        message = JSON.parse(event.data);
+      } catch (error) {
+        return;
+      }
+      if (message && message.type === 'end') {
         ended(message);
       }
     };

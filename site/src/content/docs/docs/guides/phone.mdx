@@ -7,7 +7,7 @@ import { Aside } from '@astrojs/starlight/components';
 
 Your agents keep working after you leave the computer. To answer one that needs you, or to see which ones are still working, open the same cornercase in your phone's browser: no app to configure, no SSH, just a QR code to scan once.
 
-The connection goes through [Tailscale](https://tailscale.com), a private network between your own devices. Nothing is published on the internet: only devices logged in to your Tailscale account can reach your computer, and only the browsers you paired can open cornercase.
+The connection goes through [Tailscale](https://tailscale.com), a private network between your own devices. Nothing is published on the internet: only devices in your tailnet can reach your computer, and cornercase only lets in your own Tailscale account, from a browser you paired. If you share your tailnet with other people, their devices can reach the address, but cornercase refuses them.
 
 ```text
  your phone's browser ── Tailscale ──▶ your computer: tailscale serve ──▶ cornercase server ── shells, agents

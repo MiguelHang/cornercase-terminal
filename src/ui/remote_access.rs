@@ -11,7 +11,7 @@ use crate::markdown;
 pub const TITLE: &str = "Remote";
 pub const LABEL: &str = "Remote";
 const LIT: &str = " ●";
-const QUIET: usize = 2;
+const QUIET: usize = 4;
 const DARK: Color = Color::Indexed(16);
 const LIGHT: Color = Color::Indexed(231);
 const TOO_SMALL: &str = "make this window larger to show the code";
@@ -82,7 +82,8 @@ fn body(remote: &RemoteAccess, width: u16, room: u16, muted: Color) -> Vec<Line<
     if let Some(url) = &remote.url {
         let code = &remote.code;
         let side = code.first().map_or(0, |l| l.spans.len());
-        let words = remote.lines.len() * 2 + markdown::wrap_text(url, plain, usize::from(width)).len() + 2;
+        let rows = |s: &str| markdown::wrap_text(s, plain, usize::from(width)).len();
+        let words = remote.lines.iter().map(|line| rows(line)).sum::<usize>() + rows(url) + 2;
         if side <= usize::from(width) && code.len() + words <= usize::from(room) {
             lines.extend(code.iter().cloned().map(Line::centered));
         } else {

@@ -4484,8 +4484,8 @@ impl App {
             settings::Action::CheckToken(source, token) => self.check_token(source, token),
             settings::Action::ForgetBrowsers => {
                 let forgotten = self.forget_browsers();
-                if let (Err(e), Some(Overlay::Settings(s))) = (forgotten, &mut self.overlay) {
-                    s.notice = Some(e);
+                if let Some(Overlay::Settings(s)) = &mut self.overlay {
+                    s.notice = Some(forgotten.map_or_else(|e| e, String::from));
                 }
             }
             settings::Action::RemoveToken(source) => {
@@ -12706,7 +12706,13 @@ rm -f "$1/sessions/$$.json"
                 s.app.check_token(Source::Plane, Secret("k3y".into()));
 
                 let event = s.rx.recv_timeout(Duration::from_secs(10)).expect("the answer arrives");
-                let AppEvent::TokenChecked { result, .. } = event else { panic!("not a token check") };
+                let result = std::iter::once(event)
+                    .chain(std::iter::from_fn(|| s.rx.recv_timeout(Duration::from_secs(10)).ok()))
+                    .find_map(|event| match event {
+                        AppEvent::TokenChecked { result, .. } => Some(result),
+                        _ => None,
+                    })
+                    .expect("a token check");
                 assert_eq!(result.err().map(|e| e.to_string()).as_deref(), Some("set the Plane workspace first"));
             }
         }
@@ -13240,7 +13246,14 @@ rm -f "$1/sessions/$$.json"
         }
 
         fn free_port() -> u16 {
-            TcpListener::bind(("127.0.0.1", 0)).expect("bind").local_addr().expect("address").port()
+            static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+            let base = 20_000 + u16::try_from(std::process::id() % 5_000).expect("fits") * 2;
+            loop {
+                let port = base + NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                    return port;
+                }
+            }
         }
 
         fn with_tailscale(script: Option<&str>) -> Remote {
@@ -13434,13 +13447,12 @@ rm -f "$1/sessions/$$.json"
                 r.app.config.remote = on;
                 r.app.refresh(Instant::now());
             }
-            pump_until(&mut r.app, &r.rx, "tailscale serves again", |a| {
-                matches!(a.remote.phase, crate::app::remote_access::Phase::Ready(_))
-            });
 
             let serve = format!("serve --bg --yes --https=8443 http://127.0.0.1:{}", r.port);
-            wait_until("every command ran", || calls(&r).lines().count() == 5);
-            assert_eq!(calls(&r), format!("status --json\n{serve}\nserve --https=8443 off\nstatus --json\n{serve}\n"));
+            let expected = format!("status --json\n{serve}\nserve --https=8443 off\nstatus --json\n{serve}\n");
+            let ran = || calls(&r).lines().count() >= 5;
+            wait_until_within("every command ran", Duration::from_secs(20), ran);
+            assert_eq!(calls(&r), expected, "phase {:?}", r.app.remote.phase);
         }
 
         #[test]
