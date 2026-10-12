@@ -1,15 +1,16 @@
 ---
 source: src/ui.rs
-assertion_line: 6678
+assertion_line: 6910
 expression: "render_sized(&with(Overlay::Usage(usage)), W, TALL).backend()"
 ---
 "  ⌕ search projects, workspaces, tabs                    │                                          "
 "                                                         │                                          "
 " Projects                      │ Workspaces              │                                          "
 "                               │                         │                                          "
-"▌ cornercase (1)               │                         │                                          "
-"                  ╭─ Usage ──────────────────────────────────────────────────────╮                  "
-"  + New           │ Claude Code · max plan                        updated 2m ago │                  "
+"▌ cornercase (1)  ╭─ Usage ──────────────────────────────────────────────────────╮                  "
+"                  │  Limits   Stats                                              │                  "
+"  + New           │                                                              │                  "
+"                  │ Claude Code · max plan                        updated 2m ago │                  "
 "                  │                                                              │                  "
 "                  │ session (5h)                           7% · resets in 2h 13m │                  "
 "                  │ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ │                  "
@@ -32,7 +33,6 @@ expression: "render_sized(&with(Overlay::Usage(usage)), W, TALL).backend()"
 "                  │                                                              │                  "
 "                  │                                                        done  │                  "
 "                  ╰──────────────────────────────────────────────────────────────╯                  "
-"                               │                         │                                          "
 " ───────────────────────────── │                         │                                          "
 "  Settings                     │                         │                                          "
 "  Usage                        │                         │                                          "

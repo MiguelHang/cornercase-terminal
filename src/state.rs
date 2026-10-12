@@ -1,4 +1,5 @@
-use std::io;
+use std::io::{self, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -235,11 +236,28 @@ pub fn load(path: &Path) -> Option<State> {
 }
 
 pub fn save(path: &Path, value: &impl Serialize) -> io::Result<()> {
+    write(path, value, false)
+}
+
+pub fn write(path: &Path, value: &impl Serialize, private: bool) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
+    let bytes = if private { serde_json::to_vec(value)? } else { serde_json::to_vec_pretty(value)? };
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(if private { 0o600 } else { 0o666 })
+        .open(&tmp)?;
+    if private {
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(&bytes)?;
+    if private {
+        file.sync_all()?;
+    }
     std::fs::rename(tmp, path)
 }
 

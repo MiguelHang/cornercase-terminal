@@ -1,0 +1,39 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { App } from '../src/lib/demo/app';
+import { inputKey } from '../src/lib/demo/client';
+import { world } from '../src/lib/demo/world';
+import { usageArea } from '../src/lib/demo/layout';
+
+for (const columns of [110, 46]) test(`Usage opens on Stats and keeps its border at ${columns} columns`, () => {
+  const app = new App(); app.virtual = true; app.resize(columns, 38); world(app, { scripted: true });
+  app.openUsage(); const { grid } = app.render();
+  assert.equal(app.usage.page, 1); assert.equal(app.usage.loading, false);
+  assert.ok(app.textAt('agents started')); assert.ok(app.textAt('tokens from cache')); assert.ok(app.textAt('share'));
+  const height = columns === 110 ? 22 : 24;
+  const stats = usageArea(columns, 38, height);
+  const label = app.textAt('agents started'); assert.ok(label);
+  assert.equal(label.x, stats.x + 2);
+  const share = app.textAt('share'); assert.ok(share);
+  const blank = grid.line(share.y - 1);
+  assert.equal(blank.slice(stats.x + 1, stats.x + stats.w - 1).trim(), '');
+  app.usagePage(0); app.render(); assert.equal(app.usage.loading, true);
+  assert.deepEqual(usageArea(columns, 38, height), stats);
+  app.advance(1500); app.render(); assert.ok(app.textAt('resets in'));
+  app.closeOverlay(); app.openUsage(); assert.equal(app.usage.page, 0);
+  app.usagePage(1); app.render(); assert.ok(app.textAt('prompts'));
+  app.destroy();
+});
+
+test('Tab and Shift Tab reach Usage through the client key handler', () => {
+  const app = new App(); app.virtual = true;
+  const event = { key: 'Tab', metaKey: false, isComposing: false, ctrlKey: false, altKey: false, shiftKey: false };
+  assert.equal(inputKey(app, event), undefined);
+  app.openUsage();
+  assert.equal(app.usage.page, 1);
+  assert.equal(inputKey(app, event), true);
+  assert.equal(app.usage.page, 0);
+  assert.equal(inputKey(app, { ...event, shiftKey: true }), true);
+  assert.equal(app.usage.page, 1);
+  app.destroy();
+});
